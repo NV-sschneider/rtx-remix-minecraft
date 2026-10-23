@@ -13,6 +13,27 @@ locations given.
 - License: Apache License, Version 2.0 (see [LICENSE](LICENSE))
 - Source: https://github.com/gradle/gradle
 
+### Forge prototype Gradle wrapper
+
+- Files: `forge-1.12.2/gradlew`, `forge-1.12.2/gradlew.bat`,
+  `forge-1.12.2/gradle/wrapper/`
+- Version: Gradle 4.9, obtained from the official Forge 1.12.2-14.23.5.2860 MDK
+- Copyright Gradle Inc. and the original authors
+- License: Apache License, Version 2.0 (see [LICENSE](LICENSE))
+- Source: https://github.com/gradle/gradle
+
+### Forge prototype bridge snapshot
+
+`forge-1.12.2/bridge/` contains a Java 8 adaptation of this project's Java/JNI
+bridge at commit `f2c6fdaa763f45676f1576e63f8e054bf4ef16af`, together with a
+separate OpenGL interop adapter. The copied Java and JNI sources retain their
+NVIDIA copyright and Apache-2.0 notices. The copied
+`forge-1.12.2/bridge/native/include/remix_c.h` retains its NVIDIA copyright and
+MIT license text. See the snapshot's
+[third-party notices](forge-1.12.2/bridge/THIRD_PARTY_NOTICES.md),
+[license](forge-1.12.2/bridge/LICENSE), and [notice](forge-1.12.2/bridge/NOTICE).
+The isolated snapshot does not bundle Minecraft, Forge, Java, or runtime binaries.
+
 ## Redistributed binaries (packaged releases)
 
 Packaged release JARs bundle the NVIDIA RTX Remix runtime (staged under

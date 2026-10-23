@@ -21,6 +21,7 @@ import org.lwjgl.opengl.Display;
 public final class ClientEvents {
     private final Minecraft mc = Minecraft.getMinecraft();
     private final PrototypeRenderer renderer = new PrototypeRenderer(mc);
+    private final SmokeController smoke = new SmokeController(mc, this);
     private final KeyBinding toggle = new KeyBinding("key.rlcraftremix.toggle", Keyboard.KEY_F8, "key.categories.rlcraftremix");
     private boolean enabled;
     private boolean resetRequested;
@@ -43,6 +44,7 @@ public final class ClientEvents {
             catch (RuntimeException | LinkageError ex) { RemixForgeMod.LOG.error("Error releasing Remix renderer", ex); }
             resetRequested = false;
         }
+        smoke.tick();
     }
 
     @SubscribeEvent
@@ -77,6 +79,9 @@ public final class ClientEvents {
 
     void reload() { textureReloadRequested = true; }
 
+    long renderedFrames() { return renderer.frameCount(); }
+    boolean isEnabled() { return enabled; }
+    String failureMessage() { return failure; }
 
     String status() {
         return "requested=" + enabled + "; " + renderer.status() + (failure == null ? "" : "; last error=" + failure);
