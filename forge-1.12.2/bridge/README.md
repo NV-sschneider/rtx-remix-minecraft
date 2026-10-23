@@ -77,7 +77,7 @@ the process command line. This preserves upstream's protection of those copies.
 
 ## OpenGL interoperability for LWJGL 2
 
-`dev.rlcraft.remix.interop.LegacyGlInterop` supplies a separate, game-independent
+`com.nvidia.rtxremix.forge.interop.LegacyGlInterop` supplies a separate, game-independent
 native adapter for OpenGL external memory and timeline semaphores missing from
 LWJGL 2's Java bindings. It obtains entry points with `wglGetProcAddress`; the
 original `com.nvidia.rtxremix` JNI ABI remains unchanged.
