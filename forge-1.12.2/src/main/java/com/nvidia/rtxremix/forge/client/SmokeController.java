@@ -35,7 +35,9 @@ import org.lwjgl.opengl.GL11;
  * Opt-in, in-process smoke fixture for a normally authenticated Minecraft launch.
  * It neither starts a launcher nor changes account/session authentication.
  * Enable with -Drlcraftremix.smoke=true; shutdown additionally requires
- * -Drlcraftremix.smoke.exit=true. The unique fixture save and screenshots remain
+ * -Drlcraftremix.smoke.exit=true. Add -Drlcraftremix.smoke.entities=true for
+ * a stationary pig and a cow making a bounded round trip before each capture.
+ * The unique fixture save and screenshots remain
  * on disk for inspection. Completion checks frame capture, nonblank fixture output,
  * and renderer lifecycle. Visual correctness still requires image inspection.
  */
@@ -46,6 +48,7 @@ final class SmokeController {
     private static final int SETTLE_TICKS = 40;
     private static final int VANILLA_TICKS = 60;
     private static final int UNLOAD_TICKS = 20;
+    private static final int ENTITY_SETTLE_TICKS = 10;
     private static final long STARTUP_TIMEOUT = TimeUnit.SECONDS.toNanos(180);
     private static final long NATIVE_TIMEOUT = TimeUnit.SECONDS.toNanos(300);
     private static final long SETTLE_TIMEOUT = TimeUnit.SECONDS.toNanos(90);
@@ -59,6 +62,7 @@ final class SmokeController {
     private final Minecraft mc;
     private final ClientEvents events;
     private final boolean exitAfter;
+    private final boolean includeEntities;
     private final String id;
     private State state;
     private long stateSince;
@@ -71,6 +75,16 @@ final class SmokeController {
     private String remixScreenshot;
     private String vanillaScreenshot;
     private Future<Pose> setup;
+    private Future<Boolean> entityStep;
+    private boolean entityMotionStarted;
+    private boolean entityMotionComplete;
+    private boolean entityReferenceHeld;
+    private boolean entityCaptureValidated;
+    private long cowTransformBaseline;
+    private long cowMotionTransformUpdates;
+    private double lowestCowX;
+    private double highestCowX;
+    private int entitySettleTicks;
     private Pose pose;
     private boolean settingsSaved;
     private boolean previousPauseOnLostFocus;
@@ -85,13 +99,14 @@ final class SmokeController {
         this.events = events;
         boolean requested = Boolean.getBoolean("rlcraftremix.smoke");
         this.exitAfter = requested && Boolean.getBoolean("rlcraftremix.smoke.exit");
+        this.includeEntities = requested && Boolean.getBoolean("rlcraftremix.smoke.entities");
         this.id = requested
                 ? DateTimeFormatter.ofPattern("uuuuMMdd-HHmmss").withZone(ZoneOffset.UTC).format(Instant.now())
                         + "-" + UUID.randomUUID().toString().substring(0, 8)
                 : "disabled";
         this.state = requested ? State.WAIT_MENU : State.INACTIVE;
         this.stateSince = System.nanoTime();
-        if (requested) log("START", "exit=" + exitAfter + " seed=" + SEED
+        if (requested) log("START", "exit=" + exitAfter + " seed=" + SEED + " entities=" + includeEntities
                 + " validation=capture_and_lifecycle pixelValidation=nonblank_fixture");
     }
 
@@ -154,12 +169,14 @@ final class SmokeController {
                         lastFrames = frameBaseline;
                         events.setEnabled(true);
                         transition(State.REMIX);
+                        startEntityMotion();
                         log("REMIX_ENABLED", "targetFrames=" + REQUIRED_NATIVE_FRAMES);
                     }
                     break;
                 case REMIX:
                     if (!fixtureReady()) break;
                     holdPose();
+                    advanceEntityMotion();
                     if (events.failureMessage() != null) {
                         fail("renderer_failure");
                         break;
@@ -177,7 +194,8 @@ final class SmokeController {
                         break;
                     }
                     lastFrames = frames;
-                    if (frames - frameBaseline >= REQUIRED_NATIVE_FRAMES && fixtureImageReady(frames)) {
+                    if (frames - frameBaseline >= REQUIRED_NATIVE_FRAMES
+                            && entityFixtureReady() && fixtureImageReady(frames)) {
                         capturedFrames = frames - frameBaseline;
                         remixScreenshot = capture("remix");
                         log("REMIX_CAPTURED", "frames=" + capturedFrames + " file=" + remixScreenshot);
@@ -194,12 +212,17 @@ final class SmokeController {
                     }
                     // Leave several complete vanilla frames after terrain release at this pose.
                     if (canRender() && ++ticks >= VANILLA_TICKS) {
+                        if (includeEntities && events.capturedEntityParts() != 0) {
+                            fail("entity_parts_present_after_disable");
+                            break;
+                        }
                         vanillaScreenshot = capture("vanilla");
                         log("VANILLA_CAPTURED", "file=" + vanillaScreenshot);
                         frameBaseline = events.renderedFrames();
                         lastFrames = frameBaseline;
                         events.setEnabled(true);
                         transition(State.REENABLE);
+                        startEntityMotion();
                         log("REENABLE_STARTED", "baseline=" + frameBaseline
                                 + " targetFrames=" + REENABLE_NATIVE_FRAMES);
                     }
@@ -215,6 +238,7 @@ final class SmokeController {
                     }
                     if (!fixtureReady()) break;
                     holdPose();
+                    advanceEntityMotion();
                     if (!canRender()) break;
                     long reenableFrames = events.renderedFrames();
                     if (reenableFrames < lastFrames) {
@@ -223,7 +247,7 @@ final class SmokeController {
                     }
                     lastFrames = reenableFrames;
                     if (reenableFrames - frameBaseline >= REENABLE_NATIVE_FRAMES
-                            && fixtureImageReady(reenableFrames)) {
+                            && entityFixtureReady() && fixtureImageReady(reenableFrames)) {
                         reenabledFrames = reenableFrames - frameBaseline;
                         log("REENABLE_PASS", "frames=" + reenabledFrames
                                 + " baseline=" + frameBaseline + " totalFrames=" + reenableFrames);
@@ -253,10 +277,16 @@ final class SmokeController {
                         break;
                     }
                     if (isMainMenuReady() && ++ticks >= UNLOAD_TICKS) {
+                        if (includeEntities && events.capturedEntityParts() != 0) {
+                            fail("entity_parts_present_after_unload");
+                            break;
+                        }
+                        if (includeEntities) log("ENTITY_RELEASE_PASS", "liveParts=0");
                         log("WORLD_UNLOAD_PASS", "menuTicks=" + ticks + " rendererEnabled=true");
                         finish(true, "frames=" + capturedFrames + " world=" + saveName
                                 + " remix=" + remixScreenshot + " vanilla=" + vanillaScreenshot
                                 + " reenableFrames=" + reenabledFrames + " unloadTicks=" + ticks
+                                + " entities=" + includeEntities
                                 + " validation=capture_and_lifecycle pixelValidation=nonblank_fixture");
                     }
                     break;
@@ -353,7 +383,9 @@ final class SmokeController {
             world.setBlockState(new BlockPos(cx - 7, floorY + y, cz + 8), Blocks.STONE.getDefaultState(), 3);
             world.setBlockState(new BlockPos(cx + 7, floorY + y, cz + 8), Blocks.QUARTZ_BLOCK.getDefaultState(), 3);
         }
-        Pose result = new Pose(cx + 0.5, floorY + 4.0, cz + 17.5, 180f, 16f);
+        EntitySmokeFixture creatures = includeEntities
+                ? new EntitySmokeFixture(saveName, world, cx, floorY, cz) : null;
+        Pose result = new Pose(cx + 0.5, floorY + 4.0, cz + 17.5, 180f, 16f, creatures);
         world.setSpawnPoint(new BlockPos(cx, floorY + 1, cz + 12));
         player.setGameType(GameType.CREATIVE);
         player.capabilities.allowFlying = true;
@@ -362,6 +394,101 @@ final class SmokeController {
         player.sendPlayerAbilities();
         player.connection.setPlayerLocation(result.x, result.y, result.z, result.yaw, result.pitch);
         return result;
+    }
+
+    private void startEntityMotion() {
+        entityMotionStarted = false;
+        entityMotionComplete = !includeEntities;
+        entityCaptureValidated = false;
+        cowTransformBaseline = 0;
+        cowMotionTransformUpdates = 0;
+        lowestCowX = Double.POSITIVE_INFINITY;
+        highestCowX = Double.NEGATIVE_INFINITY;
+        entitySettleTicks = 0;
+        if (!includeEntities) return;
+        log("ENTITY_CAPTURE_WAIT", "phase=" + state.name() + " creatures=2");
+    }
+
+    private void advanceEntityMotion() throws Exception {
+        if (!includeEntities) return;
+        if (!entityMotionStarted) {
+            if (!events.entityCaptured(pose.creatures.cowUuid())
+                    || !events.entityCaptured(pose.creatures.pigUuid())) return;
+            // The first retained frame is the baseline, so initial mesh publication
+            // cannot count as evidence that moving instances were updated.
+            cowTransformBaseline = events.entityTransformUpdates(pose.creatures.cowUuid());
+            entityMotionStarted = true;
+            entityReferenceHeld = false;
+            observeCowMotion();
+            scheduleEntityStep(true);
+            log("ENTITY_MOTION_STARTED", "phase=" + state.name()
+                    + " cowCaptured=true pigCaptured=true transformBaseline=" + cowTransformBaseline);
+            return;
+        }
+        observeCowMotion();
+        if (entityMotionComplete || !entityStep.isDone()) return;
+        entityMotionComplete = entityStep.get();
+        entityStep = null;
+        if (entityMotionComplete) {
+            // Freeze the motion evidence before the explicit screenshot pose can
+            // cause additional instance updates of its own.
+            cowMotionTransformUpdates = events.entityTransformUpdates(pose.creatures.cowUuid())
+                    - cowTransformBaseline;
+            log("ENTITY_MOTION_COMPLETE", "phase=" + state.name() + " cowDistance=4.0 creatures=2");
+        } else {
+            scheduleEntityStep(false);
+        }
+    }
+
+    private void observeCowMotion() {
+        if (!events.entityCaptured(pose.creatures.cowUuid())) return;
+        double x = pose.creatures.clientCowX(mc.world);
+        if (Double.isNaN(x)) return;
+        lowestCowX = Math.min(lowestCowX, x);
+        highestCowX = Math.max(highestCowX, x);
+    }
+
+    private void scheduleEntityStep(boolean restart) {
+        final IntegratedServer server = mc.getIntegratedServer();
+        entityStep = server.callFromMainThread(() -> pose.creatures.advance(server, restart));
+    }
+
+    private boolean entityFixtureReady() {
+        if (!includeEntities) return true;
+        if (!entityMotionComplete || !entityReferenceHeld || !pose.creatures.isAtReferencePose(mc.world)) {
+            entitySettleTicks = 0;
+            return false;
+        }
+        if (++entitySettleTicks < ENTITY_SETTLE_TICKS) return false;
+        if (entityCaptureValidated) return true;
+        if (!events.entityCaptured(pose.creatures.cowUuid())
+                || !events.entityCaptured(pose.creatures.pigUuid())) {
+            fail("fixture_entity_not_captured");
+            return false;
+        }
+        if (cowMotionTransformUpdates <= 0) {
+            fail("entity_transform_updates_missing");
+            return false;
+        }
+        // Seeing at least a full block of the two-block track distinguishes moving
+        // capture from the idle model's small head and limb interpolation changes.
+        if (highestCowX - lowestCowX < 1.0) {
+            fail("entity_motion_not_observed");
+            return false;
+        }
+        entityCaptureValidated = true;
+        log("ENTITY_CAPTURE_PASS", "phase=" + state.name() + " " + entityCaptureSummary());
+        return true;
+    }
+
+    private String entityCaptureSummary() {
+        return "cowCaptured=" + events.entityCaptured(pose.creatures.cowUuid())
+                + " pigCaptured=" + events.entityCaptured(pose.creatures.pigUuid())
+                + " cowTransformUpdates="
+                + (events.entityTransformUpdates(pose.creatures.cowUuid()) - cowTransformBaseline)
+                + " cowMotionTransformUpdates=" + cowMotionTransformUpdates
+                + " observedCowSpan=" + (highestCowX - lowestCowX)
+                + " liveParts=" + events.capturedEntityParts();
     }
 
     private void holdPose() {
@@ -374,6 +501,11 @@ final class SmokeController {
         mc.player.prevRotationPitch = pose.pitch;
         mc.player.motionX = mc.player.motionY = mc.player.motionZ = 0;
         mc.player.capabilities.isFlying = true;
+        if (includeEntities && (entityReferenceHeld
+                || entityMotionComplete && pose.creatures.isAtReferencePosition(mc.world))) {
+            pose.creatures.holdReferencePose(mc.getIntegratedServer(), mc.world);
+            entityReferenceHeld = true;
+        }
     }
 
     private boolean canRender() {
@@ -436,11 +568,13 @@ final class SmokeController {
         if (state == State.DONE || state == State.EXIT || state == State.INACTIVE) return;
         finish(false, "reason=" + reason + " phase=" + state.name()
                 + " frames=" + Math.max(0L, lastFrames - frameBaseline)
+                + (includeEntities && pose != null ? " " + entityCaptureSummary() : "")
                 + (imageReadiness == null ? "" : " " + imageReadiness.describe()));
     }
 
     private void finish(boolean success, String fields) {
         if (setup != null && !setup.isDone()) setup.cancel(false);
+        if (entityStep != null && !entityStep.isDone()) entityStep.cancel(false);
         events.setEnabled(false);
         if (settingsSaved) {
             mc.gameSettings.pauseOnLostFocus = previousPauseOnLostFocus;
@@ -458,8 +592,10 @@ final class SmokeController {
     private static final class Pose {
         final double x, y, z;
         final float yaw, pitch;
-        Pose(double x, double y, double z, float yaw, float pitch) {
+        final EntitySmokeFixture creatures;
+        Pose(double x, double y, double z, float yaw, float pitch, EntitySmokeFixture creatures) {
             this.x = x; this.y = y; this.z = z; this.yaw = yaw; this.pitch = pitch;
+            this.creatures = creatures;
         }
     }
 }
