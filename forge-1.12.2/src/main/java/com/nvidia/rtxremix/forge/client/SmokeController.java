@@ -44,6 +44,7 @@ import org.lwjgl.opengl.GL11;
  * Add -Drlcraftremix.smoke.terrain=true for terrain travel, mutation, and radius checks;
  * -Drlcraftremix.smoke.terrainNatural=true selects a generated landscape for those checks.
  * -Drlcraftremix.smoke.terrainRadius=N selects 4 through 32 chunks (default 4).
+ * Add -Drlcraftremix.smoke.materials=true for fluids, animated textures and block lights.
  * The unique fixture save and screenshots remain
  * on disk for inspection. Completion checks frame capture, nonblank fixture output,
  * and renderer lifecycle. Visual correctness still requires image inspection.
@@ -64,7 +65,7 @@ final class SmokeController {
 
     private enum State {
         INACTIVE, WAIT_MENU, WAIT_WORLD, BUILD_SCENE, SETTLE, REMIX, VANILLA,
-        REENABLE, TERRAIN, SKY_APPLY, SKY_CAPTURE, RESTORE_RULES, DISCONNECT, UNLOAD, EXIT, DONE
+        REENABLE, MATERIALS, GLASS, OBJECTS, EFFECTS, TERRAIN, SKY_APPLY, SKY_CAPTURE, RESTORE_RULES, DISCONNECT, UNLOAD, EXIT, DONE
     }
 
     private enum SkyPhase {
@@ -81,6 +82,9 @@ final class SmokeController {
     private final boolean includeSky;
     private final boolean includeTerrain;
     private final boolean naturalTerrain;
+    private final boolean includeMaterials;
+    private final boolean includeObjects;
+    private final boolean includeEffects;
     private final String id;
     private State state;
     private long stateSince;
@@ -122,6 +126,14 @@ final class SmokeController {
     private int previousThirdPerson;
     private int previousRenderDistance;
     private FixtureTerrain terrainFixture;
+    private FixtureMaterials materialFixture;
+    private volatile FixtureMaterials.Layout materialLayout;
+    private FixtureGlass glassFixture;
+    private volatile FixtureGlass.Layout glassLayout;
+    private FixtureObjects objectFixture;
+    private volatile FixtureObjects.Layout objectLayout;
+    private FixtureEffects effectFixture;
+    private volatile FixtureEffects.Layout effectLayout;
     private GuiScreen initializedMainMenu;
     private long lastImageProbeNanos;
     private long lastImageProbeFrame;
@@ -139,6 +151,9 @@ final class SmokeController {
         this.includeSky = requested && Boolean.getBoolean("rlcraftremix.smoke.sky");
         this.includeTerrain = requested && Boolean.getBoolean("rlcraftremix.smoke.terrain");
         this.naturalTerrain = includeTerrain && Boolean.getBoolean("rlcraftremix.smoke.terrainNatural");
+        this.includeMaterials = requested && Boolean.getBoolean("rlcraftremix.smoke.materials");
+        this.includeObjects = requested && Boolean.getBoolean("rlcraftremix.smoke.objects");
+        this.includeEffects = requested && Boolean.getBoolean("rlcraftremix.smoke.effects");
         this.id = requested
                 ? DateTimeFormatter.ofPattern("uuuuMMdd-HHmmss").withZone(ZoneOffset.UTC).format(Instant.now())
                         + "-" + UUID.randomUUID().toString().substring(0, 8)
@@ -147,6 +162,7 @@ final class SmokeController {
         this.stateSince = System.nanoTime();
         if (requested) log("START", "exit=" + exitAfter + " seed=" + SEED + " entities=" + includeEntities
                 + " sky=" + includeSky + " terrain=" + includeTerrain + " naturalTerrain=" + naturalTerrain
+                + " materials=" + includeMaterials + " objects=" + includeObjects + " effects=" + includeEffects
                 + " validation=capture_and_lifecycle pixelValidation=nonblank_fixture");
     }
 
@@ -269,6 +285,12 @@ final class SmokeController {
                             break;
                         }
                         if (includeTerrain) log("TERRAIN_DISABLE_PASS", "liveResources=0");
+                        if (includeMaterials && !materialsReleased()) {
+                            fail("material_resources_present_after_disable");
+                            break;
+                        }
+                        if (includeMaterials) log("MATERIAL_DISABLE_PASS", "terrainResources=0 lightResources=0 fluidVertices=0");
+                        if (!objectsReleased()) { fail("object_resources_present_after_disable"); break; }
                         vanillaScreenshot = capture("vanilla");
                         log("VANILLA_CAPTURED", "file=" + vanillaScreenshot);
                         frameBaseline = events.renderedFrames();
@@ -304,10 +326,29 @@ final class SmokeController {
                         reenabledFrames = reenableFrames - frameBaseline;
                         log("REENABLE_PASS", "frames=" + reenabledFrames
                                 + " baseline=" + frameBaseline + " totalFrames=" + reenableFrames);
-                        if (includeTerrain) beginTerrainFixture();
-                        else if (includeSky) beginSkyPhase(SkyPhase.DAY);
-                        else beginRuleRestoration(true, null);
+                        if (includeMaterials) beginMaterialFixture();
+                        else beginAfterMaterials();
                     }
+                    break;
+                case MATERIALS:
+                    if (!fixtureReady()) break;
+                    lastFrames = events.renderedFrames();
+                    if (materialFixture.tick()) beginAfterMaterials();
+                    break;
+                case GLASS:
+                    if (!fixtureReady()) break;
+                    lastFrames = events.renderedFrames();
+                    if (glassFixture.tick()) beginAfterGlass();
+                    break;
+                case OBJECTS:
+                    if (!fixtureReady()) break;
+                    lastFrames = events.renderedFrames();
+                    if (objectFixture.tick()) beginAfterObjects();
+                    break;
+                case EFFECTS:
+                    if (!fixtureReady()) break;
+                    lastFrames = events.renderedFrames();
+                    if (effectFixture.tick()) beginAfterEffects();
                     break;
                 case TERRAIN:
                     if (!fixtureReady()) break;
@@ -384,12 +425,21 @@ final class SmokeController {
                             break;
                         }
                         if (includeTerrain) log("TERRAIN_RELEASE_PASS", "liveResources=0");
+                        if (includeMaterials && !materialsReleased()) {
+                            fail("material_resources_present_after_unload");
+                            break;
+                        }
+                        if (includeMaterials) log("MATERIAL_RELEASE_PASS", "terrainResources=0 lightResources=0 fluidVertices=0");
+                        if (!objectsReleased()) { fail("object_resources_present_after_unload"); break; }
+                        if (includeObjects) log("OBJECT_RELEASE_PASS", "tileParts=0 itemResources=0 effectResources=0");
+                        if (includeEffects) log("EFFECT_RELEASE_PASS", "liveResources=0");
                         log("WORLD_UNLOAD_PASS", "menuTicks=" + ticks + " rendererEnabled=true");
                         finish(true, "frames=" + capturedFrames + " world=" + saveName
                                 + " remix=" + remixScreenshot + " vanilla=" + vanillaScreenshot
                                 + " reenableFrames=" + reenabledFrames + " unloadTicks=" + ticks
                                 + " entities=" + includeEntities + " sky=" + includeSky
                                 + " terrain=" + includeTerrain + " naturalTerrain=" + naturalTerrain
+                                + " materials=" + includeMaterials + " objects=" + includeObjects + " effects=" + includeEffects
                                 + " validation=capture_and_lifecycle pixelValidation=nonblank_fixture");
                     }
                     break;
@@ -514,6 +564,10 @@ final class SmokeController {
         }
         EntitySmokeFixture creatures = includeEntities
                 ? new EntitySmokeFixture(saveName, world, cx, floorY, cz) : null;
+        if (includeMaterials) materialLayout = FixtureMaterials.build(world, cx + 32, floorY, cz);
+        if (includeMaterials) glassLayout = FixtureGlass.build(world, cx + 64, floorY, cz);
+        if (includeObjects) objectLayout = FixtureObjects.build(world, cx - 32, floorY, cz);
+        if (includeEffects) effectLayout = FixtureEffects.build(world, cx, floorY, cz + 40);
         Pose result = new Pose(cx + 0.5, floorY + 4.0, cz + 17.5, 180f, 16f, creatures);
         world.setSpawnPoint(new BlockPos(cx, floorY + 1, cz + 12));
         player.setGameType(GameType.CREATIVE);
@@ -526,6 +580,10 @@ final class SmokeController {
     }
 
     private void beginRuleRestoration(boolean success, String failureFields) {
+        // Closing an owned pause screen lets the integrated server drain cleanup work.
+        if (objectFixture != null) objectFixture.close();
+        if (glassFixture != null) glassFixture.close();
+        if (effectFixture != null) effectFixture.close();
         restoreForSuccess = success;
         pendingFailure = failureFields;
         transition(State.RESTORE_RULES);
@@ -568,6 +626,79 @@ final class SmokeController {
                     @Override public void log(String event, String fields) { SmokeController.this.log(event, fields); }
                 });
         transition(State.TERRAIN);
+    }
+
+    private void beginMaterialFixture() {
+        materialFixture = new FixtureMaterials(mc, events, fixtureServer, fixtureServerWorld,
+                saveName, materialLayout, pose.x, pose.y, pose.z, pose.yaw, pose.pitch, new FixtureTerrain.Output() {
+                    @Override public BufferedImage image() { return readScreenshot(); }
+                    @Override public String capture(String name, BufferedImage image) throws Exception {
+                        return SmokeController.this.capture(name, image);
+                    }
+                    @Override public void log(String event, String fields) { SmokeController.this.log(event, fields); }
+                });
+        transition(State.MATERIALS);
+    }
+
+    private void beginAfterMaterials() {
+        if (includeMaterials) {
+            glassFixture = new FixtureGlass(mc, events, fixtureServer, fixtureServerWorld,
+                    saveName, glassLayout, pose.x, pose.y, pose.z, pose.yaw, pose.pitch, new FixtureTerrain.Output() {
+                        @Override public BufferedImage image() { return readScreenshot(); }
+                        @Override public String capture(String name, BufferedImage image) throws Exception {
+                            return SmokeController.this.capture(name, image);
+                        }
+                        @Override public void log(String event, String fields) { SmokeController.this.log(event, fields); }
+                    });
+            transition(State.GLASS);
+        } else beginAfterGlass();
+    }
+
+    private void beginAfterGlass() {
+        if (includeObjects) {
+            objectFixture = new FixtureObjects(mc, events, fixtureServer, fixtureServerWorld,
+                    saveName, objectLayout, pose.x, pose.y, pose.z, pose.yaw, pose.pitch, new FixtureTerrain.Output() {
+                        @Override public BufferedImage image() { return readScreenshot(); }
+                        @Override public String capture(String name, BufferedImage image) throws Exception {
+                            return SmokeController.this.capture(name, image);
+                        }
+                        @Override public void log(String event, String fields) { SmokeController.this.log(event, fields); }
+                    });
+            transition(State.OBJECTS);
+        } else beginAfterObjects();
+    }
+
+    private void beginAfterObjects() {
+        if (includeEffects) {
+            effectFixture = new FixtureEffects(mc, events, fixtureServer, fixtureServerWorld,
+                    saveName, effectLayout, pose.x, pose.y, pose.z, pose.yaw, pose.pitch, new FixtureTerrain.Output() {
+                        @Override public BufferedImage image() { return readScreenshot(); }
+                        @Override public String capture(String name, BufferedImage image) throws Exception {
+                            return SmokeController.this.capture(name, image);
+                        }
+                        @Override public void log(String event, String fields) { SmokeController.this.log(event, fields); }
+                    });
+            transition(State.EFFECTS);
+        } else beginAfterEffects();
+    }
+
+    private void beginAfterEffects() {
+        if (includeTerrain) beginTerrainFixture();
+        else if (includeSky) beginSkyPhase(SkyPhase.DAY);
+        else beginRuleRestoration(true, null);
+    }
+
+    private boolean materialsReleased() {
+        return events.terrainResourceCount() == 0 && events.blockLightResourceCount() == 0
+                && events.cameraMediumResourceCount() == 0 && events.cameraMediumHandle() == 0
+                && events.blockLightCount() == 0 && events.terrainWaterVertexCount() == 0
+                && events.terrainLavaVertexCount() == 0 && events.terrainClearGlassVertexCount() == 0
+                && events.terrainStainedGlassVertexCount() == 0;
+    }
+
+    private boolean objectsReleased() {
+        return events.capturedTileParts() == 0 && events.entityResourceCount() == 0
+                && events.vboCacheBytes() == 0 && events.itemResourceCount() == 0 && events.effectResourceCount() == 0;
     }
 
     private void beginSkyPhase(SkyPhase phase) {
@@ -837,7 +968,9 @@ final class SmokeController {
 
     private long timeoutForState() {
         // Terrain owns a bounded deadline for each independent readiness phase.
-        if (state == State.TERRAIN) return NATIVE_TIMEOUT * 10;
+        if (state == State.TERRAIN || state == State.MATERIALS || state == State.GLASS
+                || state == State.OBJECTS || state == State.EFFECTS)
+            return NATIVE_TIMEOUT * 10;
         if (state == State.REMIX || state == State.REENABLE || state == State.SKY_CAPTURE) return NATIVE_TIMEOUT;
         if (state == State.SETTLE || state == State.VANILLA || state == State.RESTORE_RULES || state == State.DISCONNECT
                 || state == State.UNLOAD) return SETTLE_TIMEOUT;
@@ -866,6 +999,9 @@ final class SmokeController {
                 + " frames=" + Math.max(0L, lastFrames - frameBaseline)
                 + (includeEntities && pose != null ? " " + entityCaptureSummary() : "")
                 + (terrainFixture == null ? "" : " " + terrainFixture.status())
+                + (materialFixture == null ? "" : " " + materialFixture.status())
+                + (glassFixture == null ? "" : " " + glassFixture.status())
+                + (effectFixture == null ? "" : " " + effectFixture.status())
                 + (imageReadiness == null ? "" : " " + imageReadiness.describe()));
     }
 
@@ -878,6 +1014,9 @@ final class SmokeController {
     }
 
     private void finishNow(boolean success, String fields, boolean permitExit) {
+        if (objectFixture != null) objectFixture.close();
+        if (glassFixture != null) glassFixture.close();
+        if (effectFixture != null) effectFixture.close();
         events.setEnabled(false);
         if (settingsSaved) {
             mc.gameSettings.pauseOnLostFocus = previousPauseOnLostFocus;
@@ -896,6 +1035,14 @@ final class SmokeController {
             skyStep = null;
             serverShutdown = null;
             terrainFixture = null;
+            materialFixture = null;
+            materialLayout = null;
+            glassFixture = null;
+            glassLayout = null;
+            objectFixture = null;
+            objectLayout = null;
+            effectFixture = null;
+            effectLayout = null;
             clientRules = null;
             serverRules = null;
             clientEnvironment = null;

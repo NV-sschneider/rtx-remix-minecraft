@@ -9,6 +9,12 @@ import com.nvidia.rtxremix.forge.RemixForgeMod;
 import com.nvidia.rtxremix.forge.entity.CapturedEntityPart;
 import com.nvidia.rtxremix.forge.entity.EntityCaptureHooks;
 import com.nvidia.rtxremix.forge.entity.EntityScene;
+import com.nvidia.rtxremix.forge.item.CapturedItem;
+import com.nvidia.rtxremix.forge.item.ItemCaptureHooks;
+import com.nvidia.rtxremix.forge.item.ItemScene;
+import com.nvidia.rtxremix.forge.effect.CapturedEffectBatch;
+import com.nvidia.rtxremix.forge.effect.EffectCaptureHooks;
+import com.nvidia.rtxremix.forge.effect.EffectScene;
 import com.nvidia.rtxremix.forge.interop.LegacyGlInterop;
 import com.nvidia.rtxremix.forge.sky.SkyScene;
 import com.nvidia.rtxremix.forge.terrain.TerrainCapture;
@@ -28,17 +34,22 @@ final class PrototypeRenderer {
     private LegacyGlInterop interop;
     private TerrainCapture terrain;
     private EntityScene entities;
+    private ItemScene items;
+    private EffectScene effects;
     private SkyScene sky;
+    private CameraMedium medium;
     private WorldClient world;
     private long hwnd;
     private long frames;
+    private long textureReloads;
     private boolean windowClosing;
     private boolean initialized;
     private final PresentInfo present = new PresentInfo();
 
     PrototypeRenderer(Minecraft mc) { this.mc = mc; }
 
-    void render(float partialTicks, List<CapturedEntityPart> capturedParts) {
+    void render(float partialTicks, List<CapturedEntityPart> capturedParts,
+            List<CapturedItem> capturedItems, List<CapturedEffectBatch> capturedEffects) {
         if (windowClosing) { return; }
         if (api == null) { initialize(); }
         if (!initialized) { throw new IllegalStateException("Native initialization failed; restart Minecraft before retrying."); }
@@ -50,12 +61,19 @@ final class PrototypeRenderer {
             world = mc.world;
             terrain = new TerrainCapture(api, mc);
             entities = new EntityScene(api);
+            items = new ItemScene(api);
+            effects = new EffectScene(api);
             sky = new SkyScene(api);
+            medium = new CameraMedium(api);
         }
         terrain.update();
         entities.sync(capturedParts);
+        items.sync(capturedItems, terrain.getAtlasTexture());
+        effects.sync(capturedEffects, terrain.getAtlasTexture());
         CameraInfo captured = camera.capture(mc, partialTicks);
         api.setupCamera(captured);
+        medium.update(world, captured.parameterizedExt.position);
+        terrain.updateLights(captured.parameterizedExt.position);
         sky.update(world, partialTicks, captured.parameterizedExt.position);
         api.submit(null);
         long done = interop.copyToFramebuffer(api.dxvkGetInteropInfo(), mc.getFramebuffer().framebufferObject,
@@ -91,7 +109,16 @@ final class PrototypeRenderer {
     }
 
     void refreshTextures() {
+        EntityCaptureHooks.clearVboCache();
+        if (medium != null) { medium.close(); medium = null; }
+        // These scenes borrow the terrain atlas. Release their materials first.
+        closeAtlasBorrowers();
         if (terrain != null) { terrain.refreshTextures(); }
+        if (terrain != null) {
+            items = new ItemScene(api);
+            effects = new EffectScene(api);
+            medium = new CameraMedium(api);
+        }
         if (entities != null) {
             entities.close();
             entities = new EntityScene(api);
@@ -100,11 +127,40 @@ final class PrototypeRenderer {
             sky.close();
             sky = new SkyScene(api);
         }
+        textureReloads++;
     }
     long frameCount() { return api == null ? 0 : frames; }
     boolean entityCaptured(UUID id) { return entities != null && entities.contains(id); }
+    int trianglePartCount(UUID id) { return entities == null ? 0 : entities.trianglePartCount(id); }
     long entityTransformUpdates(UUID id) { return entities == null ? 0 : entities.transformUpdates(id); }
     int capturedEntityParts() { return entities == null ? 0 : entities.partCount(); }
+    int entityResourceCount() { return entities == null ? 0 : entities.resourceCount(); }
+    int capturedTileParts() { return entities == null ? 0 : entities.tilePartCount(); }
+    boolean tileCaptured(net.minecraft.util.math.BlockPos pos) { return entities != null && entities.containsTile(pos); }
+    long tileTransformUpdates(net.minecraft.util.math.BlockPos pos) { return entities == null ? 0 : entities.tileTransformUpdates(pos); }
+    boolean itemCaptured(UUID id) { return items != null && items.contains(id); }
+    long itemTransformUpdates(UUID id) { return items == null ? 0 : items.transformUpdates(id); }
+    int capturedItemCount() { return items == null ? 0 : items.count(); }
+    int itemResourceCount() { return items == null ? 0 : items.resourceCount(); }
+    int particleQuads() { return effects == null ? 0 : effects.particleQuads(); }
+    int weatherQuads() { return effects == null ? 0 : effects.weatherQuads(); }
+    int effectResourceCount() { return effects == null ? 0 : effects.resourceCount(); }
+    long effectSkippedQuads() { return effects == null ? 0 : effects.skippedQuadCount(); }
+    int effectBatchCount() { return effects == null ? 0 : effects.batchCount(); }
+    long effectRetainedBytes() { return effects == null ? 0 : effects.retainedBytes(); }
+    long particleGeometryHash() { return effects == null ? 0 : effects.particleGeometryHash(); }
+    long weatherGeometryHash() { return effects == null ? 0 : effects.weatherGeometryHash(); }
+    long particleFrameCount() { return effects == null ? 0 : effects.particleFrameCount(); }
+    long weatherFrameCount() { return effects == null ? 0 : effects.weatherFrameCount(); }
+    long textureReloadCount() { return textureReloads; }
+    boolean cameraMediumUnderwater() { return medium != null && medium.isUnderwater(); }
+    long cameraMediumHandle() { return medium == null ? 0 : medium.selectedMaterial(); }
+    int cameraMediumResourceCount() { return medium == null ? 0 : medium.resourceCount(); }
+    long cameraMediumSelectionChanges() { return medium == null ? 0 : medium.selectionChanges(); }
+    double cameraMediumX() { return medium == null ? 0 : medium.cameraX(); }
+    double cameraMediumY() { return medium == null ? 0 : medium.cameraY(); }
+    double cameraMediumZ() { return medium == null ? 0 : medium.cameraZ(); }
+    long effectTextureSnapshotCount() { return effects == null ? 0 : effects.textureSnapshotCount(); }
     int skyResourceCount() { return sky == null ? 0 : sky.resourceCount(); }
     long skyTextureUpdates() { return sky == null ? 0 : sky.textureUpdates(); }
     int terrainRadius() { return terrain == null ? 0 : terrain.getRadius(); }
@@ -115,6 +171,18 @@ final class PrototypeRenderer {
     int terrainPendingSectionCount() { return terrain == null ? 0 : terrain.getPendingSectionCount(); }
     int terrainRetirementCount() { return terrain == null ? 0 : terrain.getRetirementCount(); }
     int terrainResourceCount() { return terrain == null ? 0 : terrain.getResourceCount(); }
+    long terrainWaterVertexCount() { return terrain == null ? 0 : terrain.getWaterVertexCount(); }
+    long terrainLavaVertexCount() { return terrain == null ? 0 : terrain.getLavaVertexCount(); }
+    long terrainClearGlassVertexCount() { return terrain == null ? 0 : terrain.getClearGlassVertexCount(); }
+    long terrainStainedGlassVertexCount() { return terrain == null ? 0 : terrain.getStainedGlassVertexCount(); }
+    long atlasTextureUpdates() { return terrain == null ? 0 : terrain.getAtlasTextureUpdates(); }
+    long atlasSpriteUpdates(String name) { return terrain == null ? 0 : terrain.getAtlasSpriteUpdates(name); }
+    long atlasSpriteHash(String name) { return terrain == null ? 0 : terrain.getAtlasSpriteHash(name); }
+    int blockLightCount() { return terrain == null ? 0 : terrain.getBlockLightCount(); }
+    int blockLightResourceCount() { return terrain == null ? 0 : terrain.getBlockLightCount(); }
+    boolean blockLightCaptured(net.minecraft.util.math.BlockPos pos) {
+        return terrain != null && terrain.isBlockLightCaptured(pos);
+    }
     long terrainPublishedSectionCount() { return terrain == null ? 0 : terrain.getPublishedSectionCount(); }
     long terrainRetiredSectionCount() { return terrain == null ? 0 : terrain.getRetiredSectionCount(); }
     long terrainDiscardedBuildCount() { return terrain == null ? 0 : terrain.getDiscardedBuildCount(); }
@@ -131,32 +199,61 @@ final class PrototypeRenderer {
                 + "; terrain radius=" + terrainRadius() + "; columns=" + terrainColumnCount()
                 + "; sections=" + terrainSectionCount() + "; pending=" + terrainPendingSectionCount()
                 + "; retiring=" + terrainRetirementCount() + "; terrain bytes=" + terrainCapturedBytes()
+                + "; water vertices=" + terrainWaterVertexCount() + "; lava vertices=" + terrainLavaVertexCount()
+                + "; atlas updates=" + atlasTextureUpdates() + "; block lights=" + blockLightCount()
                 + (terrain != null && terrain.isCapacityLimited() ? "; terrain capacity limit reached" : "")
                 + "; entity parts=" + capturedEntityParts()
+                + "; tile parts=" + capturedTileParts()
+                + "; items=" + capturedItemCount() + "; particle quads=" + particleQuads()
+                + "; weather quads=" + weatherQuads()
+                + "; omitted effect quads=" + effectSkippedQuads()
+                + "; underwater=" + cameraMediumUnderwater()
+                + "; glass vertices=" + terrainClearGlassVertexCount() + "/" + terrainStainedGlassVertexCount()
                 + "; sky=" + (sky == null ? "released" : sky.status());
     }
 
     /** Toggle/world changes retain the runtime and its monotonically increasing GL timeline. */
     void releaseWorld() {
         EntityCaptureHooks.discard();
+        ItemCaptureHooks.discard();
+        EffectCaptureHooks.discard();
         releaseScene();
     }
 
+    private void closeAtlasBorrowers() {
+        Throwable failure = null;
+        try { if (effects != null) { effects.close(); effects = null; } }
+        catch (RuntimeException | LinkageError ex) { failure = ex; }
+        try { if (items != null) { items.close(); items = null; } }
+        catch (RuntimeException | LinkageError ex) { failure = append(failure, ex); }
+        rethrow(failure);
+    }
+
     private void releaseScene() {
-        try {
-            if (terrain != null) { terrain.close(); }
-        } finally {
-            terrain = null;
-            world = null;
-            try {
-                if (entities != null) { entities.close(); }
-            } finally {
-                entities = null;
-                try {
-                    if (sky != null) { sky.close(); }
-                } finally { sky = null; }
-            }
-        }
+        EntityCaptureHooks.clearVboCache();
+        Throwable failure = null;
+        try { if (medium != null) { medium.close(); medium = null; } }
+        catch (RuntimeException | LinkageError ex) { failure = ex; }
+        try { closeAtlasBorrowers(); }
+        catch (RuntimeException | LinkageError ex) { failure = append(failure, ex); }
+        // Keep the borrowed atlas alive if a consumer failed to release it.
+        try { if (items == null && effects == null && terrain != null) { terrain.close(); terrain = null; } }
+        catch (RuntimeException | LinkageError ex) { failure = append(failure, ex); }
+        try { if (entities != null) { entities.close(); entities = null; } }
+        catch (RuntimeException | LinkageError ex) { failure = append(failure, ex); }
+        try { if (sky != null) { sky.close(); sky = null; } }
+        catch (RuntimeException | LinkageError ex) { failure = append(failure, ex); }
+        if (failure == null) world = null;
+        rethrow(failure);
+    }
+
+    private static Throwable append(Throwable first, Throwable next) {
+        if (first == null) return next;
+        first.addSuppressed(next); return first;
+    }
+    private static void rethrow(Throwable failure) {
+        if (failure instanceof RuntimeException) throw (RuntimeException) failure;
+        if (failure instanceof LinkageError) throw (LinkageError) failure;
     }
 
     /** Called immediately before LWJGL destroys the current OpenGL context. */

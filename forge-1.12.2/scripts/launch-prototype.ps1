@@ -5,6 +5,9 @@ param(
     [switch]$SmokeTest,
     [switch]$EntitySmokeTest,
     [switch]$SkySmokeTest,
+    [switch]$MaterialSmokeTest,
+    [switch]$ObjectSmokeTest,
+    [switch]$EffectSmokeTest,
     [switch]$TerrainSmokeTest,
     [switch]$TerrainNaturalSmokeTest,
     [ValidateRange(4, 32)]
@@ -33,6 +36,9 @@ if (-not (Test-Path -LiteralPath $launcher) -or -not (Test-Path -LiteralPath $co
 if ($ExitAfterSmoke -and -not $SmokeTest) { throw '-ExitAfterSmoke requires -SmokeTest.' }
 if ($EntitySmokeTest -and -not $SmokeTest) { throw '-EntitySmokeTest requires -SmokeTest.' }
 if ($SkySmokeTest -and -not $SmokeTest) { throw '-SkySmokeTest requires -SmokeTest.' }
+if ($MaterialSmokeTest -and -not $SmokeTest) { throw '-MaterialSmokeTest requires -SmokeTest.' }
+if ($ObjectSmokeTest -and -not $SmokeTest) { throw '-ObjectSmokeTest requires -SmokeTest.' }
+if ($EffectSmokeTest -and -not $SmokeTest) { throw '-EffectSmokeTest requires -SmokeTest.' }
 if ($TerrainSmokeTest -and -not $SmokeTest) { throw '-TerrainSmokeTest requires -SmokeTest.' }
 if ($TerrainNaturalSmokeTest -and -not $TerrainSmokeTest) { throw '-TerrainNaturalSmokeTest requires -TerrainSmokeTest.' }
 if ($PSBoundParameters.ContainsKey('TerrainSmokeRadius') -and -not $TerrainSmokeTest) {
@@ -94,11 +100,14 @@ for ($i = $generalStart + 1; $i -lt $lines.Length; $i++) {
 $general = @($lines[($generalStart + 1)..($generalEnd - 1)])
 $argsLine = $general | Where-Object { $_ -match '^JvmArgs=' } | Select-Object -First 1
 $jvmArgs = if ($argsLine) { $argsLine.Substring(8).Trim('"') } else { '' }
-$jvmArgs = ($jvmArgs -replace '(?:^|\s)-Drlcraftremix\.smoke(?:\.(?:exit|entities|sky|terrain|terrainNatural|terrainRadius))?=\S+', '').Trim()
+$jvmArgs = ($jvmArgs -replace '(?:^|\s)-Drlcraftremix\.smoke(?:\.(?:exit|entities|sky|materials|objects|effects|terrain|terrainNatural|terrainRadius))?=\S+', '').Trim()
 if ($SmokeTest) { $jvmArgs = "$jvmArgs -Drlcraftremix.smoke=true".Trim() }
 if ($ExitAfterSmoke) { $jvmArgs += ' -Drlcraftremix.smoke.exit=true' }
 if ($EntitySmokeTest) { $jvmArgs += ' -Drlcraftremix.smoke.entities=true' }
 if ($SkySmokeTest) { $jvmArgs += ' -Drlcraftremix.smoke.sky=true' }
+if ($MaterialSmokeTest) { $jvmArgs += ' -Drlcraftremix.smoke.materials=true' }
+if ($ObjectSmokeTest) { $jvmArgs += ' -Drlcraftremix.smoke.objects=true' }
+if ($EffectSmokeTest) { $jvmArgs += ' -Drlcraftremix.smoke.effects=true' }
 if ($TerrainSmokeTest) { $jvmArgs += " -Drlcraftremix.smoke.terrain=true -Drlcraftremix.smoke.terrainRadius=$TerrainSmokeRadius" }
 if ($TerrainNaturalSmokeTest) { $jvmArgs += ' -Drlcraftremix.smoke.terrainNatural=true' }
 $general = @($general | Where-Object { $_ -notmatch '^(JvmArgs|OverrideJavaArgs)=' })

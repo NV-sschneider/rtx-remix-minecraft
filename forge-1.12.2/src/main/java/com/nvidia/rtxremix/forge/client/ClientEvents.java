@@ -6,6 +6,8 @@ package com.nvidia.rtxremix.forge.client;
 
 import com.nvidia.rtxremix.forge.RemixForgeMod;
 import com.nvidia.rtxremix.forge.entity.EntityCaptureHooks;
+import com.nvidia.rtxremix.forge.item.ItemCaptureHooks;
+import com.nvidia.rtxremix.forge.effect.EffectCaptureHooks;
 import java.util.UUID;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.resources.IReloadableResourceManager;
@@ -26,7 +28,7 @@ public final class ClientEvents {
     private final Minecraft mc = Minecraft.getMinecraft();
     private final PrototypeRenderer renderer = new PrototypeRenderer(mc);
     private final SmokeController smoke = new SmokeController(mc, this);
-    private final KeyBinding toggle = new KeyBinding("key.rlcraftremix.toggle", Keyboard.KEY_F8, "key.categories.rlcraftremix");
+    private final KeyBinding toggle = new KeyBinding("key.rlcraftremix.toggle", Keyboard.KEY_NONE, "key.categories.rlcraftremix");
     private boolean enabled;
     private boolean resetRequested;
     private boolean textureReloadRequested;
@@ -63,17 +65,19 @@ public final class ClientEvents {
     @SubscribeEvent
     public void renderTick(TickEvent.RenderTickEvent event) {
         if (event.phase == TickEvent.Phase.START) {
-            EntityCaptureHooks.beginFrame(enabled && mc.world != null && mc.currentScreen == null);
+            EntityCaptureHooks.beginFrame(enabled && mc.world != null);
+            ItemCaptureHooks.beginFrame(enabled && mc.world != null);
+            EffectCaptureHooks.beginFrame(enabled && mc.world != null);
         } else {
-            EntityCaptureHooks.discard();
+            discardCaptures();
         }
     }
 
     @SubscribeEvent
     public void renderWorld(RenderWorldLastEvent event) {
-        if (!enabled || mc.world == null || mc.currentScreen != null || !Display.isVisible()
+        if (!enabled || mc.world == null || !Display.isVisible()
                 || mc.displayWidth <= 0 || mc.displayHeight <= 0) {
-            EntityCaptureHooks.discard();
+            discardCaptures();
             return;
         }
         try {
@@ -81,13 +85,14 @@ public final class ClientEvents {
                 renderer.refreshTextures();
                 textureReloadRequested = false;
             }
-            renderer.render(event.getPartialTicks(), EntityCaptureHooks.finishFrame());
+            renderer.render(event.getPartialTicks(), EntityCaptureHooks.finishFrame(),
+                    ItemCaptureHooks.finishFrame(), EffectCaptureHooks.finishFrame());
         } catch (RuntimeException | LinkageError ex) {
             failure = ex.getClass().getSimpleName() + ": " + ex.getMessage();
             RemixForgeMod.LOG.error("RTX Remix rendering disabled after failure", ex);
             enabled = false;
             resetRequested = true;
-            EntityCaptureHooks.discard();
+            discardCaptures();
             message("Renderer stopped: " + failure + ". See logs/latest.log.");
         }
     }
@@ -100,18 +105,55 @@ public final class ClientEvents {
     void setEnabled(boolean value) {
         enabled = value;
         failure = null;
-        if (!value) { EntityCaptureHooks.discard(); }
+        if (!value) { discardCaptures(); }
         message(value ? "Remix prototype enabled. Use /mrtx off to restore vanilla rendering." : "Vanilla rendering enabled.");
     }
 
     void reload() { textureReloadRequested = true; }
 
+    private static void discardCaptures() {
+        EntityCaptureHooks.discard(); ItemCaptureHooks.discard(); EffectCaptureHooks.discard();
+    }
+
     long renderedFrames() { return renderer.frameCount(); }
     boolean isEnabled() { return enabled; }
     String failureMessage() { return failure; }
     boolean entityCaptured(UUID id) { return renderer.entityCaptured(id); }
+    int trianglePartCount(UUID id) { return renderer.trianglePartCount(id); }
     long entityTransformUpdates(UUID id) { return renderer.entityTransformUpdates(id); }
     int capturedEntityParts() { return renderer.capturedEntityParts(); }
+    int entityResourceCount() { return renderer.entityResourceCount(); }
+    long vboUploadSnapshots() { return EntityCaptureHooks.vboUploadSnapshots(); }
+    long vboReadbackCount() { return EntityCaptureHooks.vboReadbackCount(); }
+    long vboDrawCount() { return EntityCaptureHooks.vboDrawCount(); }
+    long deferredVboDrawCount() { return EntityCaptureHooks.deferredVboDrawCount(); }
+    long vboCacheBytes() { return EntityCaptureHooks.vboCacheBytes(); }
+    int capturedTileParts() { return renderer.capturedTileParts(); }
+    boolean tileCaptured(net.minecraft.util.math.BlockPos pos) { return renderer.tileCaptured(pos); }
+    long tileTransformUpdates(net.minecraft.util.math.BlockPos pos) { return renderer.tileTransformUpdates(pos); }
+    boolean itemCaptured(UUID id) { return renderer.itemCaptured(id); }
+    long itemTransformUpdates(UUID id) { return renderer.itemTransformUpdates(id); }
+    int capturedItemCount() { return renderer.capturedItemCount(); }
+    int itemResourceCount() { return renderer.itemResourceCount(); }
+    int particleQuads() { return renderer.particleQuads(); }
+    int weatherQuads() { return renderer.weatherQuads(); }
+    int effectResourceCount() { return renderer.effectResourceCount(); }
+    long effectSkippedQuads() { return renderer.effectSkippedQuads(); }
+    int effectBatchCount() { return renderer.effectBatchCount(); }
+    long effectRetainedBytes() { return renderer.effectRetainedBytes(); }
+    long particleGeometryHash() { return renderer.particleGeometryHash(); }
+    long weatherGeometryHash() { return renderer.weatherGeometryHash(); }
+    long particleFrameCount() { return renderer.particleFrameCount(); }
+    long weatherFrameCount() { return renderer.weatherFrameCount(); }
+    long textureReloadCount() { return renderer.textureReloadCount(); }
+    boolean cameraMediumUnderwater() { return renderer.cameraMediumUnderwater(); }
+    long cameraMediumHandle() { return renderer.cameraMediumHandle(); }
+    int cameraMediumResourceCount() { return renderer.cameraMediumResourceCount(); }
+    long cameraMediumSelectionChanges() { return renderer.cameraMediumSelectionChanges(); }
+    double cameraMediumX() { return renderer.cameraMediumX(); }
+    double cameraMediumY() { return renderer.cameraMediumY(); }
+    double cameraMediumZ() { return renderer.cameraMediumZ(); }
+    long effectTextureSnapshotCount() { return renderer.effectTextureSnapshotCount(); }
     int skyResourceCount() { return renderer.skyResourceCount(); }
     long skyTextureUpdates() { return renderer.skyTextureUpdates(); }
     int terrainRadius() { return renderer.terrainRadius(); }
@@ -122,6 +164,16 @@ public final class ClientEvents {
     int terrainPendingSectionCount() { return renderer.terrainPendingSectionCount(); }
     int terrainRetirementCount() { return renderer.terrainRetirementCount(); }
     int terrainResourceCount() { return renderer.terrainResourceCount(); }
+    long terrainWaterVertexCount() { return renderer.terrainWaterVertexCount(); }
+    long terrainLavaVertexCount() { return renderer.terrainLavaVertexCount(); }
+    long terrainClearGlassVertexCount() { return renderer.terrainClearGlassVertexCount(); }
+    long terrainStainedGlassVertexCount() { return renderer.terrainStainedGlassVertexCount(); }
+    long atlasTextureUpdates() { return renderer.atlasTextureUpdates(); }
+    long atlasSpriteUpdates(String name) { return renderer.atlasSpriteUpdates(name); }
+    long atlasSpriteHash(String name) { return renderer.atlasSpriteHash(name); }
+    int blockLightCount() { return renderer.blockLightCount(); }
+    int blockLightResourceCount() { return renderer.blockLightResourceCount(); }
+    boolean blockLightCaptured(net.minecraft.util.math.BlockPos pos) { return renderer.blockLightCaptured(pos); }
     long terrainPublishedSectionCount() { return renderer.terrainPublishedSectionCount(); }
     long terrainRetiredSectionCount() { return renderer.terrainRetiredSectionCount(); }
     long terrainDiscardedBuildCount() { return renderer.terrainDiscardedBuildCount(); }
@@ -135,7 +187,9 @@ public final class ClientEvents {
     }
 
     void message(String text) {
-        if (mc.player != null) { mc.player.sendMessage(new TextComponentString("[Remix] " + text)); }
+        if (mc.player != null && !Boolean.getBoolean("rlcraftremix.smoke")) {
+            mc.player.sendMessage(new TextComponentString("[Remix] " + text));
+        }
         RemixForgeMod.LOG.info(text);
     }
 }
