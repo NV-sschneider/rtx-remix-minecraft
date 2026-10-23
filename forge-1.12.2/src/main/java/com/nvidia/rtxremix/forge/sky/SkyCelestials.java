@@ -153,31 +153,9 @@ final class SkyCelestials implements AutoCloseable {
     }
 
     @Override public void close() {
-        RuntimeException failure = null;
-        for (int kind = 0; kind < 3; kind++) {
-            long[] handles = kind == 0 ? meshes : kind == 1 ? materials : textures;
-            for (int index = 0; index < handles.length; index++) {
-                if (handles[index] == 0) continue;
-                try {
-                    if (kind == 0) api.destroyMesh(handles[index]);
-                    else if (kind == 1) api.destroyMaterial(handles[index]);
-                    else api.destroyTexture(handles[index]);
-                } catch (RuntimeException problem) {
-                    if (failure == null) failure = problem;
-                    else failure.addSuppressed(problem);
-                } finally {
-                    handles[index] = 0;
-                }
-            }
-        }
-        try {
-            blend.freeNative();
-        } catch (RuntimeException problem) {
-            if (failure == null) failure = problem;
-            else failure.addSuppressed(problem);
-        }
-        blendPointer = 0;
+        SkyRelease.celestials(meshes, materials, textures, () -> {
+            if (blendPointer != 0) { blend.freeNative(); blendPointer = 0; }
+        }, api::destroyMesh, api::destroyMaterial, api::destroyTexture);
         initialized = false;
-        if (failure != null) throw failure;
     }
 }

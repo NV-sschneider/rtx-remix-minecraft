@@ -31,10 +31,8 @@ public final class SkyScene implements AutoCloseable {
     private final TexturePatchInfo patches = new TexturePatchInfo();
     private final LightInfo sunInfo = distant(HASH + 2);
     private final LightInfo moonInfo = distant(HASH + 3);
-    private long texture;
-    private long dome;
-    private long sun;
-    private long moon;
+    private final long[] texture = new long[1];
+    private final long[] lights = new long[3];
     private long nextUpdate;
     private long textureUpdates;
     private boolean closed;
@@ -56,9 +54,9 @@ public final class SkyScene implements AutoCloseable {
     public void update(WorldClient world, float partialTicks, Float3D cameraPosition) {
         if (closed) throw new IllegalStateException("Sky scene is closed");
         long now = System.nanoTime();
-        if (texture == 0 || now - nextUpdate >= 0) {
+        if (texture[0] == 0 || now - nextUpdate >= 0) {
             capture(world, partialTicks);
-            if (state.kind == SkyState.NORMAL || texture == 0) publish();
+            if (state.kind == SkyState.NORMAL || texture[0] == 0) publish();
             nextUpdate = now + UPDATE_NANOS;
         }
         if (state.kind == SkyState.NORMAL) {
@@ -68,14 +66,14 @@ public final class SkyScene implements AutoCloseable {
             state.rain = world.getRainStrength(partialTicks);
             state.thunder = world.getThunderStrength(partialTicks);
             state.moonBrightness = world.getCurrentMoonPhaseFactor();
-            sun = updateDistant(sun, sunInfo, -state.sunX, -state.sunY,
+            lights[0] = updateDistant(lights[0], sunInfo, -state.sunX, -state.sunY,
                     state.sunStrength(), 1.0f, 0.94f, 0.84f);
-            moon = updateDistant(moon, moonInfo, state.sunX, state.sunY,
+            lights[1] = updateDistant(lights[1], moonInfo, state.sunX, state.sunY,
                     state.moonStrength(), 0.7f, 0.8f, 1.0f);
         }
-        api.drawLightInstance(dome);
-        if (state.sunStrength() > 0.0f) api.drawLightInstance(sun);
-        if (state.moonStrength() > 0.0f) api.drawLightInstance(moon);
+        api.drawLightInstance(lights[2]);
+        if (state.sunStrength() > 0.0f) api.drawLightInstance(lights[0]);
+        if (state.moonStrength() > 0.0f) api.drawLightInstance(lights[1]);
         if (state.kind == SkyState.NORMAL) celestials.draw(state, cameraPosition);
     }
 
@@ -111,14 +109,14 @@ public final class SkyScene implements AutoCloseable {
 
     private void publish() {
         image.generate(state);
-        if (texture == 0) {
-            texture = api.createTextureFromMemory(TextureFromMemoryInfo.builder().hash(HASH)
+        if (texture[0] == 0) {
+            texture[0] = api.createTextureFromMemory(TextureFromMemoryInfo.builder().hash(HASH)
                     .pixelData(image.pixels).size(SkyDome.WIDTH, SkyDome.HEIGHT)
                     .format(TextureFormat.RGBA32_SFLOAT).build());
-            entry.handle = texture;
+            entry.handle = texture[0];
             LightInfoDomeEXT extension = new LightInfoDomeEXT();
-            extension.colorTexture = texture;
-            dome = api.createLight(LightInfo.builder().hash(HASH + 1).radiance(1, 1, 1)
+            extension.colorTexture = texture[0];
+            lights[2] = api.createLight(LightInfo.builder().hash(HASH + 1).radiance(1, 1, 1)
                     .domeExt(extension).build());
         } else {
             api.updateTextureFromMemory(patches);
@@ -163,8 +161,9 @@ public final class SkyScene implements AutoCloseable {
 
     /** Number of currently owned native textures, lights, materials, meshes, and blend state. */
     public int resourceCount() {
-        return (texture == 0 ? 0 : 1) + (dome == 0 ? 0 : 1)
-                + (sun == 0 ? 0 : 1) + (moon == 0 ? 0 : 1) + celestials.resourceCount();
+        int count = texture[0] == 0 ? 0 : 1;
+        for (long light : lights) if (light != 0) count++;
+        return count + celestials.resourceCount();
     }
 
     /** Counts completed texture uploads, including the first publication. */
@@ -176,24 +175,6 @@ public final class SkyScene implements AutoCloseable {
 
     @Override public void close() {
         closed = true;
-        RuntimeException failure = null;
-        try {
-            celestials.close();
-        } catch (RuntimeException problem) {
-            failure = problem;
-        }
-        long[] handles = {sun, moon, dome, texture};
-        sun = moon = dome = texture = 0;
-        for (int index = 0; index < handles.length; index++) {
-            if (handles[index] == 0) continue;
-            try {
-                if (index == 3) api.destroyTexture(handles[index]);
-                else api.destroyLight(handles[index]);
-            } catch (RuntimeException problem) {
-                if (failure == null) failure = problem;
-                else failure.addSuppressed(problem);
-            }
-        }
-        if (failure != null) throw failure;
+        SkyRelease.scene(lights, texture, celestials::close, api::destroyLight, api::destroyTexture);
     }
 }
