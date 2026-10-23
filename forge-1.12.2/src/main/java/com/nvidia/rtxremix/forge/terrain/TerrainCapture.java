@@ -12,12 +12,17 @@ import com.nvidia.rtxremix.MeshInfoSurfaceTriangles;
 import com.nvidia.rtxremix.RemixAPI;
 import com.nvidia.rtxremix.RemixBridge;
 import com.nvidia.rtxremix.TextureFromMemoryInfo;
+import com.nvidia.rtxremix.Float3D;
+import com.nvidia.rtxremix.forge.light.BlockLightScene;
+import com.nvidia.rtxremix.forge.light.SectionLights;
+import com.nvidia.rtxremix.forge.texture.AtlasAnimations;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.ArrayDeque;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
 import net.minecraft.block.state.IBlockState;
+import net.minecraft.block.material.Material;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.WorldClient;
 import net.minecraft.client.renderer.GlStateManager;
@@ -54,11 +59,12 @@ import org.lwjgl.opengl.GL21;
  * Render-thread capture of loaded chunk sections inside Minecraft's render distance.
  * Discovery and block-model evaluation are incremental; native pages are uploaded one
  * per frame, and an old section stays visible until its complete replacement is ready.
- * This owns no world or chunk loads. Fluids and non-baked renderers are separate paths.
+ * This owns no world or chunk loads. Baked models and vanilla liquids share publication;
+ * custom non-baked renderers require their own capture integration.
  *
  * <p>The 2 ms budget is cooperative: a model callback or native call cannot be preempted.
- * Each page is at most 1.1 MiB, each section at most 64 pages, and retirement is capped
- * at four pages per frame. Atomic section publication may add/remove up to 64 instances.
+ * Each page is at most 1.1 MiB, each section at most 128 pages, and retirement is capped
+ * at four pages per frame. Atomic section publication may add/remove up to 128 instances.
  * Mesh bytes include staging and retirement; reaching 512 MiB pauses capture explicitly.
  */
 public final class TerrainCapture implements AutoCloseable {
@@ -67,31 +73,42 @@ public final class TerrainCapture implements AutoCloseable {
     private static final long MAX_ATLAS_BYTES = 256L * 1024 * 1024;
     private static final AtomicLong HASHES = new AtomicLong(0x524c544552520000L);
     private static final BlockRenderLayer[] LAYERS = BlockRenderLayer.values();
+    private static final int WATER = LAYERS.length;
+    private static final int LAVA = WATER + 1;
+    private static final int CLEAR_GLASS = LAVA + 1;
+    private static final int STAINED_GLASS = CLEAR_GLASS + 1;
+    private static final int MATERIAL_COUNT = STAINED_GLASS + 1;
     private static final EnumFacing[] FACES = EnumFacing.values();
 
     private final RemixAPI api;
     private final Minecraft mc;
     private final WorldClient world;
+    private final BlockLightScene lights;
+    private final FluidCapture fluids;
     private final IWorldEventListener worldUpdates = new WorldUpdates();
     private final TerrainSchedule schedule = new TerrainSchedule();
     private final TerrainBudget budget = new TerrainBudget();
+    private final TerrainClose closing = new TerrainClose();
     private final ArrayDeque<Page> retired = new ArrayDeque<Page>();
     private final TerrainSchedule.RemovedColumn removeColumn = new TerrainSchedule.RemovedColumn() {
         @Override public void remove(TerrainSchedule.Column column) { retireColumn(column); }
     };
-    private final MeshPacking[] builders = new MeshPacking[LAYERS.length];
-    private final int[] checkpoints = new int[LAYERS.length];
+    private final MeshPacking[] builders = new MeshPacking[MATERIAL_COUNT];
+    private final int[] checkpoints = new int[MATERIAL_COUNT];
     private final BlockPos.MutableBlockPos blockPosition = new BlockPos.MutableBlockPos();
-    private final long[] materials = new long[LAYERS.length];
+    private final long[] materials = new long[MATERIAL_COUNT];
     private final float[] positions = new float[12];
     private final float[] uvs = new float[8];
     private final int[] colors = new int[4];
     private long atlas;
+    private AtlasAnimations animations;
     private long vertexColorExtension;
     private boolean texturesDirty = true;
     private boolean allDirty;
     private boolean closed;
     private boolean warnedUnsupportedModel;
+    private boolean warnedUnsupportedLight;
+    private boolean warnedUnsupportedFluid;
     private boolean capacityLimited;
     private boolean warnedCapacity;
     private int columnCount;
@@ -101,6 +118,10 @@ public final class TerrainCapture implements AutoCloseable {
     private long publishedSections;
     private long retiredSections;
     private long discardedBuilds;
+    private long waterVertices;
+    private long lavaVertices;
+    private long clearGlassVertices;
+    private long stainedGlassVertices;
     private Build active;
 
     public TerrainCapture(RemixAPI api, Minecraft mc) {
@@ -110,6 +131,8 @@ public final class TerrainCapture implements AutoCloseable {
         this.api = api;
         this.mc = mc;
         this.world = mc.world;
+        this.lights = new BlockLightScene(api, world);
+        this.fluids = new FluidCapture(mc);
         world.addEventListener(worldUpdates);
     }
 
@@ -126,6 +149,7 @@ public final class TerrainCapture implements AutoCloseable {
             uploadAtlas();
             texturesDirty = false;
         }
+        animations.flush();
         long deadline = System.nanoTime() + TerrainBudget.FRAME_NANOS;
         schedule.move(MathHelper.floor(view.posX) >> 4,
                 MathHelper.clamp(MathHelper.floor(view.posY) >> 4, 0, SECTION_COUNT - 1),
@@ -175,6 +199,22 @@ public final class TerrainCapture implements AutoCloseable {
     }
     public void invalidateAll() { checkThread(); allDirty = true; }
     public void refreshTextures() { checkThread(); texturesDirty = true; }
+    public void updateLights(Float3D camera) { lights.update(camera); }
+    public int getBlockLightCount() { return lights.resourceCount(); }
+    public boolean isBlockLightCaptured(BlockPos pos) { return lights.contains(pos); }
+    /** Borrowed by world item/effect scenes; those must close before this atlas. */
+    public long getAtlasTexture() { return atlas; }
+    public long getAtlasTextureUpdates() { return animations == null ? 0 : animations.updateCount(); }
+    public long getAtlasSpriteUpdates(String name) {
+        TextureAtlasSprite sprite = mc.getTextureMapBlocks().getAtlasSprite(name);
+        return animations == null ? 0 : animations.rectangleUpdates(sprite.getOriginX(), sprite.getOriginY(),
+                sprite.getIconWidth(), sprite.getIconHeight());
+    }
+    public long getAtlasSpriteHash(String name) {
+        TextureAtlasSprite sprite = mc.getTextureMapBlocks().getAtlasSprite(name);
+        return animations == null ? 0 : animations.rectangleHash(sprite.getOriginX(), sprite.getOriginY(),
+                sprite.getIconWidth(), sprite.getIconHeight());
+    }
 
     public int getRadius() { return Math.max(0, schedule.radius()); }
     public int getColumnCount() { return columnCount; }
@@ -186,9 +226,13 @@ public final class TerrainCapture implements AutoCloseable {
     public long getRetiredSectionCount() { return retiredSections; }
     public long getDiscardedBuildCount() { return discardedBuilds; }
     public long getCapturedBytes() { return budget.bytes(); }
+    public long getWaterVertexCount() { return waterVertices; }
+    public long getLavaVertexCount() { return lavaVertices; }
+    public long getClearGlassVertexCount() { return clearGlassVertices; }
+    public long getStainedGlassVertexCount() { return stainedGlassVertices; }
     public boolean isCapacityLimited() { return capacityLimited || schedule.failures() != 0; }
     public int getResourceCount() {
-        int result = pageResources + (atlas == 0 ? 0 : 1) + (vertexColorExtension == 0 ? 0 : 1);
+        int result = lights.resourceCount() + pageResources + (atlas == 0 ? 0 : 1) + (vertexColorExtension == 0 ? 0 : 1);
         for (long material : materials) if (material != 0) result++;
         return result;
     }
@@ -270,11 +314,33 @@ public final class TerrainCapture implements AutoCloseable {
                 count++;
                 int x = index & 15, z = (index >> 4) & 15, y = index >> 8;
                 IBlockState state = storage.get(x, y, z);
-                if (state.getRenderType() != EnumBlockRenderType.MODEL) continue;
                 blockPosition.setPos(section.column.x * 16 + x, section.y * 16 + y, section.column.z * 16 + z);
+                try { lights.sample(build.lights, state, blockPosition); }
+                catch (RuntimeException error) {
+                    if (!warnedUnsupportedLight) {
+                        warnedUnsupportedLight = true;
+                        LOGGER.warn("A block light value could not be captured; further warnings are suppressed", error);
+                    }
+                }
+                EnumBlockRenderType type = state.getRenderType();
+                if (type != EnumBlockRenderType.MODEL && type != EnumBlockRenderType.LIQUID) continue;
+                if (type == EnumBlockRenderType.LIQUID && !FluidCapture.supported(state)) {
+                    if (!warnedUnsupportedFluid) {
+                        warnedUnsupportedFluid = true;
+                        LOGGER.warn("Unsupported LIQUID renderer for {}; only BlockLiquid water/lava is captured; further warnings are suppressed",
+                                state.getBlock().getRegistryName());
+                    }
+                    continue;
+                }
                 for (int i = 0; i < builders.length; i++) checkpoints[i] = builders[i] == null ? 0 : builders[i].vertexCount();
                 try {
-                    emitBlock(builders, state, blockPosition, x, y, z);
+                    if (type == EnumBlockRenderType.LIQUID) {
+                        int layer = state.getMaterial() == Material.LAVA ? LAVA : WATER;
+                        if (builders[layer] == null) builders[layer] = new MeshPacking();
+                        fluids.capture(state, world, blockPosition, section.column.x, section.y, section.column.z, builders[layer]);
+                    } else {
+                        emitBlock(builders, state, blockPosition, x, y, z);
+                    }
                 } catch (MeshPacking.CapacityExceededException error) {
                     LOGGER.error("Terrain section {},{},{} exceeds the bounded model buffer; keeping its previous geometry",
                             section.column.x, section.y, section.column.z, error);
@@ -286,7 +352,7 @@ public final class TerrainCapture implements AutoCloseable {
                     for (int i = 0; i < builders.length; i++) if (builders[i] != null) builders[i].truncate(checkpoints[i]);
                     if (!warnedUnsupportedModel) {
                         warnedUnsupportedModel = true;
-                        LOGGER.warn("A baked block model could not be captured; further model warnings are suppressed", error);
+                        LOGGER.warn("A terrain block could not be captured; further model warnings are suppressed", error);
                     }
                 }
             }
@@ -355,12 +421,21 @@ public final class TerrainCapture implements AutoCloseable {
                 if (--section.column.capturedSections == 0) capturedColumns--;
             }
         } else {
-            section.asset = new SectionAsset(build.pages);
+            long waterCount = builders[WATER] == null ? 0 : builders[WATER].vertexCount();
+            long lavaCount = builders[LAVA] == null ? 0 : builders[LAVA].vertexCount();
+            long clearGlassCount = builders[CLEAR_GLASS] == null ? 0 : builders[CLEAR_GLASS].vertexCount();
+            long stainedGlassCount = builders[STAINED_GLASS] == null ? 0 : builders[STAINED_GLASS].vertexCount();
+            section.asset = new SectionAsset(build.pages, waterCount, lavaCount, clearGlassCount, stainedGlassCount);
+            waterVertices += waterCount;
+            lavaVertices += lavaCount;
+            clearGlassVertices += clearGlassCount;
+            stainedGlassVertices += stainedGlassCount;
             if (old == null) {
                 sectionCount++;
                 if (section.column.capturedSections++ == 0) capturedColumns++;
             }
         }
+        lights.publish(section.column.x, section.y, section.column.z, build.lights);
         schedule.publish(section, build.revision);
         publishedSections++;
         active = null;
@@ -382,11 +457,13 @@ public final class TerrainCapture implements AutoCloseable {
         IBlockState extended = actual.getBlock().getExtendedState(actual, world, pos);
         Vec3d offset = actual.getOffset(world, pos);
         long seed = MathHelper.getPositionRandom(pos);
+        GlassMaterials.Kind glass = GlassMaterials.kind(actual.getBlock().getRegistryName());
         for (BlockRenderLayer layer : LAYERS) {
             if (!actual.getBlock().canRenderInLayer(actual, layer)) continue;
             ForgeHooksClient.setRenderLayer(layer);
             IBakedModel model = mc.getBlockRendererDispatcher().getModelForState(actual);
-            int layerIndex = layer.ordinal();
+            int layerIndex = glass == GlassMaterials.Kind.CLEAR ? CLEAR_GLASS
+                    : glass == GlassMaterials.Kind.STAINED ? STAINED_GLASS : layer.ordinal();
             if (layers[layerIndex] == null) layers[layerIndex] = new MeshPacking();
             for (EnumFacing side : FACES) {
                 if (actual.shouldSideBeRendered(world, pos, side)) {
@@ -466,6 +543,7 @@ public final class TerrainCapture implements AutoCloseable {
             GL11.glGetTexImage(GL11.GL_TEXTURE_2D, 0, GL11.GL_RGBA, GL11.GL_UNSIGNED_BYTE, pixels);
             atlas = api.createTextureFromMemory(TextureFromMemoryInfo.builder()
                     .hash(HASHES.incrementAndGet()).pixelData(pixels).size(width, height).build());
+            animations = new AtlasAnimations(api, mc.getTextureMapBlocks(), atlas, width, height);
             for (BlockRenderLayer layer : LAYERS) {
                 boolean cutout = layer == BlockRenderLayer.CUTOUT || layer == BlockRenderLayer.CUTOUT_MIPPED;
                 MaterialInfo material = new MaterialInfo(HASHES.incrementAndGet());
@@ -480,6 +558,11 @@ public final class TerrainCapture implements AutoCloseable {
                         .blendEnabled(layer == BlockRenderLayer.TRANSLUCENT).build();
                 materials[layer.ordinal()] = api.createMaterial(material);
             }
+            materials[WATER] = api.createMaterial(FluidMaterials.water(HASHES.incrementAndGet(), atlas));
+            materials[LAVA] = api.createMaterial(FluidMaterials.lava(HASHES.incrementAndGet(), atlas));
+            materials[CLEAR_GLASS] = api.createMaterial(GlassMaterials.clear(HASHES.incrementAndGet(), atlas));
+            materials[STAINED_GLASS] = api.createMaterial(GlassMaterials.stained(HASHES.incrementAndGet(), atlas));
+            fluids.refreshSprites();
             vertexColorExtension = InstanceInfoBlendEXT.textureTimesVertexColor().allocNative(0);
             LOGGER.info("Captured block atlas {}x{}; terrain follows Minecraft render distance", width, height);
         } finally {
@@ -496,6 +579,7 @@ public final class TerrainCapture implements AutoCloseable {
         retireColumnAssets(column);
     }
     private void retireColumnAssets(TerrainSchedule.Column column) {
+        lights.removeColumn(column.x, column.z);
         for (TerrainSchedule.Section section : column.sections) {
             if (section.asset == null) continue;
             retire((SectionAsset) section.asset);
@@ -507,6 +591,10 @@ public final class TerrainCapture implements AutoCloseable {
     }
     private void retire(SectionAsset asset) {
         retired.addAll(asset.pages);
+        waterVertices -= asset.waterVertices;
+        lavaVertices -= asset.lavaVertices;
+        clearGlassVertices -= asset.clearGlassVertices;
+        stainedGlassVertices -= asset.stainedGlassVertices;
         retiredSections++;
     }
     private void detach(Page page) {
@@ -516,74 +604,77 @@ public final class TerrainCapture implements AutoCloseable {
         pageResources--;
     }
     private void release(Page page) {
-        RuntimeException failure = null;
+        Throwable failure = null;
         try { detach(page); }
-        catch (RuntimeException error) { failure = error; }
+        catch (RuntimeException | LinkageError error) { failure = error; }
         if (page.mesh != 0 && page.instance == 0) {
             try {
                 api.destroyMesh(page.mesh);
                 page.mesh = 0;
                 pageResources--;
                 budget.release(page.bytes);
-            } catch (RuntimeException error) { failure = appendFailure(failure, error); }
+            } catch (RuntimeException | LinkageError error) { failure = appendFailure(failure, error); }
         }
-        if (failure != null) throw failure;
+        if (failure != null) throw new IllegalStateException("Cannot release terrain page", failure);
     }
     private void clearTerrain() {
         discardBuild();
         schedule.clear(removeColumn);
-        RuntimeException failure = null;
+        Throwable failure = null;
         int count = retired.size();
         for (int i = 0; i < count; i++) {
             Page page = retired.removeFirst();
             try { release(page); }
-            catch (RuntimeException error) { failure = appendFailure(failure, error); }
+            catch (RuntimeException | LinkageError error) { failure = appendFailure(failure, error); }
             if (page.mesh != 0 || page.instance != 0) retired.addLast(page);
         }
         capacityLimited = warnedCapacity = false;
-        if (failure != null) throw failure;
+        try { lights.clear(); }
+        catch (RuntimeException | LinkageError error) { failure = appendFailure(failure, error); }
+        if (failure != null) throw new IllegalStateException("Cannot clear terrain", failure);
     }
 
     private void clearTextureResources() {
-        RuntimeException failure = null;
+        if (animations != null) { animations.close(); animations = null; }
+        if (pageResources != 0) throw new IllegalStateException("Terrain pages still reference atlas materials");
+        Throwable failure = null;
         if (vertexColorExtension != 0) {
             try {
                 RemixBridge.freeExt(vertexColorExtension);
                 vertexColorExtension = 0;
-            } catch (RuntimeException error) { failure = error; }
+            } catch (RuntimeException | LinkageError error) { failure = error; }
         }
         for (int i = 0; i < materials.length; i++) {
             if (materials[i] == 0) continue;
             try {
                 api.destroyMaterial(materials[i]);
                 materials[i] = 0;
-            } catch (RuntimeException error) { failure = appendFailure(failure, error); }
+            } catch (RuntimeException | LinkageError error) { failure = appendFailure(failure, error); }
         }
-        if (atlas != 0) {
+        boolean materialsReleased = true;
+        for (long material : materials) if (material != 0) materialsReleased = false;
+        if (atlas != 0 && materialsReleased) {
             try {
                 api.destroyTexture(atlas);
                 atlas = 0;
-            } catch (RuntimeException error) { failure = appendFailure(failure, error); }
+            } catch (RuntimeException | LinkageError error) { failure = appendFailure(failure, error); }
         }
-        if (failure != null) throw failure;
+        if (failure != null) throw new IllegalStateException("Cannot release terrain textures", failure);
     }
 
     @Override public void close() {
         checkThread();
-        if (closed) return;
+        // Stop new capture immediately, but keep retrying any native owners whose
+        // release failed. Only the coordinator marks the teardown complete.
         closed = true;
-        world.removeEventListener(worldUpdates);
-        RuntimeException failure = null;
-        try { clearTerrain(); }
-        catch (RuntimeException error) { failure = error; }
-        try { clearTextureResources(); }
-        catch (RuntimeException error) { failure = appendFailure(failure, error); }
-        if (failure != null) throw failure;
+        if (animations != null) { animations.close(); animations = null; }
+        closing.close(() -> world.removeEventListener(worldUpdates), this::clearTerrain,
+                this::clearTextureResources, lights::close);
     }
 
-    private static RuntimeException appendFailure(RuntimeException first, RuntimeException next) {
+    private static Throwable appendFailure(Throwable first, Throwable next) {
         if (first == null) return next;
-        first.addSuppressed(next);
+        if (first != next) first.addSuppressed(next);
         return first;
     }
 
@@ -623,6 +714,7 @@ public final class TerrainCapture implements AutoCloseable {
         final Chunk chunk;
         final long revision;
         final List<Page> pages = new ArrayList<Page>();
+        final SectionLights lights = new SectionLights();
         int block;
         int layer;
         int vertex;
@@ -640,6 +732,17 @@ public final class TerrainCapture implements AutoCloseable {
     }
     private static final class SectionAsset {
         final List<Page> pages;
-        SectionAsset(List<Page> pages) { this.pages = pages; }
+        final long waterVertices;
+        final long lavaVertices;
+        final long clearGlassVertices;
+        final long stainedGlassVertices;
+        SectionAsset(List<Page> pages, long waterVertices, long lavaVertices,
+                     long clearGlassVertices, long stainedGlassVertices) {
+            this.pages = pages;
+            this.waterVertices = waterVertices;
+            this.lavaVertices = lavaVertices;
+            this.clearGlassVertices = clearGlassVertices;
+            this.stainedGlassVertices = stainedGlassVertices;
+        }
     }
 }
