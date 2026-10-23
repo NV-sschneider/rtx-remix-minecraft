@@ -33,4 +33,4 @@ if (-not (Test-Path -LiteralPath $configTarget)) {
     Copy-Item -LiteralPath (Join-Path $projectRoot 'config/rtx.conf') -Destination $configTarget
 }
 Write-Output "Installed prototype in $gameDirectory"
-Write-Output 'Launch Forge 1.12.2 - Remix Port in Prism, create a disposable Creative world, and press F8.'
+Write-Output 'Launch the Prism instance using this game directory, create a disposable Creative world, and run /mrtx on.'

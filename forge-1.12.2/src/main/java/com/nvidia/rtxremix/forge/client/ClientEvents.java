@@ -82,7 +82,7 @@ public final class ClientEvents {
     void setEnabled(boolean value) {
         enabled = value;
         failure = null;
-        message(value ? "Terrain prototype enabled. F8 returns to vanilla rendering." : "Vanilla rendering enabled.");
+        message(value ? "Terrain prototype enabled. Use /mrtx off to restore vanilla rendering." : "Vanilla rendering enabled.");
     }
 
     void reload() { textureReloadRequested = true; }
