@@ -4,6 +4,7 @@
 param(
     [switch]$SmokeTest,
     [switch]$EntitySmokeTest,
+    [switch]$SkySmokeTest,
     [switch]$ExitAfterSmoke,
     [string]$LauncherDirectory,
     [string]$InstanceName = 'forge112-remix'
@@ -27,6 +28,7 @@ if (-not (Test-Path -LiteralPath $launcher) -or -not (Test-Path -LiteralPath $co
 }
 if ($ExitAfterSmoke -and -not $SmokeTest) { throw '-ExitAfterSmoke requires -SmokeTest.' }
 if ($EntitySmokeTest -and -not $SmokeTest) { throw '-EntitySmokeTest requires -SmokeTest.' }
+if ($SkySmokeTest -and -not $SmokeTest) { throw '-SkySmokeTest requires -SmokeTest.' }
 
 function Assert-InstanceIdle {
     param([string]$InstanceDirectory, [int[]]$LauncherProcessIds)
@@ -83,10 +85,11 @@ for ($i = $generalStart + 1; $i -lt $lines.Length; $i++) {
 $general = @($lines[($generalStart + 1)..($generalEnd - 1)])
 $argsLine = $general | Where-Object { $_ -match '^JvmArgs=' } | Select-Object -First 1
 $jvmArgs = if ($argsLine) { $argsLine.Substring(8).Trim('"') } else { '' }
-$jvmArgs = ($jvmArgs -replace '(?:^|\s)-Drlcraftremix\.smoke(?:\.(?:exit|entities))?=\S+', '').Trim()
+$jvmArgs = ($jvmArgs -replace '(?:^|\s)-Drlcraftremix\.smoke(?:\.(?:exit|entities|sky))?=\S+', '').Trim()
 if ($SmokeTest) { $jvmArgs = "$jvmArgs -Drlcraftremix.smoke=true".Trim() }
 if ($ExitAfterSmoke) { $jvmArgs += ' -Drlcraftremix.smoke.exit=true' }
 if ($EntitySmokeTest) { $jvmArgs += ' -Drlcraftremix.smoke.entities=true' }
+if ($SkySmokeTest) { $jvmArgs += ' -Drlcraftremix.smoke.sky=true' }
 $general = @($general | Where-Object { $_ -notmatch '^(JvmArgs|OverrideJavaArgs)=' })
 $outputLines = @($lines[0..$generalStart]) + $general + @('OverrideJavaArgs=true', "JvmArgs=$jvmArgs")
 if ($generalEnd -lt $lines.Length) { $outputLines += $lines[$generalEnd..($lines.Length - 1)] }

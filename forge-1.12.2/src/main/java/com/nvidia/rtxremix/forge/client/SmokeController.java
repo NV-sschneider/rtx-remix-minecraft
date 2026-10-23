@@ -5,6 +5,7 @@
 package com.nvidia.rtxremix.forge.client;
 
 import com.nvidia.rtxremix.forge.RemixForgeMod;
+import java.awt.image.BufferedImage;
 import java.io.File;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -14,6 +15,7 @@ import java.time.format.DateTimeFormatter;
 import java.util.UUID;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import javax.imageio.ImageIO;
 import net.minecraft.block.BlockColored;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiMainMenu;
@@ -38,6 +40,7 @@ import org.lwjgl.opengl.GL11;
  * Enable with -Drlcraftremix.smoke=true; shutdown additionally requires
  * -Drlcraftremix.smoke.exit=true. Add -Drlcraftremix.smoke.entities=true for
  * a stationary pig and a cow making a bounded round trip before each capture.
+ * Add -Drlcraftremix.smoke.sky=true for clear noon, sunset, midnight, and rain.
  * The unique fixture save and screenshots remain
  * on disk for inspection. Completion checks frame capture, nonblank fixture output,
  * and renderer lifecycle. Visual correctness still requires image inspection.
@@ -50,6 +53,7 @@ final class SmokeController {
     private static final int VANILLA_TICKS = 60;
     private static final int UNLOAD_TICKS = 20;
     private static final int ENTITY_SETTLE_TICKS = 10;
+    private static final int SKY_SETTLE_TICKS = 30;
     private static final long STARTUP_TIMEOUT = TimeUnit.SECONDS.toNanos(180);
     private static final long NATIVE_TIMEOUT = TimeUnit.SECONDS.toNanos(300);
     private static final long SETTLE_TIMEOUT = TimeUnit.SECONDS.toNanos(90);
@@ -57,13 +61,21 @@ final class SmokeController {
 
     private enum State {
         INACTIVE, WAIT_MENU, WAIT_WORLD, BUILD_SCENE, SETTLE, REMIX, VANILLA,
-        REENABLE, RESTORE_RULES, UNLOAD, EXIT, DONE
+        REENABLE, SKY_APPLY, SKY_CAPTURE, RESTORE_RULES, UNLOAD, EXIT, DONE
+    }
+
+    private enum SkyPhase {
+        DAY(6000L, false), SUNSET(12500L, false), NIGHT(18000L, false), RAIN(6000L, true);
+        final long time;
+        final boolean rain;
+        SkyPhase(long time, boolean rain) { this.time = time; this.rain = rain; }
     }
 
     private final Minecraft mc;
     private final ClientEvents events;
     private final boolean exitAfter;
     private final boolean includeEntities;
+    private final boolean includeSky;
     private final String id;
     private State state;
     private long stateSince;
@@ -78,11 +90,14 @@ final class SmokeController {
     private Future<Pose> setup;
     private Future<Boolean> entityStep;
     private Future<?> ruleRestoration;
+    private Future<?> skyStep;
     private IntegratedServer fixtureServer;
     private WorldClient fixtureClientWorld;
     private WorldServer fixtureServerWorld;
     private FixtureGameRules clientRules;
     private volatile FixtureGameRules serverRules;
+    private FixtureEnvironment clientEnvironment;
+    private volatile FixtureEnvironment serverEnvironment;
     private boolean rulesRestored;
     private boolean restoreForSuccess;
     private String pendingFailure;
@@ -103,6 +118,9 @@ final class SmokeController {
     private long lastImageProbeNanos;
     private long lastImageProbeFrame;
     private FixtureImageReadiness.Result imageReadiness;
+    private SkyPhase skyPhase;
+    private FixtureSkyImage.Result daySkyImage;
+    private long skyUpdateBaseline;
 
     SmokeController(Minecraft mc, ClientEvents events) {
         this.mc = mc;
@@ -110,6 +128,7 @@ final class SmokeController {
         boolean requested = Boolean.getBoolean("rlcraftremix.smoke");
         this.exitAfter = requested && Boolean.getBoolean("rlcraftremix.smoke.exit");
         this.includeEntities = requested && Boolean.getBoolean("rlcraftremix.smoke.entities");
+        this.includeSky = requested && Boolean.getBoolean("rlcraftremix.smoke.sky");
         this.id = requested
                 ? DateTimeFormatter.ofPattern("uuuuMMdd-HHmmss").withZone(ZoneOffset.UTC).format(Instant.now())
                         + "-" + UUID.randomUUID().toString().substring(0, 8)
@@ -117,6 +136,7 @@ final class SmokeController {
         this.state = requested ? State.WAIT_MENU : State.INACTIVE;
         this.stateSince = System.nanoTime();
         if (requested) log("START", "exit=" + exitAfter + " seed=" + SEED + " entities=" + includeEntities
+                + " sky=" + includeSky
                 + " validation=capture_and_lifecycle pixelValidation=nonblank_fixture");
     }
 
@@ -226,6 +246,10 @@ final class SmokeController {
                             fail("entity_parts_present_after_disable");
                             break;
                         }
+                        if (includeSky && events.skyResourceCount() != 0) {
+                            fail("sky_resources_present_after_disable");
+                            break;
+                        }
                         vanillaScreenshot = capture("vanilla");
                         log("VANILLA_CAPTURED", "file=" + vanillaScreenshot);
                         frameBaseline = events.renderedFrames();
@@ -261,16 +285,34 @@ final class SmokeController {
                         reenabledFrames = reenableFrames - frameBaseline;
                         log("REENABLE_PASS", "frames=" + reenabledFrames
                                 + " baseline=" + frameBaseline + " totalFrames=" + reenableFrames);
-                        beginRuleRestoration(true, null);
+                        if (includeSky) beginSkyPhase(SkyPhase.DAY);
+                        else beginRuleRestoration(true, null);
                     }
+                    break;
+                case SKY_APPLY:
+                    if (!fixtureReady()) break;
+                    holdPose();
+                    if (skyStep.isDone()) {
+                        skyStep.get();
+                        requireOwnedClientWorld();
+                        FixtureEnvironment.setSky(fixtureClientWorld, skyPhase.time, skyPhase.rain);
+                        frameBaseline = events.renderedFrames();
+                        lastFrames = frameBaseline;
+                        transition(State.SKY_CAPTURE);
+                    }
+                    break;
+                case SKY_CAPTURE:
+                    captureSkyPhase();
                     break;
                 case RESTORE_RULES:
                     if (ruleRestoration.isDone()) {
                         ruleRestoration.get();
                         requireOwnedClientWorld();
+                        clientEnvironment.restore(fixtureClientWorld);
                         clientRules.restore(fixtureClientWorld.getGameRules());
                         rulesRestored = true;
-                        log("RULES_RESTORED", "world=" + saveName + " sides=server,client");
+                        log("RULES_RESTORED", "world=" + saveName
+                                + " sides=server,client environmentRestored=true");
                         if (restoreForSuccess && (events.failureMessage() != null || !events.isEnabled())) {
                             restoreForSuccess = false;
                             pendingFailure = "reason=renderer_failed_during_rule_restoration phase=RESTORE_RULES";
@@ -302,11 +344,16 @@ final class SmokeController {
                             break;
                         }
                         if (includeEntities) log("ENTITY_RELEASE_PASS", "liveParts=0");
+                        if (includeSky && events.skyResourceCount() != 0) {
+                            fail("sky_resources_present_after_unload");
+                            break;
+                        }
+                        if (includeSky) log("SKY_RELEASE_PASS", "liveResources=0");
                         log("WORLD_UNLOAD_PASS", "menuTicks=" + ticks + " rendererEnabled=true");
                         finish(true, "frames=" + capturedFrames + " world=" + saveName
                                 + " remix=" + remixScreenshot + " vanilla=" + vanillaScreenshot
                                 + " reenableFrames=" + reenabledFrames + " unloadTicks=" + ticks
-                                + " entities=" + includeEntities
+                                + " entities=" + includeEntities + " sky=" + includeSky
                                 + " validation=capture_and_lifecycle pixelValidation=nonblank_fixture");
                     }
                     break;
@@ -360,6 +407,7 @@ final class SmokeController {
         fixtureServer = server;
         fixtureClientWorld = mc.world;
         clientRules = FixtureGameRules.capture(fixtureClientWorld.getGameRules());
+        clientEnvironment = FixtureEnvironment.capture(fixtureClientWorld);
         // All world and authoritative player mutations occur on the integrated server thread.
         setup = server.callFromMainThread(() -> buildScene(server, playerId));
         transition(State.BUILD_SCENE);
@@ -380,13 +428,12 @@ final class SmokeController {
         // Publish before the first mutation, independently of Pose: scene setup can
         // throw after changing rules, and GlobalGameRules saves both sides on unload.
         serverRules = FixtureGameRules.capture(world.getGameRules());
+        serverEnvironment = FixtureEnvironment.capture(world);
         world.getGameRules().setOrCreateGameRule("doDaylightCycle", "false");
         world.getGameRules().setOrCreateGameRule("doMobSpawning", "false");
         world.getGameRules().setOrCreateGameRule("doWeatherCycle", "false");
         world.getGameRules().setOrCreateGameRule("randomTickSpeed", "0");
-        world.setWorldTime(6000L);
-        world.getWorldInfo().setRaining(false);
-        world.getWorldInfo().setThundering(false);
+        FixtureEnvironment.setSky(world, 6000L, false);
 
         for (int x = -10; x <= 10; x++) {
             for (int z = -5; z <= 13; z++) {
@@ -440,6 +487,8 @@ final class SmokeController {
                 if (server.getWorld(0) != fixtureServerWorld) {
                     throw new IllegalStateException("Unexpected fixture world during rule restoration");
                 }
+                FixtureEnvironment environment = serverEnvironment;
+                if (environment != null) environment.restore(fixtureServerWorld);
                 original.restore(fixtureServerWorld.getGameRules());
             }
             return null;
@@ -452,6 +501,69 @@ final class SmokeController {
                 || !saveName.equals(fixtureServer.getFolderName())) {
             throw new IllegalStateException("Unexpected fixture client world during cleanup");
         }
+    }
+
+    private void beginSkyPhase(SkyPhase phase) {
+        skyPhase = phase;
+        skyUpdateBaseline = events.skyTextureUpdates();
+        transition(State.SKY_APPLY);
+        skyStep = fixtureServer.callFromMainThread(() -> {
+            if (!saveName.equals(fixtureServer.getFolderName())
+                    || fixtureServer.getWorld(0) != fixtureServerWorld) {
+                throw new IllegalStateException("Unexpected fixture world during sky probe");
+            }
+            FixtureEnvironment.setSky(fixtureServerWorld, phase.time, phase.rain);
+            return null;
+        });
+        log("SKY_STARTED", "phase=" + phase.name() + " time=" + phase.time + " rain=" + phase.rain);
+    }
+
+    private void captureSkyPhase() throws Exception {
+        if (!fixtureReady()) return;
+        holdPose();
+        if (events.failureMessage() != null || !events.isEnabled()) {
+            fail("sky_renderer_unavailable");
+            return;
+        }
+        if (!canRender()) return;
+        long frames = events.renderedFrames();
+        if (frames < lastFrames) {
+            fail("sky_frame_counter_reset");
+            return;
+        }
+        lastFrames = frames;
+        if (++ticks < SKY_SETTLE_TICKS || frames - frameBaseline < REENABLE_NATIVE_FRAMES) return;
+        if (events.skyResourceCount() == 0) {
+            fail("sky_resources_missing");
+            return;
+        }
+        if (skyPhase != SkyPhase.DAY && events.skyTextureUpdates() <= skyUpdateBaseline) {
+            fail("sky_texture_not_updated");
+            return;
+        }
+        BufferedImage screenshot = readScreenshot();
+        FixtureSkyImage.Result image = FixtureSkyImage.evaluate(screenshot);
+        String file = capture("sky-" + skyPhase.name().toLowerCase(java.util.Locale.ROOT), screenshot);
+        if (skyPhase == SkyPhase.DAY) {
+            if (!image.isVisible()) {
+                log("SKY_IMAGE_FAIL", "phase=DAY file=" + file + " " + image.describe());
+                fail("day_sky_not_visible");
+                return;
+            }
+            daySkyImage = image;
+        } else if ((skyPhase == SkyPhase.NIGHT || skyPhase == SkyPhase.RAIN)
+                && image.difference(daySkyImage) < 8.0) {
+            log("SKY_IMAGE_FAIL", "phase=" + skyPhase.name() + " file=" + file + " " + image.describe());
+            fail("sky_did_not_change_" + skyPhase.name().toLowerCase(java.util.Locale.ROOT));
+            return;
+        }
+        log("SKY_CAPTURE_PASS", "phase=" + skyPhase.name() + " file=" + file
+                + " frames=" + (frames - frameBaseline) + " resources=" + events.skyResourceCount()
+                + " worldTime=" + mc.world.getWorldTime() + " rain=" + mc.world.getRainStrength(1.0f)
+                + " textureUpdates=" + events.skyTextureUpdates() + " " + image.describe()
+                + " dayDifference=" + image.difference(daySkyImage));
+        if (skyPhase == SkyPhase.RAIN) beginRuleRestoration(true, null);
+        else beginSkyPhase(SkyPhase.values()[skyPhase.ordinal() + 1]);
     }
 
     private void unloadFixture() {
@@ -565,12 +677,15 @@ final class SmokeController {
 
     private void holdPose() {
         if (pose == null || mc.player == null) return;
-        mc.player.setPositionAndRotation(pose.x, pose.y, pose.z, pose.yaw, pose.pitch);
+        boolean skyProbe = state == State.SKY_APPLY || state == State.SKY_CAPTURE;
+        float pitch = skyProbe ? (skyPhase == SkyPhase.SUNSET ? -10f : -65f) : pose.pitch;
+        float yaw = skyProbe ? 90f : pose.yaw;
+        mc.player.setPositionAndRotation(pose.x, pose.y, pose.z, yaw, pitch);
         mc.player.prevPosX = mc.player.lastTickPosX = pose.x;
         mc.player.prevPosY = mc.player.lastTickPosY = pose.y;
         mc.player.prevPosZ = mc.player.lastTickPosZ = pose.z;
-        mc.player.prevRotationYaw = mc.player.rotationYawHead = mc.player.prevRotationYawHead = pose.yaw;
-        mc.player.prevRotationPitch = pose.pitch;
+        mc.player.prevRotationYaw = mc.player.rotationYawHead = mc.player.prevRotationYawHead = yaw;
+        mc.player.prevRotationPitch = pitch;
         mc.player.motionX = mc.player.motionY = mc.player.motionZ = 0;
         mc.player.capabilities.isFlying = true;
         if (includeEntities && (entityReferenceHeld
@@ -593,18 +708,7 @@ final class SmokeController {
         boolean firstProbe = imageReadiness == null;
         lastImageProbeNanos = now;
         lastImageProbeFrame = frames;
-        int texture = GL11.glGetInteger(GL11.GL_TEXTURE_BINDING_2D);
-        int packAlignment = GL11.glGetInteger(GL11.GL_PACK_ALIGNMENT);
-        int unpackAlignment = GL11.glGetInteger(GL11.GL_UNPACK_ALIGNMENT);
-        try {
-            imageReadiness = FixtureImageReadiness.evaluate(ScreenShotHelper.createScreenshot(
-                    mc.displayWidth, mc.displayHeight, mc.getFramebuffer()));
-        } finally {
-            // The screenshot helper changes all three; keep Minecraft's texture cache in sync.
-            GlStateManager.bindTexture(texture);
-            GlStateManager.glPixelStorei(GL11.GL_PACK_ALIGNMENT, packAlignment);
-            GlStateManager.glPixelStorei(GL11.GL_UNPACK_ALIGNMENT, unpackAlignment);
-        }
+        imageReadiness = FixtureImageReadiness.evaluate(readScreenshot());
         if (firstProbe || imageReadiness.isReady()) {
             log(imageReadiness.isReady() ? "IMAGE_READY" : "IMAGE_WAIT",
                     "phase=" + state.name() + " frames=" + (frames - frameBaseline)
@@ -613,17 +717,36 @@ final class SmokeController {
         return imageReadiness.isReady();
     }
 
+    private BufferedImage readScreenshot() {
+        int texture = GL11.glGetInteger(GL11.GL_TEXTURE_BINDING_2D);
+        int packAlignment = GL11.glGetInteger(GL11.GL_PACK_ALIGNMENT);
+        int unpackAlignment = GL11.glGetInteger(GL11.GL_UNPACK_ALIGNMENT);
+        try {
+            return ScreenShotHelper.createScreenshot(mc.displayWidth, mc.displayHeight, mc.getFramebuffer());
+        } finally {
+            // The screenshot helper changes all three; keep Minecraft's texture cache in sync.
+            GlStateManager.bindTexture(texture);
+            GlStateManager.glPixelStorei(GL11.GL_PACK_ALIGNMENT, packAlignment);
+            GlStateManager.glPixelStorei(GL11.GL_UNPACK_ALIGNMENT, unpackAlignment);
+        }
+    }
+
     private String capture(String renderer) throws Exception {
+        return capture(renderer, readScreenshot());
+    }
+
+    private String capture(String renderer, BufferedImage image) throws Exception {
         String name = "rlcraft-remix-smoke-" + id + "-" + renderer + ".png";
         File file = new File(new File(mc.gameDir, "screenshots"), name);
         if (file.exists()) throw new IllegalStateException("Screenshot filename already exists");
-        ScreenShotHelper.saveScreenshot(mc.gameDir, name, mc.displayWidth, mc.displayHeight, mc.getFramebuffer());
+        Files.createDirectories(file.toPath().getParent());
+        if (!ImageIO.write(image, "png", file)) throw new IllegalStateException("PNG writer is unavailable");
         if (!file.isFile() || file.length() == 0) throw new IllegalStateException("Screenshot was not written");
         return name;
     }
 
     private long timeoutForState() {
-        if (state == State.REMIX || state == State.REENABLE) return NATIVE_TIMEOUT;
+        if (state == State.REMIX || state == State.REENABLE || state == State.SKY_CAPTURE) return NATIVE_TIMEOUT;
         if (state == State.SETTLE || state == State.VANILLA || state == State.RESTORE_RULES
                 || state == State.UNLOAD) return SETTLE_TIMEOUT;
         return STARTUP_TIMEOUT;
@@ -672,8 +795,11 @@ final class SmokeController {
             setup = null;
             entityStep = null;
             ruleRestoration = null;
+            skyStep = null;
             clientRules = null;
             serverRules = null;
+            clientEnvironment = null;
+            serverEnvironment = null;
             fixtureClientWorld = null;
             fixtureServerWorld = null;
             fixtureServer = null;
