@@ -1,0 +1,101 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+package com.nvidia.rtxremix;
+
+import java.lang.reflect.Field;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Paths;
+import java.util.Arrays;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+/** Executable Java 8 checks for layouts shared with the native API. */
+public final class BridgeContractTest {
+    public static void main(String[] args) throws Exception {
+        String header = new String(Files.readAllBytes(
+                Paths.get(args[0], "native", "include", "remix_c.h")), StandardCharsets.UTF_8);
+        verifyHeaderConstants(header);
+        verifyVertexLayout();
+        verifyTransforms();
+        verifyCommandLineRedaction();
+        System.out.println("PASS: header/version agreement, vertex/transform layouts, command-line redaction");
+    }
+
+    private static void verifyHeaderConstants(String header) throws Exception {
+        for (Field field : StructType.class.getFields()) {
+            Matcher value = Pattern.compile("REMIXAPI_STRUCT_TYPE_" + field.getName()
+                    + "\\s*=\\s*(\\d+)").matcher(header);
+            check(value.find(), "Missing native struct constant " + field.getName());
+            check(field.getInt(null) == Integer.parseInt(value.group(1)),
+                    "Mismatched native struct constant " + field.getName());
+        }
+        String[] versionFields = {"MAJOR", "MINOR", "PATCH"};
+        for (String part : versionFields) {
+            Matcher value = Pattern.compile("#define REMIXAPI_VERSION_" + part + "\\s+(\\d+)").matcher(header);
+            check(value.find(), "Missing native API version " + part);
+            check(RemixAPI.class.getField("VERSION_" + part).getInt(null)
+                    == Integer.parseInt(value.group(1)), "Java/native API version mismatch: " + part);
+        }
+    }
+
+    private static void verifyVertexLayout() {
+        HardcodedVertex vertex = HardcodedVertex.create(1, 2, 3, 0, 1, 0, 0.25f, 0.75f, 0xFF123456);
+        vertex.setTexcoordBounds(0, 0, 1, 1);
+        ByteBuffer buffer = ByteBuffer.allocateDirect(HardcodedVertex.STRIDE).order(ByteOrder.LITTLE_ENDIAN);
+        vertex.writeTo(buffer);
+        check(buffer.position() == 64, "Vertex size must be 64 bytes");
+        check(buffer.getFloat(0) == 1 && buffer.getFloat(8) == 3, "Vertex position offset");
+        check(buffer.getFloat(16) == 1, "Vertex normal offset");
+        check(buffer.getFloat(24) == 0.25f && buffer.getFloat(28) == 0.75f, "Vertex UV offset");
+        check(buffer.getInt(32) == 0xFF123456, "Vertex color offset");
+        check(buffer.getInt(36) == 0 && buffer.getInt(40) == 0x3C003C00, "Packed half-float UV bounds");
+    }
+
+    private static void verifyTransforms() {
+        Transform transform = Transform.fromTRS(3, 4, 5, 0, 0, 0, 1, 2);
+        check(transform.get(0, 0) == 2 && transform.get(1, 1) == 2 && transform.get(2, 2) == 2,
+                "Identity quaternion and uniform scale");
+        check(transform.get(0, 3) == 3 && transform.get(1, 3) == 4 && transform.get(2, 3) == 5,
+                "Translation must occupy fourth column");
+        Transform halfTurn = Transform.fromTRS(0, 0, 0, 0, 0, 1, 0, 1);
+        check(halfTurn.get(0, 0) == -1 && halfTurn.get(1, 1) == -1 && halfTurn.get(2, 2) == 1,
+                "Quaternion half-turn about Z");
+        InstanceInfoBoneTransformsEXT bones = new InstanceInfoBoneTransformsEXT();
+        bones.setBoneTransforms(new Transform[] {transform, halfTurn});
+        check(bones.transformData.isDirect() && bones.transformData.order() == ByteOrder.LITTLE_ENDIAN,
+                "Native bone transforms require direct little-endian data");
+        check(bones.transformData.position() == 0 && bones.transformData.limit() == 96, "Bone buffer span");
+        check(bones.transformData.getFloat(12) == 3 && bones.transformData.getFloat(48) == -1,
+                "Bone buffer row-major order and 48-byte stride");
+    }
+
+    private static void verifyCommandLineRedaction() {
+        assertRedaction("java --accessToken=secret --uuid abcd", "java --accessToken=****** --uuid ****", 2);
+        assertRedaction("\"C:\\Program Files\\Java\\javaw.exe\" --accessToken \"a b\" next",
+                "\"C:\\Program Files\\Java\\javaw.exe\" --accessToken \"***\" next", 1);
+        assertRedaction("java --accessToken \"a\\\"b c\" next", "java --accessToken \"*\\\"***\" next", 1);
+        assertRedaction("java --accessToken \"a\"\"b\" next", "java --accessToken \"*\"\"*\" next", 1);
+        assertRedaction("java -Dx=--accessToken --accessTokens secret --accessToken",
+                "java -Dx=--accessToken --accessTokens secret --accessToken", 0);
+        assertRedaction("\"--accessToken\" secret", "\"--accessToken\" secret", 0);
+        assertRedaction("java --username Steve --clientId=demo --xuid 1234",
+                "java --username ***** --clientId=**** --xuid ****", 3);
+    }
+
+    private static void assertRedaction(String input, String expected, int count) {
+        CommandLineRedaction.Result result = CommandLineRedaction.redact(input,
+                Arrays.asList("--username", "--accessToken", "--uuid", "--xuid", "--clientId"));
+        check(expected.equals(result.commandLine()), "Unexpected redaction output");
+        check(input.length() == result.commandLine().length(), "Redaction must preserve raw command-line length");
+        check(result.blankedValues() == count, "Unexpected redaction count");
+    }
+
+    static void check(boolean valid, String message) {
+        if (!valid) throw new AssertionError(message);
+    }
+}

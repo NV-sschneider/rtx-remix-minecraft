@@ -1,0 +1,15 @@
+.tools/
+.gradle/
+.gradle-home/
+.gradle-home21/
+build/
+work/
+upstream/
+run/
+*.log
+*.hprof
+hs_err_pid*
+.idea/
+*.iml
+metrics.txt
+

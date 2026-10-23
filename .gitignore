@@ -68,3 +68,12 @@ nrc_session_log.txt
 /rtxremix-java/**/*.class
 /rtxremix-java/**/*.jar
 /rtxremix-java/**/*.log
+
+# Local Forge development tools, launcher profiles, and reference checkout
+/.tools/
+/.gradle-home/
+/.gradle-home21/
+/work/
+/upstream/
+*.hprof
+hs_err_pid*
