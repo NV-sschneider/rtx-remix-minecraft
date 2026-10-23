@@ -1,6 +1,7 @@
 /*
  * SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
+ * Modified for the Java 8 port: retain the initialized runtime DLL until process exit.
  */
 
 /*
@@ -550,6 +551,16 @@ static jint initializeRuntime(const wchar_t* dllPath)
             FreeLibrary(g_remixDll);
             g_remixDll = nullptr;
             return REMIXAPI_ERROR_CODE_INCOMPATIBLE_VERSION;
+        }
+        // Shutdown releases runtime resources. Keep the module resident because
+        // explicit DLL unloading can deadlock worker teardown under the loader lock.
+        HMODULE pinnedRuntime = nullptr;
+        if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+                reinterpret_cast<LPCWSTR>(pfnInit), &pinnedRuntime)) {
+            memset(&g_remix, 0, sizeof(g_remix));
+            FreeLibrary(g_remixDll);
+            g_remixDll = nullptr;
+            return REMIXAPI_ERROR_CODE_LOAD_LIBRARY_FAILURE;
         }
         g_inited = true;
         {
