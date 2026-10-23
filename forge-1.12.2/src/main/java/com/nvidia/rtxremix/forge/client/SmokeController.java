@@ -41,6 +41,9 @@ import org.lwjgl.opengl.GL11;
  * -Drlcraftremix.smoke.exit=true. Add -Drlcraftremix.smoke.entities=true for
  * a stationary pig and a cow making a bounded round trip before each capture.
  * Add -Drlcraftremix.smoke.sky=true for clear noon, sunset, midnight, and rain.
+ * Add -Drlcraftremix.smoke.terrain=true for terrain travel, mutation, and radius checks;
+ * -Drlcraftremix.smoke.terrainNatural=true selects a generated landscape for those checks.
+ * -Drlcraftremix.smoke.terrainRadius=N selects 4 through 32 chunks (default 4).
  * The unique fixture save and screenshots remain
  * on disk for inspection. Completion checks frame capture, nonblank fixture output,
  * and renderer lifecycle. Visual correctness still requires image inspection.
@@ -61,7 +64,7 @@ final class SmokeController {
 
     private enum State {
         INACTIVE, WAIT_MENU, WAIT_WORLD, BUILD_SCENE, SETTLE, REMIX, VANILLA,
-        REENABLE, SKY_APPLY, SKY_CAPTURE, RESTORE_RULES, DISCONNECT, UNLOAD, EXIT, DONE
+        REENABLE, TERRAIN, SKY_APPLY, SKY_CAPTURE, RESTORE_RULES, DISCONNECT, UNLOAD, EXIT, DONE
     }
 
     private enum SkyPhase {
@@ -76,6 +79,8 @@ final class SmokeController {
     private final boolean exitAfter;
     private final boolean includeEntities;
     private final boolean includeSky;
+    private final boolean includeTerrain;
+    private final boolean naturalTerrain;
     private final String id;
     private State state;
     private long stateSince;
@@ -115,6 +120,8 @@ final class SmokeController {
     private boolean settingsSaved;
     private boolean previousPauseOnLostFocus;
     private int previousThirdPerson;
+    private int previousRenderDistance;
+    private FixtureTerrain terrainFixture;
     private GuiScreen initializedMainMenu;
     private long lastImageProbeNanos;
     private long lastImageProbeFrame;
@@ -130,6 +137,8 @@ final class SmokeController {
         this.exitAfter = requested && Boolean.getBoolean("rlcraftremix.smoke.exit");
         this.includeEntities = requested && Boolean.getBoolean("rlcraftremix.smoke.entities");
         this.includeSky = requested && Boolean.getBoolean("rlcraftremix.smoke.sky");
+        this.includeTerrain = requested && Boolean.getBoolean("rlcraftremix.smoke.terrain");
+        this.naturalTerrain = includeTerrain && Boolean.getBoolean("rlcraftremix.smoke.terrainNatural");
         this.id = requested
                 ? DateTimeFormatter.ofPattern("uuuuMMdd-HHmmss").withZone(ZoneOffset.UTC).format(Instant.now())
                         + "-" + UUID.randomUUID().toString().substring(0, 8)
@@ -137,7 +146,7 @@ final class SmokeController {
         this.state = requested ? State.WAIT_MENU : State.INACTIVE;
         this.stateSince = System.nanoTime();
         if (requested) log("START", "exit=" + exitAfter + " seed=" + SEED + " entities=" + includeEntities
-                + " sky=" + includeSky
+                + " sky=" + includeSky + " terrain=" + includeTerrain + " naturalTerrain=" + naturalTerrain
                 + " validation=capture_and_lifecycle pixelValidation=nonblank_fixture");
     }
 
@@ -235,6 +244,10 @@ final class SmokeController {
                     }
                     break;
                 case VANILLA:
+                    if (events.failureMessage() != null) {
+                        fail("disable_renderer_failure");
+                        break;
+                    }
                     if (!fixtureReady()) break;
                     holdPose();
                     if (events.isEnabled()) {
@@ -251,6 +264,11 @@ final class SmokeController {
                             fail("sky_resources_present_after_disable");
                             break;
                         }
+                        if (includeTerrain && events.terrainResourceCount() != 0) {
+                            fail("terrain_resources_present_after_disable");
+                            break;
+                        }
+                        if (includeTerrain) log("TERRAIN_DISABLE_PASS", "liveResources=0");
                         vanillaScreenshot = capture("vanilla");
                         log("VANILLA_CAPTURED", "file=" + vanillaScreenshot);
                         frameBaseline = events.renderedFrames();
@@ -286,6 +304,15 @@ final class SmokeController {
                         reenabledFrames = reenableFrames - frameBaseline;
                         log("REENABLE_PASS", "frames=" + reenabledFrames
                                 + " baseline=" + frameBaseline + " totalFrames=" + reenableFrames);
+                        if (includeTerrain) beginTerrainFixture();
+                        else if (includeSky) beginSkyPhase(SkyPhase.DAY);
+                        else beginRuleRestoration(true, null);
+                    }
+                    break;
+                case TERRAIN:
+                    if (!fixtureReady()) break;
+                    lastFrames = events.renderedFrames();
+                    if (terrainFixture.tick()) {
                         if (includeSky) beginSkyPhase(SkyPhase.DAY);
                         else beginRuleRestoration(true, null);
                     }
@@ -352,11 +379,17 @@ final class SmokeController {
                             break;
                         }
                         if (includeSky) log("SKY_RELEASE_PASS", "liveResources=0");
+                        if (includeTerrain && events.terrainResourceCount() != 0) {
+                            fail("terrain_resources_present_after_unload");
+                            break;
+                        }
+                        if (includeTerrain) log("TERRAIN_RELEASE_PASS", "liveResources=0");
                         log("WORLD_UNLOAD_PASS", "menuTicks=" + ticks + " rendererEnabled=true");
                         finish(true, "frames=" + capturedFrames + " world=" + saveName
                                 + " remix=" + remixScreenshot + " vanilla=" + vanillaScreenshot
                                 + " reenableFrames=" + reenabledFrames + " unloadTicks=" + ticks
                                 + " entities=" + includeEntities + " sky=" + includeSky
+                                + " terrain=" + includeTerrain + " naturalTerrain=" + naturalTerrain
                                 + " validation=capture_and_lifecycle pixelValidation=nonblank_fixture");
                     }
                     break;
@@ -371,20 +404,28 @@ final class SmokeController {
 
     private void launchFixture() throws Exception {
         if (events.isEnabled()) events.setEnabled(false);
+        // Validate the optional property before taking ownership of any client settings.
+        int terrainRadius = includeTerrain ? FixtureTerrain.RADIUS : 0;
         previousPauseOnLostFocus = mc.gameSettings.pauseOnLostFocus;
         previousThirdPerson = mc.gameSettings.thirdPersonView;
+        previousRenderDistance = mc.gameSettings.renderDistanceChunks;
         settingsSaved = true;
         mc.gameSettings.pauseOnLostFocus = false;
         mc.gameSettings.thirdPersonView = 0;
+        if (includeTerrain) {
+            FixtureTerrain.setRadius(mc, terrainRadius);
+            log("TERRAIN_SETTINGS_SAVED", "renderDistance=" + previousRenderDistance
+                    + " fixtureRenderDistance=" + terrainRadius);
+        }
 
         saveName = "rlcraft-remix-smoke-" + id;
         Path saves = mc.gameDir.toPath().resolve("saves");
         Files.createDirectories(saves);
         // Atomic reservation: never reuse, overwrite, or delete an existing world directory.
         Files.createDirectory(saves.resolve(saveName));
-        WorldSettings settings = new WorldSettings(SEED, GameType.CREATIVE, false, false, WorldType.FLAT)
-                .setGeneratorOptions("3;minecraft:bedrock,2*minecraft:dirt,minecraft:grass;1;")
-                .enableCommands();
+        WorldSettings settings = new WorldSettings(SEED, GameType.CREATIVE, false, false,
+                naturalTerrain ? WorldType.DEFAULT : WorldType.FLAT).enableCommands();
+        if (!naturalTerrain) settings.setGeneratorOptions("3;minecraft:bedrock,2*minecraft:dirt,minecraft:grass;1;");
         transition(State.WAIT_WORLD);
         log("WORLD_CREATE", "world=" + saveName);
         mc.launchIntegratedServer(saveName, "RTX Remix smoke " + id, settings);
@@ -437,6 +478,17 @@ final class SmokeController {
         world.getGameRules().setOrCreateGameRule("doWeatherCycle", "false");
         world.getGameRules().setOrCreateGameRule("randomTickSpeed", "0");
         FixtureEnvironment.setSky(world, 6000L, false);
+
+        if (naturalTerrain) {
+            // Clear only the owned fixture's scene and camera corridor, including foliage.
+            for (int x = -10; x <= 10; x++) {
+                for (int z = -5; z <= 19; z++) {
+                    for (int y = 1; y <= 16; y++) {
+                        world.setBlockToAir(new BlockPos(cx + x, floorY + y, cz + z));
+                    }
+                }
+            }
+        }
 
         for (int x = -10; x <= 10; x++) {
             for (int z = -5; z <= 13; z++) {
@@ -504,6 +556,18 @@ final class SmokeController {
                 || !saveName.equals(fixtureServer.getFolderName())) {
             throw new IllegalStateException("Unexpected fixture client world during cleanup");
         }
+    }
+
+    private void beginTerrainFixture() {
+        terrainFixture = new FixtureTerrain(mc, events, fixtureServer, fixtureServerWorld,
+                saveName, pose.x, pose.y, pose.z, new FixtureTerrain.Output() {
+                    @Override public BufferedImage image() { return readScreenshot(); }
+                    @Override public String capture(String name, BufferedImage image) throws Exception {
+                        return SmokeController.this.capture(name, image);
+                    }
+                    @Override public void log(String event, String fields) { SmokeController.this.log(event, fields); }
+                });
+        transition(State.TERRAIN);
     }
 
     private void beginSkyPhase(SkyPhase phase) {
@@ -772,6 +836,8 @@ final class SmokeController {
     }
 
     private long timeoutForState() {
+        // Terrain owns a bounded deadline for each independent readiness phase.
+        if (state == State.TERRAIN) return NATIVE_TIMEOUT * 10;
         if (state == State.REMIX || state == State.REENABLE || state == State.SKY_CAPTURE) return NATIVE_TIMEOUT;
         if (state == State.SETTLE || state == State.VANILLA || state == State.RESTORE_RULES || state == State.DISCONNECT
                 || state == State.UNLOAD) return SETTLE_TIMEOUT;
@@ -799,6 +865,7 @@ final class SmokeController {
         finish(false, "reason=" + reason + " phase=" + state.name()
                 + " frames=" + Math.max(0L, lastFrames - frameBaseline)
                 + (includeEntities && pose != null ? " " + entityCaptureSummary() : "")
+                + (terrainFixture == null ? "" : " " + terrainFixture.status())
                 + (imageReadiness == null ? "" : " " + imageReadiness.describe()));
     }
 
@@ -815,6 +882,10 @@ final class SmokeController {
         if (settingsSaved) {
             mc.gameSettings.pauseOnLostFocus = previousPauseOnLostFocus;
             mc.gameSettings.thirdPersonView = previousThirdPerson;
+            if (includeTerrain) {
+                FixtureTerrain.setRadius(mc, previousRenderDistance);
+                log("TERRAIN_SETTINGS_RESTORED", "renderDistance=" + mc.gameSettings.renderDistanceChunks);
+            }
             settingsSaved = false;
         }
         log(success ? "PASS" : "FAIL", fields);
@@ -824,6 +895,7 @@ final class SmokeController {
             ruleRestoration = null;
             skyStep = null;
             serverShutdown = null;
+            terrainFixture = null;
             clientRules = null;
             serverRules = null;
             clientEnvironment = null;
