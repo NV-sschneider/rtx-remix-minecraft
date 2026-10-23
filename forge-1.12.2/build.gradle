@@ -1,0 +1,48 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+buildscript {
+    repositories {
+        maven { url = 'https://maven.minecraftforge.net/' }
+        mavenCentral()
+    }
+    dependencies { classpath 'net.minecraftforge.gradle:ForgeGradle:3.0.197' }
+}
+
+apply plugin: 'net.minecraftforge.gradle'
+apply plugin: 'java'
+
+group = 'com.nvidia.rtxremix.forge'
+version = '0.1.0-prototype'
+archivesBaseName = 'rlcraft-remix-forge'
+sourceCompatibility = targetCompatibility = '1.8'
+
+repositories { mavenCentral() }
+
+minecraft {
+    mappings channel: 'stable', version: '39-1.12'
+}
+
+sourceSets.main.java.srcDir 'bridge/src/main/java'
+
+dependencies {
+    minecraft 'net.minecraftforge:forge:1.12.2-14.23.5.2860'
+    testImplementation 'junit:junit:4.13.2'
+}
+
+tasks.withType(JavaCompile) { options.encoding = 'UTF-8' }
+
+jar {
+    manifest {
+        attributes(
+            'FMLCorePlugin': 'com.nvidia.rtxremix.forge.core.RemixCorePlugin',
+            'FMLCorePluginContainsFMLMod': 'true',
+            'Implementation-Title': 'Experimental RTX Remix Forge port',
+            'Implementation-Version': project.version
+        )
+    }
+    from('LICENSE')
+    from('NOTICE')
+}
+jar.finalizedBy('reobfJar')
+

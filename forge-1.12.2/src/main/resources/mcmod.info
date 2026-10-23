@@ -1,0 +1,11 @@
+[
+  {
+    "modid": "rlcraftremix",
+    "name": "RTX Remix Forge Prototype",
+    "description": "Experimental Minecraft 1.12.2 terrain renderer. Not an official NVIDIA, Mojang, or RLCraft release.",
+    "version": "0.1.0-prototype",
+    "mcversion": "1.12.2",
+    "clientSideOnly": true,
+    "authorList": []
+  }
+]
