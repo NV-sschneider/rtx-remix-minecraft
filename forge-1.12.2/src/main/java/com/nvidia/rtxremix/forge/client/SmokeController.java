@@ -18,6 +18,7 @@ import net.minecraft.block.BlockColored;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiMainMenu;
 import net.minecraft.client.gui.GuiScreen;
+import net.minecraft.client.renderer.GlStateManager;
 import net.minecraft.entity.player.EntityPlayerMP;
 import net.minecraft.init.Blocks;
 import net.minecraft.item.EnumDyeColor;
@@ -28,14 +29,15 @@ import net.minecraft.world.GameType;
 import net.minecraft.world.WorldServer;
 import net.minecraft.world.WorldSettings;
 import net.minecraft.world.WorldType;
+import org.lwjgl.opengl.GL11;
 
 /**
  * Opt-in, in-process smoke fixture for a normally authenticated Minecraft launch.
  * It neither starts a launcher nor changes account/session authentication.
  * Enable with -Drlcraftremix.smoke=true; shutdown additionally requires
  * -Drlcraftremix.smoke.exit=true. The unique fixture save and screenshots remain
- * on disk for inspection. Completion checks frame capture and renderer lifecycle,
- * not visual correctness.
+ * on disk for inspection. Completion checks frame capture, nonblank fixture output,
+ * and renderer lifecycle. Visual correctness still requires image inspection.
  */
 final class SmokeController {
     private static final long SEED = 8675309L;
@@ -47,6 +49,7 @@ final class SmokeController {
     private static final long STARTUP_TIMEOUT = TimeUnit.SECONDS.toNanos(180);
     private static final long NATIVE_TIMEOUT = TimeUnit.SECONDS.toNanos(300);
     private static final long SETTLE_TIMEOUT = TimeUnit.SECONDS.toNanos(90);
+    private static final long IMAGE_PROBE_INTERVAL = TimeUnit.MILLISECONDS.toNanos(250);
 
     private enum State {
         INACTIVE, WAIT_MENU, WAIT_WORLD, BUILD_SCENE, SETTLE, REMIX, VANILLA,
@@ -73,6 +76,9 @@ final class SmokeController {
     private boolean previousPauseOnLostFocus;
     private int previousThirdPerson;
     private GuiScreen initializedMainMenu;
+    private long lastImageProbeNanos;
+    private long lastImageProbeFrame;
+    private FixtureImageReadiness.Result imageReadiness;
 
     SmokeController(Minecraft mc, ClientEvents events) {
         this.mc = mc;
@@ -85,7 +91,8 @@ final class SmokeController {
                 : "disabled";
         this.state = requested ? State.WAIT_MENU : State.INACTIVE;
         this.stateSince = System.nanoTime();
-        if (requested) log("START", "exit=" + exitAfter + " seed=" + SEED + " validation=capture_and_lifecycle");
+        if (requested) log("START", "exit=" + exitAfter + " seed=" + SEED
+                + " validation=capture_and_lifecycle pixelValidation=nonblank_fixture");
     }
 
     /** Observe the main-menu compatibility marker without requiring its actual screen type. */
@@ -170,7 +177,7 @@ final class SmokeController {
                         break;
                     }
                     lastFrames = frames;
-                    if (frames - frameBaseline >= REQUIRED_NATIVE_FRAMES) {
+                    if (frames - frameBaseline >= REQUIRED_NATIVE_FRAMES && fixtureImageReady(frames)) {
                         capturedFrames = frames - frameBaseline;
                         remixScreenshot = capture("remix");
                         log("REMIX_CAPTURED", "frames=" + capturedFrames + " file=" + remixScreenshot);
@@ -215,7 +222,8 @@ final class SmokeController {
                         break;
                     }
                     lastFrames = reenableFrames;
-                    if (reenableFrames - frameBaseline >= REENABLE_NATIVE_FRAMES) {
+                    if (reenableFrames - frameBaseline >= REENABLE_NATIVE_FRAMES
+                            && fixtureImageReady(reenableFrames)) {
                         reenabledFrames = reenableFrames - frameBaseline;
                         log("REENABLE_PASS", "frames=" + reenabledFrames
                                 + " baseline=" + frameBaseline + " totalFrames=" + reenableFrames);
@@ -249,7 +257,7 @@ final class SmokeController {
                         finish(true, "frames=" + capturedFrames + " world=" + saveName
                                 + " remix=" + remixScreenshot + " vanilla=" + vanillaScreenshot
                                 + " reenableFrames=" + reenabledFrames + " unloadTicks=" + ticks
-                                + " validation=capture_and_lifecycle");
+                                + " validation=capture_and_lifecycle pixelValidation=nonblank_fixture");
                     }
                     break;
                 default:
@@ -373,6 +381,34 @@ final class SmokeController {
                 && !mc.isGamePaused() && mc.displayWidth > 0 && mc.displayHeight > 0;
     }
 
+    private boolean fixtureImageReady(long frames) {
+        long now = System.nanoTime();
+        // Bound full-frame GPU readback cost; readiness never extends the state's deadline.
+        if (imageReadiness != null && (frames == lastImageProbeFrame
+                || now - lastImageProbeNanos < IMAGE_PROBE_INTERVAL)) return false;
+        boolean firstProbe = imageReadiness == null;
+        lastImageProbeNanos = now;
+        lastImageProbeFrame = frames;
+        int texture = GL11.glGetInteger(GL11.GL_TEXTURE_BINDING_2D);
+        int packAlignment = GL11.glGetInteger(GL11.GL_PACK_ALIGNMENT);
+        int unpackAlignment = GL11.glGetInteger(GL11.GL_UNPACK_ALIGNMENT);
+        try {
+            imageReadiness = FixtureImageReadiness.evaluate(ScreenShotHelper.createScreenshot(
+                    mc.displayWidth, mc.displayHeight, mc.getFramebuffer()));
+        } finally {
+            // The screenshot helper changes all three; keep Minecraft's texture cache in sync.
+            GlStateManager.bindTexture(texture);
+            GlStateManager.glPixelStorei(GL11.GL_PACK_ALIGNMENT, packAlignment);
+            GlStateManager.glPixelStorei(GL11.GL_UNPACK_ALIGNMENT, unpackAlignment);
+        }
+        if (firstProbe || imageReadiness.isReady()) {
+            log(imageReadiness.isReady() ? "IMAGE_READY" : "IMAGE_WAIT",
+                    "phase=" + state.name() + " frames=" + (frames - frameBaseline)
+                            + " " + imageReadiness.describe());
+        }
+        return imageReadiness.isReady();
+    }
+
     private String capture(String renderer) throws Exception {
         String name = "rlcraft-remix-smoke-" + id + "-" + renderer + ".png";
         File file = new File(new File(mc.gameDir, "screenshots"), name);
@@ -393,12 +429,14 @@ final class SmokeController {
         stateSince = System.nanoTime();
         ticks = 0;
         initializedMainMenu = null;
+        imageReadiness = null;
     }
 
     private void fail(String reason) {
         if (state == State.DONE || state == State.EXIT || state == State.INACTIVE) return;
         finish(false, "reason=" + reason + " phase=" + state.name()
-                + " frames=" + Math.max(0L, lastFrames - frameBaseline));
+                + " frames=" + Math.max(0L, lastFrames - frameBaseline)
+                + (imageReadiness == null ? "" : " " + imageReadiness.describe()));
     }
 
     private void finish(boolean success, String fields) {
