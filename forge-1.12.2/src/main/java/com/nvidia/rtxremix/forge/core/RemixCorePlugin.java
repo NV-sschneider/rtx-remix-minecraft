@@ -17,7 +17,10 @@ public final class RemixCorePlugin implements IFMLLoadingPlugin {
     public String[] getASMTransformerClass() {
         return new String[] {
             "com.nvidia.rtxremix.forge.core.DisplayLifecycleTransformer",
-            "com.nvidia.rtxremix.forge.core.EntityCaptureTransformer"
+            "com.nvidia.rtxremix.forge.core.EntityCaptureTransformer",
+            "com.nvidia.rtxremix.forge.core.AtlasAnimationTransformer",
+            "com.nvidia.rtxremix.forge.core.ItemCaptureTransformer",
+            "com.nvidia.rtxremix.forge.core.EffectCaptureTransformer"
         };
     }
 

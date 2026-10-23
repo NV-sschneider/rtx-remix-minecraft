@@ -15,10 +15,13 @@ import net.minecraft.client.model.ModelRenderer;
 import net.minecraft.client.model.PositionTextureVertex;
 import net.minecraft.client.model.TexturedQuad;
 import net.minecraftforge.fml.relauncher.ReflectionHelper;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
-/** Reusable local-space geometry scratch; only Minecraft's ordinary rigid box faces are supported. */
+/** Reusable local-space geometry scratch for ordinary boxes and explicitly supported box contracts. */
 final class EntityMesh {
     static final int MAX_QUADS = 4096;
+    private static final Logger LOGGER = LogManager.getLogger("RLCraftRemixEntities");
     private static final Field QUADS = ReflectionHelper.findField(ModelBox.class,
             new String[] {"quadList", "field_78254_i"});
     private static final Field INVERT_NORMAL = ReflectionHelper.findField(TexturedQuad.class,
@@ -27,17 +30,22 @@ final class EntityMesh {
     private ByteBuffer indices = direct(96 * Integer.BYTES);
     private final MeshInfoSurfaceTriangles surface = new MeshInfoSurfaceTriangles();
     private final MeshInfo info = new MeshInfo();
+    private boolean warnedCapacity;
 
     EntityMesh() { info.surfaces = new MeshInfoSurfaceTriangles[] {surface}; }
 
     /** The returned buffers remain valid only until the next prepare; submit them synchronously. */
     boolean prepare(ModelRenderer part, float scale, long material) {
         if (!Float.isFinite(scale) || scale == 0) return false;
+        if (part.cubeList.size() > MAX_QUADS) return capacityExceeded();
         int quadCount = 0;
         for (ModelBox box : part.cubeList) {
-            if (box.getClass() != ModelBox.class) continue;
-            for (TexturedQuad quad : quads(box)) {
-                if (supported(quad) && ++quadCount > MAX_QUADS) return false;
+            ModelBoxFaces.Filter filter = ModelBoxFaces.forBox(box);
+            if (!filter.supported) continue;
+            TexturedQuad[] faces = quads(box);
+            if (faces.length > MAX_QUADS) return capacityExceeded();
+            for (int face = 0; face < faces.length; face++) {
+                if (filter.visible(box, face) && supported(faces[face]) && ++quadCount > MAX_QUADS) return capacityExceeded();
             }
         }
         if (quadCount == 0) return false;
@@ -46,9 +54,11 @@ final class EntityMesh {
         vertices.clear();
         indices.clear();
         for (ModelBox box : part.cubeList) {
-            if (box.getClass() != ModelBox.class) continue;
-            for (TexturedQuad quad : quads(box)) {
-                if (supported(quad)) append(quad, scale);
+            ModelBoxFaces.Filter filter = ModelBoxFaces.forBox(box);
+            if (!filter.supported) continue;
+            TexturedQuad[] faces = quads(box);
+            for (int face = 0; face < faces.length; face++) {
+                if (filter.visible(box, face) && supported(faces[face])) append(faces[face], scale);
             }
         }
         if (vertices.position() == 0) return false;
@@ -60,6 +70,14 @@ final class EntityMesh {
         surface.indexBuffer = indices;
         surface.material = material;
         return true;
+    }
+
+    private boolean capacityExceeded() {
+        if (!warnedCapacity) {
+            warnedCapacity = true;
+            LOGGER.warn("Model capture exceeds the {} face/box limit; that part is omitted; further capacity warnings are suppressed", MAX_QUADS);
+        }
+        return false;
     }
 
     MeshInfo info(long hash) { info.hash = hash; return info; }

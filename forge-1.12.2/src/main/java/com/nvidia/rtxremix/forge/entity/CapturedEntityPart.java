@@ -5,12 +5,18 @@
 package com.nvidia.rtxremix.forge.entity;
 
 import net.minecraft.client.model.ModelRenderer;
-import net.minecraft.entity.EntityLivingBase;
 
 /** Render-thread scratch data, valid only until the next capture frame. */
 public final class CapturedEntityPart {
-    public EntityLivingBase owner;
+    /** Living entity or world-owned tile entity; identity is scoped to the current scene. */
+    public Object owner;
     public ModelRenderer modelPart;
+    public int displayList;
+    EntityTriangles triangles;
+    Object triangleGroup;
+    int firstVertex;
+    int vertexCount;
+    long geometryFingerprint;
     public int occurrence;
     public float scale;
     public int textureId;
@@ -24,6 +30,8 @@ public final class CapturedEntityPart {
     void clear() {
         owner = null;
         modelPart = null;
+        triangles = null;
+        triangleGroup = null;
         textureIdentity = null;
     }
 }
