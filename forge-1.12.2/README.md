@@ -49,7 +49,8 @@ script now uses a normal interactive window.
 
 ## Current limits
 
-RLCraft's complete mod collection has not yet been integrated or tested.
+RLCraft 2.9.3 has passed an initial Creative fixture with its original mod set.
+Broader gameplay and survival effects remain unvalidated.
 Entities, tile-entity renderers, fluids, particles, animated texture updates,
 and custom rendering need additional capture paths. Terrain outside the small
 capture radius is absent. Glass uses basic alpha behavior, not a finished
@@ -101,8 +102,10 @@ GL state restoration, and exited successfully. Run it with:
 .\forge-1.12.2\scripts\build-bridge.ps1 -RuntimeDirectory .\remix-runtime\win64 -GpuSmoke
 ```
 
-The Forge build passed seven JUnit checks covering mesh packing and real
-Minecraft lifecycle bytecode. The authenticated in-game test captured 184
+The Forge build passed 12 JUnit checks covering mesh packing, real Minecraft lifecycle
+bytecode, main-menu initialization ordering, and blank fixture image rejection. The fixture
+recognizes replacement main menus through Forge's initialization events.
+The authenticated Forge-only in-game test captured 184
 native frames with nine terrain sections. Visual inspection confirmed textured
 terrain, color and camera alignment, shadows, glass cutouts, and the hand/HUD.
 Switching back produced the expected vanilla image. Re-enabling Remix rendered
@@ -111,10 +114,21 @@ returned to the menu cleanly. The process then exited cleanly.
 The pinned native runtime reports a remaining device-object accounting warning
 at process exit; that runtime cleanup warning still needs upstream investigation.
 
+RLCraft 2.9.3 also rendered the Creative fixture with its original mod set enabled.
+Matched screenshots showed textured terrain, colored pillars, glass, shadows,
+and the pack HUD. Renderer re-enable, return to the replacement main menu, and
+process exit completed successfully. An earlier run submitted frames but produced
+black world output; the fixture now rejects that image instead of treating frame
+submission as readiness. The cause of that first-run blank output is not yet
+established. This fixture does not validate survival effects or missing capture paths.
+
 The opt-in in-game fixture creates a uniquely named flat Creative world,
 constructs a small colored-block scene on the server thread, and captures Remix
-after at least 180 successful frames followed by vanilla at the same camera
-position. It then checks re-enabling Remix and unloading the world:
+after at least 180 submitted frames followed by vanilla at the same camera
+position. Before accepting the capture, and after re-enabling Remix, it samples
+a fixed fixture region for visible, colored geometry. Blank output keeps waiting
+within the existing five-minute phase deadline; submitted API calls alone do not
+establish readiness. It then checks unloading the world:
 
 ```powershell
 .\forge-1.12.2\scripts\launch-prototype.ps1 -SmokeTest -ExitAfterSmoke
@@ -122,17 +136,41 @@ position. It then checks re-enabling Remix and unloading the world:
 
 It never replaces or deletes existing worlds. Captures remain under the Forge
 instance's `.minecraft/screenshots`; structured `RLC_SMOKE` results are in
-`.minecraft/logs/latest.log`. Capture completion alone does not prove image
-correctness; inspect the screenshots. A normal launch through the script clears
+`.minecraft/logs/latest.log`. The pixel check rejects empty fixture output;
+visual correctness still requires screenshot inspection. Imported pack instances
+may use `minecraft/` instead of `.minecraft/`. A normal launch through the script clears
 the smoke-test JVM options.
 
-## RLCraft pack acquisition
+## RLCraft test instance
 
 The [official RLCraft 2.9.3 client ZIP](https://www.curseforge.com/minecraft/modpacks/rlcraft/files/4612979)
-is not included or installed by this prototype. Download the client ZIP in a
+is distributed separately. Download the client ZIP in a
 browser and place it under the repository's ignored `work/downloads/` directory
 for import into a separate pack instance. Keep the Forge-only instance as the
-renderer regression baseline.
+renderer regression baseline. The inspected 2.9.3 manifest specifies Minecraft
+1.12.2, Forge 14.23.5.2860, and 187 mod entries, matching this module's target.
+
+Import the ZIP through Prism and name the new instance **RLCraft 2.9.3 - Remix
+Test**. Finish any browser downloads Prism requests before installing the
+prototype. Select the Java 8 JDK and allocate memory in the instance settings.
+With the game closed, install into that instance's game directory:
+
+```powershell
+.\forge-1.12.2\scripts\install-prototype.ps1 -GameDirectory '<RLCraft game directory>'
+.\forge-1.12.2\scripts\launch-prototype.ps1 -InstanceName 'RLCraft 2.9.3 - Remix Test'
+```
+
+`-InstanceName` is the folder name under Prism's `instances` directory; it can
+differ from the display name. `-LauncherDirectory` selects another Prism
+installation. Both options preserve the default Forge-only launch when omitted.
+
+Before enabling Remix, unbind its toggle in Controls to preserve Better Foliage's
+F8 binding. Use `/mrtx on`, `/mrtx off`, and `/mrtx status` in a disposable Creative
+world. Retain the pack's windowed mode, framebuffer setting, and original mods
+for the first comparison. Compare stationary terrain after chunk animation has
+settled. Additional foliage, entities, particles, fluids, and animated textures
+still need capture support; disabling their mods does not implement that support.
+Pack manifest/config inspection alone does not establish runtime compatibility.
 
 See [UPSTREAM.md](UPSTREAM.md) for versions and provenance and
 [bridge/README.md](bridge/README.md) for the native integration contract.
