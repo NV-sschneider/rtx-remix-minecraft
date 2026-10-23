@@ -17,9 +17,16 @@ cl /nologo /O2 /Zi /LD /EHsc /std:c++17 /utf-8 ^
  /FI"%BRIDGE_ROOT%\build\headers\com_nvidia_rtxremix_RemixBridge.h" ^
  "%BRIDGE_ROOT%\native\remixbridge.cpp" ^
  "%BRIDGE_ROOT%\native\abi-contract.cpp" ^
+ "%BRIDGE_ROOT%\native\legacy-gl-interop.cpp" ^
  /Feremixbridge.dll /Fdremixbridge.pdb /link /nologo /DEBUG dbghelp.lib
 set "BUILD_RESULT=%ERRORLEVEL%"
 if not "%BUILD_RESULT%"=="0" goto finish
+if not "%BRIDGE_GPU_SMOKE%"=="1" goto finish
+cl /nologo /O2 /LD /EHsc /std:c++17 /utf-8 ^
+ /I"%BRIDGE_JAVA_HOME%\include" /I"%BRIDGE_JAVA_HOME%\include\win32" ^
+ "%BRIDGE_ROOT%\src\test\native\gl-test-context.cpp" ^
+ /Fegltestcontext.dll /link /nologo
+set "BUILD_RESULT=%ERRORLEVEL%"
 :finish
 popd
 exit /b %BUILD_RESULT%

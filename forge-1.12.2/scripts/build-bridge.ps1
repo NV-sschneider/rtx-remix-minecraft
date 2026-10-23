@@ -5,7 +5,8 @@ param(
     [string]$JdkPath,
     [switch]$SkipNative,
     [switch]$SkipTests,
-    [string]$RuntimeDirectory
+    [string]$RuntimeDirectory,
+    [switch]$GpuSmoke
 )
 
 $ErrorActionPreference = 'Stop'
@@ -13,7 +14,9 @@ $projectRoot = Split-Path -Parent $PSScriptRoot
 $repositoryRoot = Split-Path -Parent $projectRoot
 $bridgeRoot = Join-Path $projectRoot 'bridge'
 if ($RuntimeDirectory) { $RuntimeDirectory = (Resolve-Path -LiteralPath $RuntimeDirectory).Path }
-
+if ($GpuSmoke -and (-not $RuntimeDirectory -or $SkipNative -or $SkipTests)) {
+    throw '-GpuSmoke requires -RuntimeDirectory and native builds/tests enabled.'
+}
 if (-not $JdkPath) {
     $localJdks = Join-Path $repositoryRoot '.tools/jdk8'
     if (Test-Path -LiteralPath $localJdks) {
@@ -68,16 +71,19 @@ if (-not $SkipNative) {
     $previousJdk = $env:BRIDGE_JAVA_HOME
     $previousRoot = $env:BRIDGE_ROOT
     $previousVs = $env:BRIDGE_VISUAL_STUDIO
+    $previousSmoke = $env:BRIDGE_GPU_SMOKE
     try {
         $env:BRIDGE_JAVA_HOME = $JdkPath
         $env:BRIDGE_ROOT = $bridgeRoot
         $env:BRIDGE_VISUAL_STUDIO = $visualStudio
+        $env:BRIDGE_GPU_SMOKE = if ($GpuSmoke) { '1' } else { '0' }
         & $env:ComSpec /d /c (Join-Path $bridgeRoot 'native/build-native.cmd')
         if ($LASTEXITCODE -ne 0) { throw 'Bridge native compilation or ABI validation failed.' }
     } finally {
         $env:BRIDGE_JAVA_HOME = $previousJdk
         $env:BRIDGE_ROOT = $previousRoot
         $env:BRIDGE_VISUAL_STUDIO = $previousVs
+        $env:BRIDGE_GPU_SMOKE = $previousSmoke
     }
 }
 
@@ -96,7 +102,16 @@ if (-not $SkipTests) {
             & $java -Xcheck:jni -cp "$classes;$testClasses" com.nvidia.rtxremix.NativeBridgeSmokeTest @smokeArgs
             if ($LASTEXITCODE -ne 0) { throw 'Bridge native smoke test failed.' }
         } finally { Pop-Location }
-
+        if ($GpuSmoke) {
+            $smokeRoot = Join-Path $buildRoot 'gpu-smoke'
+            New-Item -ItemType Directory -Force -Path $smokeRoot | Out-Null
+            Copy-Item -LiteralPath (Join-Path $repositoryRoot 'packaging/rtx.conf') -Destination (Join-Path $smokeRoot 'rtx.conf')
+            Push-Location $smokeRoot
+            try {
+                & $java "-Djava.library.path=$nativeOutput" -cp "$classes;$testClasses" com.nvidia.rtxremix.GlInteropSmokeTest (Join-Path $nativeOutput 'remixbridge.dll') (Join-Path $nativeOutput 'gltestcontext.dll') (Join-Path $RuntimeDirectory 'd3d9.dll')
+                if ($LASTEXITCODE -ne 0) { throw 'Bridge GPU interop smoke test failed.' }
+            } finally { Pop-Location }
+        }
     }
 }
 Write-Output "Built $jarPath"
