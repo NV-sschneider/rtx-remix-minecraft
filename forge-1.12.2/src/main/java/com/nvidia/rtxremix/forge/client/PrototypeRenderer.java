@@ -10,6 +10,7 @@ import com.nvidia.rtxremix.forge.entity.CapturedEntityPart;
 import com.nvidia.rtxremix.forge.entity.EntityCaptureHooks;
 import com.nvidia.rtxremix.forge.entity.EntityScene;
 import com.nvidia.rtxremix.forge.interop.LegacyGlInterop;
+import com.nvidia.rtxremix.forge.sky.SkyScene;
 import com.nvidia.rtxremix.forge.terrain.TerrainCapture;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.WorldClient;
@@ -27,15 +28,12 @@ final class PrototypeRenderer {
     private LegacyGlInterop interop;
     private TerrainCapture terrain;
     private EntityScene entities;
+    private SkyScene sky;
     private WorldClient world;
-    private long sun;
     private long hwnd;
     private long frames;
     private boolean windowClosing;
     private boolean initialized;
-    private final LightInfo sunlight = LightInfo.builder()
-            .hash(0x524c43524146544cL).radiance(3.0f, 2.8f, 2.5f)
-            .distantExt(LightInfoDistantEXT.builder().direction(0.43643578f, -0.87287156f, 0.21821789f).build()).build();
     private final PresentInfo present = new PresentInfo();
 
     PrototypeRenderer(Minecraft mc) { this.mc = mc; }
@@ -48,17 +46,17 @@ final class PrototypeRenderer {
             throw new IllegalStateException("Minecraft's window changed; restart the game before enabling Remix again.");
         }
         if (world != mc.world) {
-            if (terrain != null) { terrain.close(); }
-            if (entities != null) { entities.close(); }
+            releaseScene();
             world = mc.world;
             terrain = new TerrainCapture(api, mc);
             entities = new EntityScene(api);
+            sky = new SkyScene(api);
         }
         terrain.update();
         entities.sync(capturedParts);
         CameraInfo captured = camera.capture(mc, partialTicks);
         api.setupCamera(captured);
-        api.drawLightInstance(sun);
+        sky.update(world, partialTicks, captured.parameterizedExt.position);
         api.submit(null);
         long done = interop.copyToFramebuffer(api.dxvkGetInteropInfo(), mc.getFramebuffer().framebufferObject,
                 mc.displayWidth, mc.displayHeight, true);
@@ -86,7 +84,6 @@ final class PrototypeRenderer {
         hwnd = LegacyGlInterop.currentWindowHandle();
         api.startup(StartupInfo.builder().hwnd(hwnd).forceNoVkSwapchain(true).interopImage(true).build());
         interop = new LegacyGlInterop(api.dxvkGetInteropInfo());
-        sun = api.createLight(sunlight);
         initialized = true;
         frames = 0;
         RemixForgeMod.LOG.info("RTX Remix Forge: native renderer initialized (API {}.{}.{}, HWND {}).",
@@ -99,21 +96,32 @@ final class PrototypeRenderer {
             entities.close();
             entities = new EntityScene(api);
         }
+        if (sky != null) {
+            sky.close();
+            sky = new SkyScene(api);
+        }
     }
     long frameCount() { return api == null ? 0 : frames; }
     boolean entityCaptured(UUID id) { return entities != null && entities.contains(id); }
     long entityTransformUpdates(UUID id) { return entities == null ? 0 : entities.transformUpdates(id); }
     int capturedEntityParts() { return entities == null ? 0 : entities.partCount(); }
+    int skyResourceCount() { return sky == null ? 0 : sky.resourceCount(); }
+    long skyTextureUpdates() { return sky == null ? 0 : sky.textureUpdates(); }
     String status() {
         return api == null ? "native renderer stopped" : "native renderer active; frames=" + frames
                 + "; sections=" + (terrain == null ? 0 : terrain.getSectionCount())
                 + "; pending=" + (terrain == null ? 0 : terrain.getPendingSectionCount())
-                + "; entity parts=" + capturedEntityParts();
+                + "; entity parts=" + capturedEntityParts()
+                + "; sky=" + (sky == null ? "released" : sky.status());
     }
 
     /** Toggle/world changes retain the runtime and its monotonically increasing GL timeline. */
     void releaseWorld() {
         EntityCaptureHooks.discard();
+        releaseScene();
+    }
+
+    private void releaseScene() {
         try {
             if (terrain != null) { terrain.close(); }
         } finally {
@@ -121,7 +129,12 @@ final class PrototypeRenderer {
             world = null;
             try {
                 if (entities != null) { entities.close(); }
-            } finally { entities = null; }
+            } finally {
+                entities = null;
+                try {
+                    if (sky != null) { sky.close(); }
+                } finally { sky = null; }
+            }
         }
     }
 
@@ -135,8 +148,6 @@ final class PrototypeRenderer {
                 if (interop != null) { interop.close(); }
             } finally {
                 interop = null;
-                if (api != null && sun != 0) { api.destroyLight(sun); }
-                sun = 0;
             }
         }
     }

@@ -109,6 +109,8 @@ public final class ClientEvents {
     boolean entityCaptured(UUID id) { return renderer.entityCaptured(id); }
     long entityTransformUpdates(UUID id) { return renderer.entityTransformUpdates(id); }
     int capturedEntityParts() { return renderer.capturedEntityParts(); }
+    int skyResourceCount() { return renderer.skyResourceCount(); }
+    long skyTextureUpdates() { return renderer.skyTextureUpdates(); }
 
     String status() {
         return "requested=" + enabled + "; " + renderer.status() + (failure == null ? "" : "; last error=" + failure);
