@@ -36,7 +36,8 @@ pinned source for comparison.
 - Baked block models, block-atlas textures, and biome tint.
 - A sky dome with sun, moon, stars, and celestial lighting driven by world time
   and weather, using the world's sky/fog colors.
-- Retained terrain meshes in a 3 by 3 chunk area, updated one section per frame.
+- Retained terrain meshes out to Minecraft's render distance, streamed nearest
+  first as the camera moves, with incremental section capture and mesh uploads.
 - Block-change, chunk-unload, world-change, and texture-reload handling.
 - Living-entity box parts captured during their existing model draws, with
   static textures, tint, alpha state, and retained instances updated as their poses change.
@@ -58,14 +59,46 @@ RLCraft 2.9.3 has passed an initial Creative fixture with its original mod set.
 Broader gameplay and survival effects remain unvalidated.
 Clouds, custom mod sky renderers, custom entity renderers, tile-entity renderers,
 fluids, particles, animated texture updates, and other custom rendering need
-additional capture paths. Terrain outside the small
-capture radius is absent. Glass uses basic alpha behavior, not a finished
-physical glass material.
+additional capture paths. Terrain arrives progressively, and a server may send
+fewer chunks than the client's requested render distance. Glass uses basic alpha
+behavior, not a finished physical glass material.
 Fullscreen/context recreation and minimize/restore are not validated.
 Better Foliage uses F8 too; rebind the Remix toggle in Minecraft Controls before
 testing those mods together. Broad mod compatibility is not validated.
 This prototype still runs vanilla world rendering before replacing its color
 output, so it is not performance optimized.
+
+## Terrain streaming
+
+Terrain capture follows the render camera and Minecraft's render-distance setting.
+It reads only loaded client chunks; it does not request or generate distant chunks.
+Nearby sections are captured first. A section build advances across frames on the
+render thread, where Forge's mutable baked models and world data are safe to read.
+Completed geometry uploads in bounded pages. The previous section remains visible
+until its replacement is ready, and obsolete mesh resources retire under a separate
+per-frame limit.
+
+Block edits invalidate neighboring sections, including diagonal neighbors used by
+extended block models. A chunk packet, unload, or edit that arrives during capture
+invalidates that build before it can publish stale geometry. Moving or reducing
+render distance releases sections outside the new area; returning queues them again.
+Resource reload and disabling Remix release the terrain and its atlas resources.
+
+`/mrtx status` reports the target radius, discovered columns, captured sections,
+pending work, retirement queue, and owned mesh bytes. A memory limit includes meshes
+being uploaded or retired as well as the visible scene. Reaching it pauses uploads
+and is reported in the status; the renderer does not silently reduce the requested
+radius. The limit is 512 MiB of vertex/index payloads; runtime copies and acceleration
+structures use additional GPU memory. A frame probes at most 32 columns, visits at
+most 4,096 blocks, uploads one mesh page of at most 1,146,880 bytes, and retires at
+most four pages. Higher render distances and complex modded models take longer to fill.
+Capture's time budget is cooperative: an individual model call or native operation
+cannot be interrupted, and initial atlas capture and complete teardown are separate
+from the two-millisecond streaming budget. A complete section publishes atomically,
+which can add and remove up to 64 instances each. A section exceeding the bounded
+model buffer keeps its previous geometry and reports a capacity failure; it retries
+after another invalidation. Vanilla still renders the world before Remix replaces
+the framebuffer, so this is not a general frame-rate optimization.
 
 ## Sky
 
@@ -152,11 +185,12 @@ GL state restoration, and exited successfully. Run it with:
 .\forge-1.12.2\scripts\build-bridge.ps1 -RuntimeDirectory .\remix-runtime\win64 -GpuSmoke
 ```
 
-The Forge build passed 51 JUnit checks covering terrain/entity mesh packing, live
+The Forge build passed 63 JUnit checks covering terrain/entity mesh packing, live
 transform conversion, alpha state, real Minecraft lifecycle/capture bytecode, cancellation and exception
 cleanup, main-menu initialization ordering, blank fixture image rejection,
 bounded fixture motion, sky geometry/orientation, color conversion, dimension
-policies, and game-rule/time/weather restoration. The fixture recognizes
+policies, terrain window scheduling through 32 chunks, stale-build rejection,
+mesh reservation accounting, and game-rule/time/weather restoration. The fixture recognizes
 replacement main menus through Forge's initialization events.
 
 Authenticated Forge-only and RLCraft 2.9.3 entity runs captured a moving cow and
@@ -219,6 +253,42 @@ and rain images, texture updates, and released sky resources after disabling and
 unloading. The fixture restores the original time and weather on both client and
 server before disconnecting. The sky screenshots still require visual inspection
 for celestial orientation and appearance.
+
+Add `-TerrainSmokeTest` to check capture beyond the old three-by-three area,
+travel 192 blocks, replace a visible marker block, reduce render distance from
+four to two chunks, expand it again, and return. Readiness checks use published
+columns and section revisions, with image captures at the origin, destination,
+after the edit, and on return. The fixture checks retirement of the old area and
+zero terrain resources after disable and unload, then restores the original
+render-distance setting. Add `-TerrainNaturalSmokeTest` to run the same route in
+a normally generated landscape instead of the flat test world:
+
+```powershell
+.\forge-1.12.2\scripts\launch-prototype.ps1 -InstanceName 'RLCraft 2.9.3 - Remix Test' -SmokeTest -TerrainSmokeTest -TerrainNaturalSmokeTest -TerrainSmokeRadius 8 -ExitAfterSmoke
+```
+
+`-TerrainSmokeRadius` accepts 4 through 32 and defaults to 4. Travel scales to
+keep the two captured areas separate. If the initial area reaches the mesh-memory
+limit, the fixture verifies stable ownership below the limit, records that coverage
+was incomplete, and reduces the radius to four to test recovery. This does not count
+as full coverage at the originally requested distance.
+
+Terrain validation passed in authenticated Forge-only and RLCraft 2.9.3 runs.
+The combined Forge terrain/entity/sky fixture converged to all 81 loaded columns
+at radius four. The natural RLCraft run used radius eight and traveled 320 blocks;
+it converged to 259 loaded columns at the origin and 274 on return, using
+388,958,640 mesh bytes on return. Both runs verified a published block edit,
+shrinking and expanding render distance, and zero owned terrain resources after
+disable and world unload. Coverage checks compare against Minecraft's actual
+loaded chunks, since the server need not deliver every requested column.
+
+A Forge radius-32 stress run reached the memory limit at 536,837,280 bytes and
+held that ownership stable for 24 submitted frames. It then recovered at radius
+four and passed travel, edit, and cleanup checks. A natural RLCraft radius-12
+probe also reached the limit, so complete coverage at high distances is not
+established. Eight chunks is the tested starting point for this pack; denser
+areas can still reach the cap. These checks establish capture and lifecycle
+behavior, not a frame-rate target or broad survival compatibility.
 
 It never replaces or deletes existing worlds. Captures remain under the Forge
 instance's `.minecraft/screenshots`; structured `RLC_SMOKE` results are in
