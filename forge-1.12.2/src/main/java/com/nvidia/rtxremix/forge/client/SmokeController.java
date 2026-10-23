@@ -61,7 +61,7 @@ final class SmokeController {
 
     private enum State {
         INACTIVE, WAIT_MENU, WAIT_WORLD, BUILD_SCENE, SETTLE, REMIX, VANILLA,
-        REENABLE, SKY_APPLY, SKY_CAPTURE, RESTORE_RULES, UNLOAD, EXIT, DONE
+        REENABLE, SKY_APPLY, SKY_CAPTURE, RESTORE_RULES, DISCONNECT, UNLOAD, EXIT, DONE
     }
 
     private enum SkyPhase {
@@ -91,6 +91,7 @@ final class SmokeController {
     private Future<Boolean> entityStep;
     private Future<?> ruleRestoration;
     private Future<?> skyStep;
+    private Future<?> serverShutdown;
     private IntegratedServer fixtureServer;
     private WorldClient fixtureClientWorld;
     private WorldServer fixtureServerWorld;
@@ -317,9 +318,11 @@ final class SmokeController {
                             restoreForSuccess = false;
                             pendingFailure = "reason=renderer_failed_during_rule_restoration phase=RESTORE_RULES";
                         }
-                        unloadFixture();
-                        if (!restoreForSuccess) finish(false, pendingFailure);
+                        beginFixtureDisconnect();
                     }
+                    break;
+                case DISCONNECT:
+                    awaitFixtureDisconnect();
                     break;
                 case UNLOAD:
                     if (events.failureMessage() != null) {
@@ -566,18 +569,41 @@ final class SmokeController {
         else beginSkyPhase(SkyPhase.values()[skyPhase.ordinal() + 1]);
     }
 
-    private void unloadFixture() {
+    private void beginFixtureDisconnect() {
         requireOwnedClientWorld();
-        // Keep Remix enabled on the success path so WorldEvent.Unload and the next
-        // client tick exercise resource release. Restoration may have rendered frames.
+        transition(State.DISCONNECT);
+        log("WORLD_UNLOAD", "world=" + saveName + " rendererEnabled=" + events.isEnabled());
+        final IntegratedServer server = fixtureServer;
+        final WorldServer world = fixtureServerWorld;
+        // Shutdown must begin on the server thread: closing the host's channel first
+        // can stop that thread while client loadWorld is enqueueing its shutdown task.
+        serverShutdown = server.callFromMainThread(() -> {
+            if (!server.isCallingFromMinecraftThread() || !saveName.equals(server.getFolderName())
+                    || server.getWorld(0) != world) {
+                throw new IllegalStateException("Unexpected fixture server during shutdown");
+            }
+            server.initiateShutdown();
+            return null;
+        });
+    }
+
+    private void awaitFixtureDisconnect() throws Exception {
+        if (!serverShutdown.isDone()) return;
+        serverShutdown.get();
+        if (restoreForSuccess && (events.failureMessage() != null || !events.isEnabled())) {
+            restoreForSuccess = false;
+            pendingFailure = "reason=renderer_failed_during_disconnect phase=DISCONNECT";
+        }
+        if (mc.world != null && mc.world != fixtureClientWorld) {
+            throw new IllegalStateException("Unexpected client world during fixture disconnect");
+        }
+        // Server teardown disconnects its host. Let normal client networking drain
+        // queued world packets and unload, while its handler still has a live world.
+        if (mc.world != null || mc.getIntegratedServer() != null || mc.getConnection() != null) return;
         lastFrames = events.renderedFrames();
         transition(State.UNLOAD);
-        log("WORLD_UNLOAD", "world=" + saveName + " rendererEnabled=" + events.isEnabled());
-        // Match the menu's disconnect order: stop incoming packets before loadWorld
-        // clears the handler and waits for integrated-server shutdown.
-        fixtureClientWorld.sendQuittingDisconnectingPacket();
-        mc.loadWorld(null);
         mc.displayGuiScreen(new GuiMainMenu());
+        if (!restoreForSuccess) finish(false, pendingFailure);
     }
 
     private void startEntityMotion() {
@@ -747,7 +773,7 @@ final class SmokeController {
 
     private long timeoutForState() {
         if (state == State.REMIX || state == State.REENABLE || state == State.SKY_CAPTURE) return NATIVE_TIMEOUT;
-        if (state == State.SETTLE || state == State.VANILLA || state == State.RESTORE_RULES
+        if (state == State.SETTLE || state == State.VANILLA || state == State.RESTORE_RULES || state == State.DISCONNECT
                 || state == State.UNLOAD) return SETTLE_TIMEOUT;
         return STARTUP_TIMEOUT;
     }
@@ -762,10 +788,11 @@ final class SmokeController {
 
     private void fail(String reason) {
         if (state == State.DONE || state == State.EXIT || state == State.INACTIVE) return;
-        if (state == State.RESTORE_RULES) {
-            // Leaving the fixture open avoids persisting its temporary rules when
-            // cleanup could not complete. Never report success or close another world.
-            finishNow(false, (pendingFailure == null ? "reason=rule_restoration_failed" : pendingFailure)
+        if (state == State.RESTORE_RULES || state == State.DISCONNECT) {
+            // A failed cleanup must not close another world or exit while the fixture
+            // could still be restoring settings or saving on the server thread.
+            finishNow(false, (pendingFailure == null ? "reason=fixture_cleanup_failed" : pendingFailure)
+                    + " phase=" + state.name()
                     + " cleanup=" + reason + " rulesRestored=" + rulesRestored + " exitSuppressed=true", false);
             return;
         }
@@ -796,6 +823,7 @@ final class SmokeController {
             entityStep = null;
             ruleRestoration = null;
             skyStep = null;
+            serverShutdown = null;
             clientRules = null;
             serverRules = null;
             clientEnvironment = null;
