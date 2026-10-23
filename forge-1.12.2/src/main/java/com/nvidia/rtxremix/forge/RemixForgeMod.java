@@ -22,6 +22,6 @@ public final class RemixForgeMod {
         ClientEvents client = new ClientEvents();
         MinecraftForge.EVENT_BUS.register(client);
         client.register();
-        LOG.info("RTX Remix Forge prototype loaded. Press F8 in a test world to enable terrain rendering.");
+        LOG.info("RTX Remix Forge prototype loaded. Use /mrtx on in a test world to enable Remix.");
     }
 }

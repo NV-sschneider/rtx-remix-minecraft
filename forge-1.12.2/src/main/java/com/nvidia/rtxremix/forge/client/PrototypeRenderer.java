@@ -6,6 +6,9 @@ package com.nvidia.rtxremix.forge.client;
 
 import com.nvidia.rtxremix.*;
 import com.nvidia.rtxremix.forge.RemixForgeMod;
+import com.nvidia.rtxremix.forge.entity.CapturedEntityPart;
+import com.nvidia.rtxremix.forge.entity.EntityCaptureHooks;
+import com.nvidia.rtxremix.forge.entity.EntityScene;
 import com.nvidia.rtxremix.forge.interop.LegacyGlInterop;
 import com.nvidia.rtxremix.forge.terrain.TerrainCapture;
 import net.minecraft.client.Minecraft;
@@ -13,6 +16,8 @@ import net.minecraft.client.multiplayer.WorldClient;
 
 import java.io.File;
 import java.util.Arrays;
+import java.util.List;
+import java.util.UUID;
 
 /** All methods are called on Minecraft's render thread; native handles never cross threads. */
 final class PrototypeRenderer {
@@ -21,6 +26,7 @@ final class PrototypeRenderer {
     private RemixAPI api;
     private LegacyGlInterop interop;
     private TerrainCapture terrain;
+    private EntityScene entities;
     private WorldClient world;
     private long sun;
     private long hwnd;
@@ -34,7 +40,7 @@ final class PrototypeRenderer {
 
     PrototypeRenderer(Minecraft mc) { this.mc = mc; }
 
-    void render(float partialTicks) {
+    void render(float partialTicks, List<CapturedEntityPart> capturedParts) {
         if (windowClosing) { return; }
         if (api == null) { initialize(); }
         if (!initialized) { throw new IllegalStateException("Native initialization failed; restart Minecraft before retrying."); }
@@ -43,10 +49,13 @@ final class PrototypeRenderer {
         }
         if (world != mc.world) {
             if (terrain != null) { terrain.close(); }
+            if (entities != null) { entities.close(); }
             world = mc.world;
             terrain = new TerrainCapture(api, mc);
+            entities = new EntityScene(api);
         }
         terrain.update();
+        entities.sync(capturedParts);
         CameraInfo captured = camera.capture(mc, partialTicks);
         api.setupCamera(captured);
         api.drawLightInstance(sun);
@@ -84,21 +93,35 @@ final class PrototypeRenderer {
                 RemixAPI.VERSION_MAJOR, RemixAPI.VERSION_MINOR, RemixAPI.VERSION_PATCH, Long.toHexString(hwnd));
     }
 
-    void refreshTextures() { if (terrain != null) { terrain.refreshTextures(); } }
+    void refreshTextures() {
+        if (terrain != null) { terrain.refreshTextures(); }
+        if (entities != null) {
+            entities.close();
+            entities = new EntityScene(api);
+        }
+    }
     long frameCount() { return api == null ? 0 : frames; }
+    boolean entityCaptured(UUID id) { return entities != null && entities.contains(id); }
+    long entityTransformUpdates(UUID id) { return entities == null ? 0 : entities.transformUpdates(id); }
+    int capturedEntityParts() { return entities == null ? 0 : entities.partCount(); }
     String status() {
         return api == null ? "native renderer stopped" : "native renderer active; frames=" + frames
                 + "; sections=" + (terrain == null ? 0 : terrain.getSectionCount())
-                + "; pending=" + (terrain == null ? 0 : terrain.getPendingSectionCount());
+                + "; pending=" + (terrain == null ? 0 : terrain.getPendingSectionCount())
+                + "; entity parts=" + capturedEntityParts();
     }
 
     /** Toggle/world changes retain the runtime and its monotonically increasing GL timeline. */
     void releaseWorld() {
+        EntityCaptureHooks.discard();
         try {
             if (terrain != null) { terrain.close(); }
         } finally {
             terrain = null;
             world = null;
+            try {
+                if (entities != null) { entities.close(); }
+            } finally { entities = null; }
         }
     }
 

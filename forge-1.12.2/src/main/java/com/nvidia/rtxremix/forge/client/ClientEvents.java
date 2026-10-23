@@ -5,6 +5,8 @@
 package com.nvidia.rtxremix.forge.client;
 
 import com.nvidia.rtxremix.forge.RemixForgeMod;
+import com.nvidia.rtxremix.forge.entity.EntityCaptureHooks;
+import java.util.UUID;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.resources.IReloadableResourceManager;
 import net.minecraft.client.settings.KeyBinding;
@@ -56,20 +58,33 @@ public final class ClientEvents {
     }
 
     @SubscribeEvent
+    public void renderTick(TickEvent.RenderTickEvent event) {
+        if (event.phase == TickEvent.Phase.START) {
+            EntityCaptureHooks.beginFrame(enabled && mc.world != null && mc.currentScreen == null);
+        } else {
+            EntityCaptureHooks.discard();
+        }
+    }
+
+    @SubscribeEvent
     public void renderWorld(RenderWorldLastEvent event) {
         if (!enabled || mc.world == null || mc.currentScreen != null || !Display.isVisible()
-                || mc.displayWidth <= 0 || mc.displayHeight <= 0) { return; }
+                || mc.displayWidth <= 0 || mc.displayHeight <= 0) {
+            EntityCaptureHooks.discard();
+            return;
+        }
         try {
             if (textureReloadRequested) {
                 renderer.refreshTextures();
                 textureReloadRequested = false;
             }
-            renderer.render(event.getPartialTicks());
+            renderer.render(event.getPartialTicks(), EntityCaptureHooks.finishFrame());
         } catch (RuntimeException | LinkageError ex) {
             failure = ex.getClass().getSimpleName() + ": " + ex.getMessage();
             RemixForgeMod.LOG.error("RTX Remix rendering disabled after failure", ex);
             enabled = false;
             resetRequested = true;
+            EntityCaptureHooks.discard();
             message("Renderer stopped: " + failure + ". See logs/latest.log.");
         }
     }
@@ -82,7 +97,8 @@ public final class ClientEvents {
     void setEnabled(boolean value) {
         enabled = value;
         failure = null;
-        message(value ? "Terrain prototype enabled. Use /mrtx off to restore vanilla rendering." : "Vanilla rendering enabled.");
+        if (!value) { EntityCaptureHooks.discard(); }
+        message(value ? "Remix prototype enabled. Use /mrtx off to restore vanilla rendering." : "Vanilla rendering enabled.");
     }
 
     void reload() { textureReloadRequested = true; }
@@ -90,6 +106,9 @@ public final class ClientEvents {
     long renderedFrames() { return renderer.frameCount(); }
     boolean isEnabled() { return enabled; }
     String failureMessage() { return failure; }
+    boolean entityCaptured(UUID id) { return renderer.entityCaptured(id); }
+    long entityTransformUpdates(UUID id) { return renderer.entityTransformUpdates(id); }
+    int capturedEntityParts() { return renderer.capturedEntityParts(); }
 
     String status() {
         return "requested=" + enabled + "; " + renderer.status() + (failure == null ? "" : "; last error=" + failure);
