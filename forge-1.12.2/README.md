@@ -2,7 +2,7 @@
 
 An experimental backport of NVIDIA's Minecraft RTX Remix integration to Java 8,
 LWJGL 2, and Forge 1.12.2, the platform used by RLCraft 2.9.3. This is an early
-renderer with terrain, a time-driven sky, and initial living-entity capture.
+renderer with terrain, fluids, a time-driven sky, entities, items, and world effects.
 It is not a complete RLCraft-compatible release.
 
 The Fabric renderer remains at the repository root. This module has its own
@@ -20,8 +20,9 @@ installation:
 ```
 
 Prism launches **Forge 1.12.2 - Remix Port** using your signed-in Minecraft Java
-account. Enter a disposable Creative world and press **F8** to enable Remix.
-Press F8 again to restore vanilla rendering. `/mrtx status` reports the frame
+account. Enter a disposable Creative world and use **`/mrtx on`** to enable Remix.
+Use `/mrtx off` to restore vanilla rendering. A toggle can be assigned in Controls;
+new installations leave it unbound to avoid modpack shortcuts. `/mrtx status` reports the frame
 and terrain section/entity-part counts; `/mrtx reload` refreshes captured textures.
 The renderer starts disabled. Use a normal window for this prototype.
 
@@ -34,6 +35,10 @@ pinned source for comparison.
 - A Java 8 port of NVIDIA's Java/JNI bridge using its unchanged Remix C API 0.16.0.
 - Native OpenGL shared-image and timeline-semaphore interop for LWJGL 2.
 - Baked block models, block-atlas textures, and biome tint.
+- Source and flowing water/lava geometry, with refractive water and emissive lava.
+- Underwater camera media and refractive full-block clear/stained glass.
+- Bounded animated atlas updates using Minecraft's actual uploaded frames.
+- Nearby block lighting derived from emitting blocks in published terrain.
 - A sky dome with sun, moon, stars, and celestial lighting driven by world time
   and weather, using the world's sky/fog colors.
 - Retained terrain meshes out to Minecraft's render distance, streamed nearest
@@ -41,10 +46,14 @@ pinned source for comparison.
 - Block-change, chunk-unload, world-change, and texture-reload handling.
 - Living-entity box parts captured during their existing model draws, with
   static textures, tint, alpha state, and retained instances updated as their poses change.
+- Model-based tile entities, optional Mo' Bends parts, and Lycanites CPU/VBO OBJ draws.
+- Dropped items captured from their actual baked-model vertices and world transforms.
+- Particle and precipitation batches observed before their existing OpenGL uploads.
+- World rendering behind inventory and pause screens, with window-size changes.
 - Remix output copied into Minecraft's framebuffer before the usual HUD.
 - Render-thread lifecycle hooks around Minecraft's `Display.destroy()` call.
 
-The runtime and its GL timeline remain alive while F8 is off; world meshes are
+The runtime and its GL timeline remain alive while Remix is off; world meshes are
 released. The runtime is shut down after Minecraft destroys its window. The
 native runtime module stays loaded until process exit because unloading the
 pinned DLL after shutdown deadlocked during testing.
@@ -57,14 +66,16 @@ script now uses a normal interactive window.
 
 RLCraft 2.9.3 has passed an initial Creative fixture with its original mod set.
 Broader gameplay and survival effects remain unvalidated.
-Clouds, custom mod sky renderers, custom entity renderers, tile-entity renderers,
-fluids, particles, animated texture updates, and other custom rendering need
-additional capture paths. Terrain arrives progressively, and a server may send
-fewer chunks than the client's requested render distance. Glass uses basic alpha
-behavior, not a finished physical glass material.
+Clouds, custom mod sky renderers, fast tile renderers, unsupported entity/effect
+renderers, and shader-only effects need additional capture paths.
+First-person hands/items retain vanilla rendering. Nonliving projectiles and
+Better Foliage's extra geometry do not yet have native capture adapters.
+Terrain arrives progressively, and a server may send
+fewer chunks than the client's requested render distance. Glass panes and custom
+mod glass retain their ordinary block material; full vanilla glass blocks use refraction.
 Fullscreen/context recreation and minimize/restore are not validated.
-Better Foliage uses F8 too; rebind the Remix toggle in Minecraft Controls before
-testing those mods together. Broad mod compatibility is not validated.
+Existing saved key bindings are preserved; unbind an old Remix F8 binding in
+Controls if it conflicts with Better Foliage. Broad mod compatibility is not validated.
 This prototype still runs vanilla world rendering before replacing its color
 output, so it is not performance optimized.
 
@@ -95,10 +106,46 @@ most four pages. Higher render distances and complex modded models take longer t
 Capture's time budget is cooperative: an individual model call or native operation
 cannot be interrupted, and initial atlas capture and complete teardown are separate
 from the two-millisecond streaming budget. A complete section publishes atomically,
-which can add and remove up to 64 instances each. A section exceeding the bounded
+which can add and remove up to 128 instances each. A section exceeding the bounded
 model buffer keeps its previous geometry and reports a capacity failure; it retries
 after another invalidation. Vanilla still renders the world before Remix replaces
 the framebuffer, so this is not a general frame-rate optimization.
+
+## Fluids, animations, and block lighting
+
+Water and lava use the installed vanilla liquid tessellator for corner heights,
+flow direction, exposed faces, and water-overlay selection. The captured geometry
+uses biome tint without vanilla lightmap or directional shading. Water has a
+refractive material with an index of 1.333; lava uses its atlas texture for emission.
+Each keeps a separate material from ordinary blocks. Custom fluids using baked
+models retain that path; custom `LIQUID` renderers outside vanilla's `BlockLiquid`
+contract are reported and skipped. The actual render camera selects a texture-free
+water medium using Minecraft's liquid surface and Forge viewpoint rules. Leaving
+water clears that selection; the material stays cached until reload or teardown,
+which clear the selection before destroying it.
+Animated normal maps are not implemented.
+
+Full vanilla glass and stained-glass blocks use separate refractive materials with
+an index of 1.52. Clear glass retains its atlas markings over neutral transmission;
+stained glass uses its atlas color for transmission. Panes and custom glass remain
+on the ordinary block path because these thin or unknown shapes need separate
+material treatment.
+
+The atlas observer mirrors successful mip-zero animation uploads, including
+Minecraft's frame timing and interpolation. It uses CPU upload data and
+does not read the entire atlas each frame. Up to 64 rectangles and 4 MiB upload
+per frame; the coalescing cache is bounded to 4,096 rectangles and 32 MiB. Resource
+reload and world release detach the observer before destroying the native atlas.
+Custom texture uploads outside `TextureMap.updateAnimations` need an adapter.
+
+Block lighting retains the brightest emitter in each four-block cell of a terrain
+section, then selects up to 128 nearby lights within 48 blocks. Selection runs at
+most five times per second, with eight native additions/removals per frame. Light
+levels come from the block's current Forge light value; torch/fire, redstone, and
+cool light sources receive simple color profiles. Lava uses surface emission
+instead of a duplicate point light. These are approximate lighting profiles,
+not per-mod authored materials. Changed blocks, unloaded terrain, toggling Remix,
+and texture reload retire the associated lights.
 
 ## Sky
 
@@ -115,7 +162,7 @@ textures, lights, materials, meshes, and blend state.
 
 The End uses a constant violet dome; nonsurface dimensions such as the Nether
 use a black dome without sun or moon lighting. These dimension policies follow
-the vanilla 1.12 sky selection. Custom Forge sky renderers, clouds, precipitation,
+the vanilla 1.12 sky selection. Custom Forge sky renderers, clouds,
 and mod-specific celestial effects need separate capture support. Provider sky
 color changes are sampled, but this does not reproduce every sky mod's draws.
 
@@ -128,21 +175,60 @@ matrix and restores the render manager's world origin, preserving renderer
 offsets. It does not rerun models or cancel vanilla rendering. Canceled renders,
 exceptions, first-person rendering, and GUI previews cannot leave capture armed.
 
-Ordinary `ModelBox` geometry is cached per model part, render scale, and texture
-object. This requires unchanged box geometry and a fixed display-list compile
-scale; dynamic geometry changes need a later compilation adapter. The optional
+Ordinary `ModelBox` geometry is cached per model part, display-list identity,
+render scale, and texture object. Recompiling a display list invalidates its cached
+geometry; mutating geometry without recompiling still needs an adapter. The optional
 LLibrary `AdvancedModelRenderer` hook covers its ordinary box draw path, but
-individual Ice and Fire creatures still need runtime validation. Custom box
-subclasses, Mo' Bends model overrides, and Lycanites OBJ draws are not captured.
+individual Ice and Fire creatures still need runtime validation. Mo' Bends 1.2.1
+model parts and visible `MutatedBox` faces have a separate adapter; whole-body
+transforms applied by the Forge pre-render event are preserved. Other custom
+box subclasses remain unsupported.
 Additive eyes, enchantment glint, and faded invisible models are skipped.
 Textures are static snapshots refreshed on resource reload or world release.
+
+The same model-part observer captures ordinary tile-entity dispatcher draws,
+including chest lids and beds. Fast TESRs, damage overlays, and non-model tile
+geometry are omitted. GUI and first-person previews do not enter this scope.
+
+Lycanites 2.0.8.9's `TessellatorModel` adapter observes completed CPU triangle
+buffers with their actual per-group transforms, vertex color, normals, and animated
+UVs. It accepts up to 32,766 vertices per group and 131,064 per frame. Changed OBJ
+meshes upload under an eight-mesh/four-MiB frame budget; deferred replacements keep
+their prior native instances while their current transforms keep updating.
+`VBOModel` captures actual GPU draw transforms, color, and texture-matrix offsets.
+A bounded cache observes successful Lycanites mesh uploads and deletions; buffers
+created before capture can be read back once, with at most one readback of up to
+one MiB per frame. The CPU cache holds at most 512 meshes and 16 MiB and clears
+on reload or world release. No optional mod classes are required in Forge-only runs.
 
 The render thread owns all native resources. Entity identity and draw occurrence
 identify retained instances; a changed pose or tint immediately updates its
 native description. Unseen instances retire before their meshes and textures.
 Capture is bounded to 1,024 parts, 256 per creature, 512 meshes, 64 textures, and
 64 MiB each of native mesh and texture data. Over-budget geometry is omitted;
-new resources may wait a frame while unused cached assets retire.
+existing geometry remains visible while replacements wait for capacity. At a full
+cache, a replacement can remain deferred until other occurrences leave the scene.
+
+## Dropped items and effects
+
+Dropped items use the actual vertices written by `RenderItem`, preserving Forge
+tint, alpha, stack copies, and the transforms supplied by ItemPhysic. Their native
+materials borrow the live block atlas, so animated item sprites follow the atlas
+observer. Capture allows 256 occurrences, 16 copies per owner, 256 meshes, and
+32 MiB of mesh data. Custom item tile renderers, non-atlas textures, and glint
+passes remain unsupported.
+
+Particles and weather observe completed `BufferBuilder` draws inside the real
+particle-manager and precipitation passes. Capture preserves per-vertex color,
+UVs, world origin, and conventional alpha blending without updating particles a
+second time. It allows 32 batches and 8,192 quads per frame. Native meshes are
+transient; textures are cached under a 16-texture/32-MiB limit with at most one
+first-use texture readback per frame. Block-atlas particles borrow the terrain
+atlas. Additive/premultiplied blends, shaders, nonidentity texture matrices,
+dynamic or unknown texture bindings, and non-buffer draws are omitted.
+
+Reload and teardown release item/effect consumers before the borrowed atlas.
+Native release failures retain ownership for retry instead of discarding handles.
 
 ## Build and install
 
@@ -185,12 +271,15 @@ GL state restoration, and exited successfully. Run it with:
 .\forge-1.12.2\scripts\build-bridge.ps1 -RuntimeDirectory .\remix-runtime\win64 -GpuSmoke
 ```
 
-The Forge build passed 63 JUnit checks covering terrain/entity mesh packing, live
+The Forge build passed 173 JUnit checks covering terrain/entity mesh packing, live
 transform conversion, alpha state, real Minecraft lifecycle/capture bytecode, cancellation and exception
 cleanup, main-menu initialization ordering, blank fixture image rejection,
 bounded fixture motion, sky geometry/orientation, color conversion, dimension
 policies, terrain window scheduling through 32 chunks, stale-build rejection,
-mesh reservation accounting, and game-rule/time/weather restoration. The fixture recognizes
+mesh reservation accounting, and game-rule/time/weather restoration. Additional checks
+cover fluid/glass materials, animated atlas patches, camera media, item/effect
+decoding, optional model adapters, bounded VBO caching, and retry-safe native
+ownership. The fixture recognizes
 replacement main menus through Forge's initialization events.
 
 Authenticated Forge-only and RLCraft 2.9.3 entity runs captured a moving cow and
@@ -211,6 +300,21 @@ unit coverage but have not yet been checked in a live dimension transition.
 
 The pinned native runtime reports a remaining device-object accounting warning
 at process exit; that runtime cleanup warning still needs upstream investigation.
+
+The combined materials, objects, effects, terrain, entity, and sky run passed in
+Forge (`20261023-231001-a3b91d71`) and in RLCraft with natural terrain at radius
+eight (`20261023-232105-1d45f1eb`). It verified animated water/lava pixels,
+torch removal, underwater entry/reload/exit, glass reload/removal, chest-lid
+motion, both bed halves, dropped-item motion, inventory/pause backgrounds,
+window resize/restore, and particle/rain motion across camera movement and reload.
+Rain retained 440 valid quads while skipping vanilla's invalid center quad.
+RLCraft captured seven Maka Alpha triangle groups, including bounded VBO recovery
+after reload; a separate run also captured an ordinary Maka. Screenshots were
+inspected for glass, fluids, model objects, particles, and weather. The full
+RLCraft run returned to 288 loaded/captured columns and 1,746 sections with
+407,448,160 bytes of mesh payload, no pending work, and no capacity limit.
+World release checks returned owned resources and the VBO cache to zero.
+These are Creative capture/lifecycle checks, not comprehensive survival validation.
 
 RLCraft used its original mod set. An earlier terrain-only run submitted frames but produced
 black world output; the fixture now rejects that image instead of treating frame
@@ -253,6 +357,20 @@ and rain images, texture updates, and released sky resources after disabling and
 unloading. The fixture restores the original time and weather on both client and
 server before disconnecting. The sky screenshots still require visual inspection
 for celestial orientation and appearance.
+
+Add `-MaterialSmokeTest` to inspect source/flowing water and lava, verify actual
+sprite pixel changes, remove a torch while keeping a second light, and reload the
+atlas. It also enters water, reloads while submerged, checks return to air, and
+captures clear/red/blue glass from two viewpoints before reload and removal.
+`-ObjectSmokeTest` checks a chest lid, both bed halves, dropped items,
+a zombie, and an optional registered Lycanites Maka Alpha. The stable Alpha type
+avoids ordinary Maka's random first-spawn replacement and resulting UUID change.
+It exercises item movement,
+inventory and pause backgrounds, window resize/restore, populated texture reload,
+and object removal. `-EffectSmokeTest` adds particle motion, rain, camera movement,
+populated texture reload, and dry/empty effect draws. Its small precipitation area
+uses Plains biome data in the disposable fixture world to make weather repeatable.
+The switches can be combined; all owned resources must release on world unload.
 
 Add `-TerrainSmokeTest` to check capture beyond the old three-by-three area,
 travel 192 blocks, replace a visible marker block, reduce render distance from
@@ -320,12 +438,13 @@ With the game closed, install into that instance's game directory:
 differ from the display name. `-LauncherDirectory` selects another Prism
 installation. Both options preserve the default Forge-only launch when omitted.
 
-Before enabling Remix, unbind its toggle in Controls to preserve Better Foliage's
-F8 binding. Use `/mrtx on`, `/mrtx off`, and `/mrtx status` in a disposable Creative
+If an existing installation assigned Remix to F8, unbind it in Controls to preserve
+Better Foliage's binding. New installations leave Remix unbound. Use `/mrtx on`,
+`/mrtx off`, and `/mrtx status` in a disposable Creative
 world. Retain the pack's windowed mode, framebuffer setting, and original mods
 for the first comparison. Compare stationary terrain after chunk animation has
-settled. Additional foliage, custom entities, particles, fluids, and animated textures
-still need capture support; disabling their mods does not implement that support.
+settled. Additional foliage and unsupported custom render paths still need adapters;
+disabling their mods does not implement that support.
 Pack manifest/config inspection alone does not establish runtime compatibility.
 
 See [UPSTREAM.md](UPSTREAM.md) for versions and provenance and
