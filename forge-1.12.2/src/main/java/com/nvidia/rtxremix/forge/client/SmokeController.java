@@ -17,6 +17,7 @@ import java.util.concurrent.TimeUnit;
 import net.minecraft.block.BlockColored;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiMainMenu;
+import net.minecraft.client.gui.GuiScreen;
 import net.minecraft.entity.player.EntityPlayerMP;
 import net.minecraft.init.Blocks;
 import net.minecraft.item.EnumDyeColor;
@@ -71,6 +72,7 @@ final class SmokeController {
     private boolean settingsSaved;
     private boolean previousPauseOnLostFocus;
     private int previousThirdPerson;
+    private GuiScreen initializedMainMenu;
 
     SmokeController(Minecraft mc, ClientEvents events) {
         this.mc = mc;
@@ -84,6 +86,20 @@ final class SmokeController {
         this.state = requested ? State.WAIT_MENU : State.INACTIVE;
         this.stateSince = System.nanoTime();
         if (requested) log("START", "exit=" + exitAfter + " seed=" + SEED + " validation=capture_and_lifecycle");
+    }
+
+    /** Observe the main-menu compatibility marker without requiring its actual screen type. */
+    void screenInitialized(GuiScreen eventScreen) {
+        if (state != State.WAIT_MENU && state != State.UNLOAD) return;
+        // The initialization event may name a compatibility marker while currentScreen
+        // holds a replacement. Remember only that initialized screen, never any menu.
+        initializedMainMenu = eventScreen instanceof GuiMainMenu && mc.world == null
+                ? mc.currentScreen : null;
+    }
+
+    private boolean isMainMenuReady() {
+        return initializedMainMenu != null && initializedMainMenu == mc.currentScreen
+                && mc.world == null && mc.getIntegratedServer() == null && mc.getConnection() == null;
     }
 
     /** Invoke once at ClientTickEvent END, after ClientEvents processes renderer reset/close. */
@@ -106,7 +122,7 @@ final class SmokeController {
                 case WAIT_MENU:
                     if (mc.world != null) {
                         fail("existing_world_open");
-                    } else if (mc.currentScreen instanceof GuiMainMenu) {
+                    } else if (isMainMenuReady()) {
                         launchFixture();
                     }
                     break;
@@ -228,7 +244,7 @@ final class SmokeController {
                         fail("renderer_frame_counter_changed_in_menu");
                         break;
                     }
-                    if (mc.currentScreen instanceof GuiMainMenu && ++ticks >= UNLOAD_TICKS) {
+                    if (isMainMenuReady() && ++ticks >= UNLOAD_TICKS) {
                         log("WORLD_UNLOAD_PASS", "menuTicks=" + ticks + " rendererEnabled=true");
                         finish(true, "frames=" + capturedFrames + " world=" + saveName
                                 + " remix=" + remixScreenshot + " vanilla=" + vanillaScreenshot
@@ -376,6 +392,7 @@ final class SmokeController {
         state = next;
         stateSince = System.nanoTime();
         ticks = 0;
+        initializedMainMenu = null;
     }
 
     private void fail(String reason) {

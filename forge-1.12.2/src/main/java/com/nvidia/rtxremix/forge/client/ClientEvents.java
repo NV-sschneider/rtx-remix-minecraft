@@ -10,9 +10,11 @@ import net.minecraft.client.resources.IReloadableResourceManager;
 import net.minecraft.client.settings.KeyBinding;
 import net.minecraft.util.text.TextComponentString;
 import net.minecraftforge.client.ClientCommandHandler;
+import net.minecraftforge.client.event.GuiScreenEvent;
 import net.minecraftforge.client.event.RenderWorldLastEvent;
 import net.minecraftforge.event.world.WorldEvent;
 import net.minecraftforge.fml.client.registry.ClientRegistry;
+import net.minecraftforge.fml.common.eventhandler.EventPriority;
 import net.minecraftforge.fml.common.eventhandler.SubscribeEvent;
 import net.minecraftforge.fml.common.gameevent.TickEvent;
 import org.lwjgl.input.Keyboard;
@@ -33,6 +35,12 @@ public final class ClientEvents {
         ClientRegistry.registerKeyBinding(toggle);
         ClientCommandHandler.instance.registerCommand(new RemixCommand(this));
         ((IReloadableResourceManager) mc.getResourceManager()).registerReloadListener(manager -> textureReloadRequested = true);
+    }
+
+    @SubscribeEvent(priority = EventPriority.NORMAL)
+    public void screenInitialized(GuiScreenEvent.InitGuiEvent.Post event) {
+        // Menu adapters can expose a main-menu marker at higher event priority.
+        smoke.screenInitialized(event.getGui());
     }
 
     @SubscribeEvent
