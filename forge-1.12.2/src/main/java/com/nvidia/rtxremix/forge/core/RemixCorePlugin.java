@@ -7,14 +7,18 @@ package com.nvidia.rtxremix.forge.core;
 import java.util.Map;
 import net.minecraftforge.fml.relauncher.IFMLLoadingPlugin;
 
-/** Registers the narrow window-destruction hook before Minecraft loads. */
+/** Registers lifecycle and in-place model capture hooks before Minecraft loads. */
 @IFMLLoadingPlugin.Name("RLCraftRemixLifecycle")
 @IFMLLoadingPlugin.MCVersion("1.12.2")
+@IFMLLoadingPlugin.SortingIndex(1001)
 @IFMLLoadingPlugin.TransformerExclusions({"com.nvidia.rtxremix.forge.core."})
 public final class RemixCorePlugin implements IFMLLoadingPlugin {
     @Override
     public String[] getASMTransformerClass() {
-        return new String[] { "com.nvidia.rtxremix.forge.core.DisplayLifecycleTransformer" };
+        return new String[] {
+            "com.nvidia.rtxremix.forge.core.DisplayLifecycleTransformer",
+            "com.nvidia.rtxremix.forge.core.EntityCaptureTransformer"
+        };
     }
 
     @Override
