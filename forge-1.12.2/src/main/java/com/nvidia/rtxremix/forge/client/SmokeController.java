@@ -18,6 +18,7 @@ import net.minecraft.block.BlockColored;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiMainMenu;
 import net.minecraft.client.gui.GuiScreen;
+import net.minecraft.client.multiplayer.WorldClient;
 import net.minecraft.client.renderer.GlStateManager;
 import net.minecraft.entity.player.EntityPlayerMP;
 import net.minecraft.init.Blocks;
@@ -56,7 +57,7 @@ final class SmokeController {
 
     private enum State {
         INACTIVE, WAIT_MENU, WAIT_WORLD, BUILD_SCENE, SETTLE, REMIX, VANILLA,
-        REENABLE, UNLOAD, EXIT, DONE
+        REENABLE, RESTORE_RULES, UNLOAD, EXIT, DONE
     }
 
     private final Minecraft mc;
@@ -76,6 +77,15 @@ final class SmokeController {
     private String vanillaScreenshot;
     private Future<Pose> setup;
     private Future<Boolean> entityStep;
+    private Future<?> ruleRestoration;
+    private IntegratedServer fixtureServer;
+    private WorldClient fixtureClientWorld;
+    private WorldServer fixtureServerWorld;
+    private FixtureGameRules clientRules;
+    private volatile FixtureGameRules serverRules;
+    private boolean rulesRestored;
+    private boolean restoreForSuccess;
+    private String pendingFailure;
     private boolean entityMotionStarted;
     private boolean entityMotionComplete;
     private boolean entityReferenceHeld;
@@ -251,12 +261,22 @@ final class SmokeController {
                         reenabledFrames = reenableFrames - frameBaseline;
                         log("REENABLE_PASS", "frames=" + reenabledFrames
                                 + " baseline=" + frameBaseline + " totalFrames=" + reenableFrames);
-                        // fixtureReady above verifies ownership before unloading. Keep Remix
-                        // enabled so WorldEvent.Unload and the next client tick release terrain.
-                        transition(State.UNLOAD);
-                        log("WORLD_UNLOAD", "world=" + saveName + " rendererEnabled=true");
-                        mc.loadWorld(null);
-                        mc.displayGuiScreen(new GuiMainMenu());
+                        beginRuleRestoration(true, null);
+                    }
+                    break;
+                case RESTORE_RULES:
+                    if (ruleRestoration.isDone()) {
+                        ruleRestoration.get();
+                        requireOwnedClientWorld();
+                        clientRules.restore(fixtureClientWorld.getGameRules());
+                        rulesRestored = true;
+                        log("RULES_RESTORED", "world=" + saveName + " sides=server,client");
+                        if (restoreForSuccess && (events.failureMessage() != null || !events.isEnabled())) {
+                            restoreForSuccess = false;
+                            pendingFailure = "reason=renderer_failed_during_rule_restoration phase=RESTORE_RULES";
+                        }
+                        unloadFixture();
+                        if (!restoreForSuccess) finish(false, pendingFailure);
                     }
                     break;
                 case UNLOAD:
@@ -337,6 +357,9 @@ final class SmokeController {
     private void scheduleScene() {
         final IntegratedServer server = mc.getIntegratedServer();
         final UUID playerId = mc.player.getUniqueID();
+        fixtureServer = server;
+        fixtureClientWorld = mc.world;
+        clientRules = FixtureGameRules.capture(fixtureClientWorld.getGameRules());
         // All world and authoritative player mutations occur on the integrated server thread.
         setup = server.callFromMainThread(() -> buildScene(server, playerId));
         transition(State.BUILD_SCENE);
@@ -353,6 +376,10 @@ final class SmokeController {
         int cx = spawn.getX();
         int cz = spawn.getZ();
         int floorY = world.getTopSolidOrLiquidBlock(spawn).getY() - 1;
+        fixtureServerWorld = world;
+        // Publish before the first mutation, independently of Pose: scene setup can
+        // throw after changing rules, and GlobalGameRules saves both sides on unload.
+        serverRules = FixtureGameRules.capture(world.getGameRules());
         world.getGameRules().setOrCreateGameRule("doDaylightCycle", "false");
         world.getGameRules().setOrCreateGameRule("doMobSpawning", "false");
         world.getGameRules().setOrCreateGameRule("doWeatherCycle", "false");
@@ -394,6 +421,51 @@ final class SmokeController {
         player.sendPlayerAbilities();
         player.connection.setPlayerLocation(result.x, result.y, result.z, result.yaw, result.pitch);
         return result;
+    }
+
+    private void beginRuleRestoration(boolean success, String failureFields) {
+        restoreForSuccess = success;
+        pendingFailure = failureFields;
+        transition(State.RESTORE_RULES);
+        if (!success) events.setEnabled(false);
+        final IntegratedServer server = fixtureServer;
+        // This task follows setup and entity work in the server's FIFO queue. A
+        // cancelled Future alone cannot prove that its running body has stopped.
+        ruleRestoration = server.callFromMainThread(() -> {
+            if (!saveName.equals(server.getFolderName())) {
+                throw new IllegalStateException("Unexpected fixture server during rule restoration");
+            }
+            FixtureGameRules original = serverRules;
+            if (original != null) {
+                if (server.getWorld(0) != fixtureServerWorld) {
+                    throw new IllegalStateException("Unexpected fixture world during rule restoration");
+                }
+                original.restore(fixtureServerWorld.getGameRules());
+            }
+            return null;
+        });
+        log("RULES_RESTORE_STARTED", "world=" + saveName + " continuation=" + (success ? "unload_check" : "failure"));
+    }
+
+    private void requireOwnedClientWorld() {
+        if (mc.world != fixtureClientWorld || mc.getIntegratedServer() != fixtureServer
+                || !saveName.equals(fixtureServer.getFolderName())) {
+            throw new IllegalStateException("Unexpected fixture client world during cleanup");
+        }
+    }
+
+    private void unloadFixture() {
+        requireOwnedClientWorld();
+        // Keep Remix enabled on the success path so WorldEvent.Unload and the next
+        // client tick exercise resource release. Restoration may have rendered frames.
+        lastFrames = events.renderedFrames();
+        transition(State.UNLOAD);
+        log("WORLD_UNLOAD", "world=" + saveName + " rendererEnabled=" + events.isEnabled());
+        // Match the menu's disconnect order: stop incoming packets before loadWorld
+        // clears the handler and waits for integrated-server shutdown.
+        fixtureClientWorld.sendQuittingDisconnectingPacket();
+        mc.loadWorld(null);
+        mc.displayGuiScreen(new GuiMainMenu());
     }
 
     private void startEntityMotion() {
@@ -552,7 +624,8 @@ final class SmokeController {
 
     private long timeoutForState() {
         if (state == State.REMIX || state == State.REENABLE) return NATIVE_TIMEOUT;
-        if (state == State.SETTLE || state == State.VANILLA || state == State.UNLOAD) return SETTLE_TIMEOUT;
+        if (state == State.SETTLE || state == State.VANILLA || state == State.RESTORE_RULES
+                || state == State.UNLOAD) return SETTLE_TIMEOUT;
         return STARTUP_TIMEOUT;
     }
 
@@ -566,6 +639,13 @@ final class SmokeController {
 
     private void fail(String reason) {
         if (state == State.DONE || state == State.EXIT || state == State.INACTIVE) return;
+        if (state == State.RESTORE_RULES) {
+            // Leaving the fixture open avoids persisting its temporary rules when
+            // cleanup could not complete. Never report success or close another world.
+            finishNow(false, (pendingFailure == null ? "reason=rule_restoration_failed" : pendingFailure)
+                    + " cleanup=" + reason + " rulesRestored=" + rulesRestored + " exitSuppressed=true", false);
+            return;
+        }
         finish(false, "reason=" + reason + " phase=" + state.name()
                 + " frames=" + Math.max(0L, lastFrames - frameBaseline)
                 + (includeEntities && pose != null ? " " + entityCaptureSummary() : "")
@@ -573,8 +653,14 @@ final class SmokeController {
     }
 
     private void finish(boolean success, String fields) {
-        if (setup != null && !setup.isDone()) setup.cancel(false);
-        if (entityStep != null && !entityStep.isDone()) entityStep.cancel(false);
+        if (clientRules != null && !rulesRestored) {
+            beginRuleRestoration(false, fields);
+            return;
+        }
+        finishNow(success, fields, mc.world == null);
+    }
+
+    private void finishNow(boolean success, String fields, boolean permitExit) {
         events.setEnabled(false);
         if (settingsSaved) {
             mc.gameSettings.pauseOnLostFocus = previousPauseOnLostFocus;
@@ -582,7 +668,17 @@ final class SmokeController {
             settingsSaved = false;
         }
         log(success ? "PASS" : "FAIL", fields);
-        transition(exitAfter ? State.EXIT : State.DONE);
+        if (rulesRestored) {
+            setup = null;
+            entityStep = null;
+            ruleRestoration = null;
+            clientRules = null;
+            serverRules = null;
+            fixtureClientWorld = null;
+            fixtureServerWorld = null;
+            fixtureServer = null;
+        }
+        transition(exitAfter && permitExit ? State.EXIT : State.DONE);
     }
 
     private void log(String event, String fields) {
