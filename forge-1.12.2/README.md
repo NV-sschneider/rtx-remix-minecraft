@@ -2,8 +2,8 @@
 
 An experimental backport of NVIDIA's Minecraft RTX Remix integration to Java 8,
 LWJGL 2, and Forge 1.12.2, the platform used by RLCraft 2.9.3. This is an early
-renderer with terrain and initial living-entity capture. It is not a complete
-RLCraft-compatible release.
+renderer with terrain, a time-driven sky, and initial living-entity capture.
+It is not a complete RLCraft-compatible release.
 
 The Fabric renderer remains at the repository root. This module has its own
 Gradle 4.9 build and a temporary, isolated Java 8 bridge snapshot under
@@ -33,7 +33,9 @@ pinned source for comparison.
 
 - A Java 8 port of NVIDIA's Java/JNI bridge using its unchanged Remix C API 0.16.0.
 - Native OpenGL shared-image and timeline-semaphore interop for LWJGL 2.
-- Baked block models, block-atlas textures, biome tint, and a static sun.
+- Baked block models, block-atlas textures, and biome tint.
+- A sky dome with sun, moon, stars, and celestial lighting driven by world time
+  and weather, using the world's sky/fog colors.
 - Retained terrain meshes in a 3 by 3 chunk area, updated one section per frame.
 - Block-change, chunk-unload, world-change, and texture-reload handling.
 - Living-entity box parts captured during their existing model draws, with
@@ -54,15 +56,35 @@ script now uses a normal interactive window.
 
 RLCraft 2.9.3 has passed an initial Creative fixture with its original mod set.
 Broader gameplay and survival effects remain unvalidated.
-Sky, clouds, custom entity renderers, tile-entity renderers, fluids, particles, animated texture
-updates, and other custom rendering need additional capture paths. Terrain outside the small
+Clouds, custom mod sky renderers, custom entity renderers, tile-entity renderers,
+fluids, particles, animated texture updates, and other custom rendering need
+additional capture paths. Terrain outside the small
 capture radius is absent. Glass uses basic alpha behavior, not a finished
-physical glass material. Sunlight does not follow world time or weather.
+physical glass material.
 Fullscreen/context recreation and minimize/restore are not validated.
 Better Foliage uses F8 too; rebind the Remix toggle in Minecraft Controls before
 testing those mods together. Broad mod compatibility is not validated.
 This prototype still runs vanilla world rendering before replacing its color
 output, so it is not performance optimized.
+
+## Sky
+
+The Overworld uses a 256 by 128 HDR dome built from the provider's sky, fog,
+and sunrise/sunset colors. Its lighting and celestial direction follow world
+time, rain, thunder, and the moon phase. The sun and moon use the active resource
+pack's textures on separate sky meshes; 500 small procedural stars rotate with
+the same celestial orbit. This preserves their detail independently of the dome
+resolution. Provider colors are converted to linear radiance before interpolation;
+sun and moon textures use sRGB sampling. Dome uploads are limited to four per
+second, while celestial movement and direct lighting update with each frame.
+Resource reload, world changes, and disabling Remix release the sky's native
+textures, lights, materials, meshes, and blend state.
+
+The End uses a constant violet dome; nonsurface dimensions such as the Nether
+use a black dome without sun or moon lighting. These dimension policies follow
+the vanilla 1.12 sky selection. Custom Forge sky renderers, clouds, precipitation,
+and mod-specific celestial effects need separate capture support. Provider sky
+color changes are sampled, but this does not reproduce every sky mod's draws.
 
 ## Living-entity capture
 
@@ -130,10 +152,11 @@ GL state restoration, and exited successfully. Run it with:
 .\forge-1.12.2\scripts\build-bridge.ps1 -RuntimeDirectory .\remix-runtime\win64 -GpuSmoke
 ```
 
-The Forge build passed 33 JUnit checks covering terrain/entity mesh packing, live transform conversion,
-alpha state, real Minecraft lifecycle/capture bytecode, cancellation and exception
+The Forge build passed 51 JUnit checks covering terrain/entity mesh packing, live
+transform conversion, alpha state, real Minecraft lifecycle/capture bytecode, cancellation and exception
 cleanup, main-menu initialization ordering, blank fixture image rejection,
-bounded fixture motion, and game-rule restoration. The fixture recognizes
+bounded fixture motion, sky geometry/orientation, color conversion, dimension
+policies, and game-rule/time/weather restoration. The fixture recognizes
 replacement main menus through Forge's initialization events.
 
 Authenticated Forge-only and RLCraft 2.9.3 entity runs captured a moving cow and
@@ -143,6 +166,15 @@ outward track, and retained-part release. Matched screenshots were inspected at
 the fixed reference pose. Re-enabling Remix preserved its timeline; world unload
 returned to the menu and the process exited. These runs validate cow/pig box
 models in the pack, not every modded creature or translucent effect.
+
+Subsequent authenticated Forge and RLCraft runs passed the combined entity and
+sky fixture. Screenshots confirmed a blue noon sky, the sun above the western
+horizon at sunset, a textured moon and small stars at midnight, and suppressed
+celestial bodies in rain. Each normal sky owned 20 native resources; disabling
+and unloading released them all. The tests restored time, weather, and game rules
+on both worlds before disconnecting. End and skyless dimension policies have
+unit coverage but have not yet been checked in a live dimension transition.
+
 The pinned native runtime reports a remaining device-object accounting warning
 at process exit; that runtime cleanup warning still needs upstream investigation.
 
@@ -178,6 +210,15 @@ Before disconnecting, the fixture restores the four rules it overrides on both
 the server and client. This preserves pack settings when Global GameRules saves
 rules on unload. Cleanup failure is reported as a failed test and leaves the
 fixture open for inspection instead of automatically exiting with unrestored rules.
+Shutdown begins on the owning server thread, and the fixture waits for normal
+client disconnection before checking world-resource release.
+
+Add `-SkySmokeTest` to capture clear noon, a west-facing sunset, midnight, and
+rain after re-enabling Remix. It checks for a visible daytime sky, changed night
+and rain images, texture updates, and released sky resources after disabling and
+unloading. The fixture restores the original time and weather on both client and
+server before disconnecting. The sky screenshots still require visual inspection
+for celestial orientation and appearance.
 
 It never replaces or deletes existing worlds. Captures remain under the Forge
 instance's `.minecraft/screenshots`; structured `RLC_SMOKE` results are in
