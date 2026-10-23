@@ -1,8 +1,9 @@
-# RTX Remix terrain prototype for Forge 1.12.2
+# RTX Remix prototype for Forge 1.12.2
 
 An experimental backport of NVIDIA's Minecraft RTX Remix integration to Java 8,
 LWJGL 2, and Forge 1.12.2, the platform used by RLCraft 2.9.3. This is an early
-terrain renderer, not a complete RLCraft-compatible release.
+renderer with terrain and initial living-entity capture. It is not a complete
+RLCraft-compatible release.
 
 The Fabric renderer remains at the repository root. This module has its own
 Gradle 4.9 build and a temporary, isolated Java 8 bridge snapshot under
@@ -21,7 +22,7 @@ installation:
 Prism launches **Forge 1.12.2 - Remix Port** using your signed-in Minecraft Java
 account. Enter a disposable Creative world and press **F8** to enable Remix.
 Press F8 again to restore vanilla rendering. `/mrtx status` reports the frame
-and terrain section counts; `/mrtx reload` refreshes the captured block atlas.
+and terrain section/entity-part counts; `/mrtx reload` refreshes captured textures.
 The renderer starts disabled. Use a normal window for this prototype.
 
 The development setup also has a separate **Minecraft 1.21.1 - RTX Remix
@@ -35,6 +36,8 @@ pinned source for comparison.
 - Baked block models, block-atlas textures, biome tint, and a static sun.
 - Retained terrain meshes in a 3 by 3 chunk area, updated one section per frame.
 - Block-change, chunk-unload, world-change, and texture-reload handling.
+- Living-entity box parts captured during their existing model draws, with
+  static textures, tint, alpha state, and retained instances updated as their poses change.
 - Remix output copied into Minecraft's framebuffer before the usual HUD.
 - Render-thread lifecycle hooks around Minecraft's `Display.destroy()` call.
 
@@ -51,8 +54,8 @@ script now uses a normal interactive window.
 
 RLCraft 2.9.3 has passed an initial Creative fixture with its original mod set.
 Broader gameplay and survival effects remain unvalidated.
-Entities, tile-entity renderers, fluids, particles, animated texture updates,
-and custom rendering need additional capture paths. Terrain outside the small
+Sky, clouds, custom entity renderers, tile-entity renderers, fluids, particles, animated texture
+updates, and other custom rendering need additional capture paths. Terrain outside the small
 capture radius is absent. Glass uses basic alpha behavior, not a finished
 physical glass material. Sunlight does not follow world time or weather.
 Fullscreen/context recreation and minimize/restore are not validated.
@@ -60,6 +63,31 @@ Better Foliage uses F8 too; rebind the Remix toggle in Minecraft Controls before
 testing those mods together. Broad mod compatibility is not validated.
 This prototype still runs vanilla world rendering before replacing its color
 output, so it is not performance optimized.
+
+## Living-entity capture
+
+The core transformer observes `ModelRenderer` display-list calls inside the
+existing `RenderLivingBase` render scope. Each part's live model-view matrix
+includes Minecraft's animation and parent transforms. Capture removes the view
+matrix and restores the render manager's world origin, preserving renderer
+offsets. It does not rerun models or cancel vanilla rendering. Canceled renders,
+exceptions, first-person rendering, and GUI previews cannot leave capture armed.
+
+Ordinary `ModelBox` geometry is cached per model part, render scale, and texture
+object. This requires unchanged box geometry and a fixed display-list compile
+scale; dynamic geometry changes need a later compilation adapter. The optional
+LLibrary `AdvancedModelRenderer` hook covers its ordinary box draw path, but
+individual Ice and Fire creatures still need runtime validation. Custom box
+subclasses, Mo' Bends model overrides, and Lycanites OBJ draws are not captured.
+Additive eyes, enchantment glint, and faded invisible models are skipped.
+Textures are static snapshots refreshed on resource reload or world release.
+
+The render thread owns all native resources. Entity identity and draw occurrence
+identify retained instances; a changed pose or tint immediately updates its
+native description. Unseen instances retire before their meshes and textures.
+Capture is bounded to 1,024 parts, 256 per creature, 512 meshes, 64 textures, and
+64 MiB each of native mesh and texture data. Over-budget geometry is omitted;
+new resources may wait a frame while unused cached assets retire.
 
 ## Build and install
 
@@ -102,22 +130,23 @@ GL state restoration, and exited successfully. Run it with:
 .\forge-1.12.2\scripts\build-bridge.ps1 -RuntimeDirectory .\remix-runtime\win64 -GpuSmoke
 ```
 
-The Forge build passed 12 JUnit checks covering mesh packing, real Minecraft lifecycle
-bytecode, main-menu initialization ordering, and blank fixture image rejection. The fixture
-recognizes replacement main menus through Forge's initialization events.
-The authenticated Forge-only in-game test captured 184
-native frames with nine terrain sections. Visual inspection confirmed textured
-terrain, color and camera alignment, shadows, glass cutouts, and the hand/HUD.
-Switching back produced the expected vanilla image. Re-enabling Remix rendered
-62 more frames without resetting its timeline; unloading the world while enabled
-returned to the menu cleanly. The process then exited cleanly.
+The Forge build passed 33 JUnit checks covering terrain/entity mesh packing, live transform conversion,
+alpha state, real Minecraft lifecycle/capture bytecode, cancellation and exception
+cleanup, main-menu initialization ordering, blank fixture image rejection,
+bounded fixture motion, and game-rule restoration. The fixture recognizes
+replacement main menus through Forge's initialization events.
+
+Authenticated Forge-only and RLCraft 2.9.3 entity runs captured a moving cow and
+stationary pig with textured terrain, shadows, glass cutouts, and the hand/HUD.
+The fixture verified both creatures, native transform updates during a two-block
+outward track, and retained-part release. Matched screenshots were inspected at
+the fixed reference pose. Re-enabling Remix preserved its timeline; world unload
+returned to the menu and the process exited. These runs validate cow/pig box
+models in the pack, not every modded creature or translucent effect.
 The pinned native runtime reports a remaining device-object accounting warning
 at process exit; that runtime cleanup warning still needs upstream investigation.
 
-RLCraft 2.9.3 also rendered the Creative fixture with its original mod set enabled.
-Matched screenshots showed textured terrain, colored pillars, glass, shadows,
-and the pack HUD. Renderer re-enable, return to the replacement main menu, and
-process exit completed successfully. An earlier run submitted frames but produced
+RLCraft used its original mod set. An earlier terrain-only run submitted frames but produced
 black world output; the fixture now rejects that image instead of treating frame
 submission as readiness. The cause of that first-run blank output is not yet
 established. This fixture does not validate survival effects or missing capture paths.
@@ -133,6 +162,22 @@ establish readiness. It then checks unloading the world:
 ```powershell
 .\forge-1.12.2\scripts\launch-prototype.ps1 -SmokeTest -ExitAfterSmoke
 ```
+
+Add `-EntitySmokeTest` to spawn a cow and pig in the fixture. The cow makes a
+bounded round trip before both the initial and re-enabled Remix checks. The
+fixture requires both creatures in the retained scene, increased cow transform
+updates, observed movement, and zero retained parts after disabling or unloading.
+It then fixes the creatures' reference poses for screenshot comparison. Run
+the same check in the installed pack with:
+
+```powershell
+.\forge-1.12.2\scripts\launch-prototype.ps1 -InstanceName 'RLCraft 2.9.3 - Remix Test' -SmokeTest -EntitySmokeTest -ExitAfterSmoke
+```
+
+Before disconnecting, the fixture restores the four rules it overrides on both
+the server and client. This preserves pack settings when Global GameRules saves
+rules on unload. Cleanup failure is reported as a failed test and leaves the
+fixture open for inspection instead of automatically exiting with unrestored rules.
 
 It never replaces or deletes existing worlds. Captures remain under the Forge
 instance's `.minecraft/screenshots`; structured `RLC_SMOKE` results are in
@@ -168,7 +213,7 @@ Before enabling Remix, unbind its toggle in Controls to preserve Better Foliage'
 F8 binding. Use `/mrtx on`, `/mrtx off`, and `/mrtx status` in a disposable Creative
 world. Retain the pack's windowed mode, framebuffer setting, and original mods
 for the first comparison. Compare stationary terrain after chunk animation has
-settled. Additional foliage, entities, particles, fluids, and animated textures
+settled. Additional foliage, custom entities, particles, fluids, and animated textures
 still need capture support; disabling their mods does not implement that support.
 Pack manifest/config inspection alone does not establish runtime compatibility.
 
