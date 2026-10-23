@@ -51,7 +51,10 @@ public final class ClientEvents {
         while (toggle.isPressed()) { setEnabled(!enabled); }
         if (resetRequested || !enabled || mc.world == null) {
             try { renderer.releaseWorld(); }
-            catch (RuntimeException | LinkageError ex) { RemixForgeMod.LOG.error("Error releasing Remix renderer", ex); }
+            catch (RuntimeException | LinkageError ex) {
+                failure = ex.getClass().getSimpleName() + ": " + ex.getMessage();
+                RemixForgeMod.LOG.error("Error releasing Remix renderer", ex);
+            }
             resetRequested = false;
         }
         smoke.tick();
@@ -111,6 +114,21 @@ public final class ClientEvents {
     int capturedEntityParts() { return renderer.capturedEntityParts(); }
     int skyResourceCount() { return renderer.skyResourceCount(); }
     long skyTextureUpdates() { return renderer.skyTextureUpdates(); }
+    int terrainRadius() { return renderer.terrainRadius(); }
+    int terrainColumnCount() { return renderer.terrainColumnCount(); }
+    int terrainCapturedColumnCount() { return renderer.terrainCapturedColumnCount(); }
+    boolean terrainColumnCaptured(int x, int z) { return renderer.terrainColumnCaptured(x, z); }
+    int terrainSectionCount() { return renderer.terrainSectionCount(); }
+    int terrainPendingSectionCount() { return renderer.terrainPendingSectionCount(); }
+    int terrainRetirementCount() { return renderer.terrainRetirementCount(); }
+    int terrainResourceCount() { return renderer.terrainResourceCount(); }
+    long terrainPublishedSectionCount() { return renderer.terrainPublishedSectionCount(); }
+    long terrainRetiredSectionCount() { return renderer.terrainRetiredSectionCount(); }
+    long terrainDiscardedBuildCount() { return renderer.terrainDiscardedBuildCount(); }
+    long terrainCapturedBytes() { return renderer.terrainCapturedBytes(); }
+    boolean terrainCapacityLimited() { return renderer.terrainCapacityLimited(); }
+    boolean terrainSectionReady(int x, int y, int z) { return renderer.terrainSectionReady(x, y, z); }
+    long terrainSectionRevision(int x, int y, int z) { return renderer.terrainSectionRevision(x, y, z); }
 
     String status() {
         return "requested=" + enabled + "; " + renderer.status() + (failure == null ? "" : "; last error=" + failure);

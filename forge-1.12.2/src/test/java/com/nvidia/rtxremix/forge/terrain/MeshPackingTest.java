@@ -71,4 +71,33 @@ public class MeshPackingTest {
         assertEquals(0xff804000, MeshPacking.tintRgba(255, 128, 64, 255, 0x808000));
         assertEquals(0x7f336699, MeshPacking.tintRgba(255, 255, 255, 127, 0x336699));
     }
+
+    @Test public void rollsBackPartialBlocksAndReusesStorageForTheNextSection() {
+        MeshPacking packed = new MeshPacking();
+        append(packed);
+        int checkpoint = packed.vertexCount();
+        append(packed);
+        packed.truncate(checkpoint);
+        assertEquals(4, packed.vertexCount());
+        assertEquals(4 * MeshPacking.STRIDE, packed.vertices().remaining());
+        packed.reset();
+        assertEquals(0, packed.vertexCount());
+        append(packed);
+        assertEquals(COLORS[0], packed.vertices().getInt(32));
+        assertEquals(6 * 4, packed.indices().remaining());
+    }
+
+    @Test public void pageViewsRebaseIndicesAndDoNotMutateCapturedVertices() {
+        MeshPacking packed = new MeshPacking();
+        append(packed);
+        append(packed);
+        ByteBuffer second = packed.vertices(4, 4);
+        assertEquals(256, second.remaining());
+        assertEquals(COLORS[0], second.getInt(32));
+        ByteBuffer indices = packed.indices(4);
+        assertEquals(0, indices.getInt());
+        assertEquals(2, indices.getInt());
+        assertEquals(8, packed.vertexCount());
+        assertEquals(512, packed.vertices().remaining());
+    }
 }

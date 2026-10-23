@@ -11,8 +11,9 @@ import java.nio.ByteOrder;
 /** Packs the current Remix ABI, independently of Minecraft and an active renderer. */
 final class MeshPacking {
     static final int STRIDE = HardcodedVertex.STRIDE;
-    private static final int MAX_VERTICES = 262144;
+    static final int MAX_VERTICES = 262144;
     private ByteBuffer vertices = direct(STRIDE * 256);
+    private ByteBuffer indices = direct(256 / 4 * 6 * Integer.BYTES);
     private int vertexCount;
 
     void quad(float[] positions, float[] uv, int[] colors,
@@ -35,6 +36,14 @@ final class MeshPacking {
 
     int vertexCount() { return vertexCount; }
 
+    void reset() { truncate(0); }
+
+    void truncate(int count) {
+        if (count < 0 || count > vertexCount || (count & 3) != 0) throw new IllegalArgumentException("Invalid quad checkpoint");
+        vertexCount = count;
+        vertices.position(count * STRIDE);
+    }
+
     ByteBuffer vertices() {
         ByteBuffer view = vertices.duplicate().order(ByteOrder.nativeOrder());
         view.flip();
@@ -42,14 +51,27 @@ final class MeshPacking {
     }
 
     ByteBuffer indices() {
-        ByteBuffer result = direct(vertexCount / 4 * 6 * Integer.BYTES);
-        for (int base = 0; base < vertexCount; base += 4) {
+        return indices(vertexCount);
+    }
+
+    ByteBuffer vertices(int first, int count) {
+        if (first < 0 || count < 0 || first + count > vertexCount) throw new IllegalArgumentException("Invalid vertex page");
+        ByteBuffer view = vertices.duplicate().order(ByteOrder.nativeOrder());
+        view.position(first * STRIDE).limit((first + count) * STRIDE);
+        return view.slice().order(ByteOrder.nativeOrder());
+    }
+
+    ByteBuffer indices(int count) {
+        int bytes = count / 4 * 6 * Integer.BYTES;
+        if (indices.capacity() < bytes) indices = direct(bytes);
+        indices.clear();
+        for (int base = 0; base < count; base += 4) {
             // Minecraft's baked-quad winding is reversed by the Remix terrain convention.
-            result.putInt(base).putInt(base + 2).putInt(base + 1);
-            result.putInt(base).putInt(base + 3).putInt(base + 2);
+            indices.putInt(base).putInt(base + 2).putInt(base + 1);
+            indices.putInt(base).putInt(base + 3).putInt(base + 2);
         }
-        result.flip();
-        return result;
+        indices.flip();
+        return indices;
     }
 
     /** Minecraft vertex bytes are RGBA; Remix's packed color is 0xAARRGGBB. */
@@ -63,7 +85,7 @@ final class MeshPacking {
     private void ensureVertices(int additional) {
         int needed = vertexCount + additional;
         if (needed > MAX_VERTICES) {
-            throw new IllegalStateException("One terrain surface exceeded " + MAX_VERTICES + " vertices");
+            throw new CapacityExceededException();
         }
         int bytes = needed * STRIDE;
         if (bytes <= vertices.capacity()) return;
@@ -76,5 +98,9 @@ final class MeshPacking {
 
     static ByteBuffer direct(int bytes) {
         return ByteBuffer.allocateDirect(bytes).order(ByteOrder.nativeOrder());
+    }
+
+    static final class CapacityExceededException extends IllegalStateException {
+        CapacityExceededException() { super("One terrain surface exceeded " + MAX_VERTICES + " vertices"); }
     }
 }

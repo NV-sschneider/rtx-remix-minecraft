@@ -107,10 +107,31 @@ final class PrototypeRenderer {
     int capturedEntityParts() { return entities == null ? 0 : entities.partCount(); }
     int skyResourceCount() { return sky == null ? 0 : sky.resourceCount(); }
     long skyTextureUpdates() { return sky == null ? 0 : sky.textureUpdates(); }
+    int terrainRadius() { return terrain == null ? 0 : terrain.getRadius(); }
+    int terrainColumnCount() { return terrain == null ? 0 : terrain.getColumnCount(); }
+    int terrainCapturedColumnCount() { return terrain == null ? 0 : terrain.getCapturedColumnCount(); }
+    boolean terrainColumnCaptured(int x, int z) { return terrain != null && terrain.isColumnCaptured(x, z); }
+    int terrainSectionCount() { return terrain == null ? 0 : terrain.getSectionCount(); }
+    int terrainPendingSectionCount() { return terrain == null ? 0 : terrain.getPendingSectionCount(); }
+    int terrainRetirementCount() { return terrain == null ? 0 : terrain.getRetirementCount(); }
+    int terrainResourceCount() { return terrain == null ? 0 : terrain.getResourceCount(); }
+    long terrainPublishedSectionCount() { return terrain == null ? 0 : terrain.getPublishedSectionCount(); }
+    long terrainRetiredSectionCount() { return terrain == null ? 0 : terrain.getRetiredSectionCount(); }
+    long terrainDiscardedBuildCount() { return terrain == null ? 0 : terrain.getDiscardedBuildCount(); }
+    long terrainCapturedBytes() { return terrain == null ? 0 : terrain.getCapturedBytes(); }
+    boolean terrainCapacityLimited() { return terrain != null && terrain.isCapacityLimited(); }
+    boolean terrainSectionReady(int x, int y, int z) {
+        return terrain != null && terrain.isSectionReady(x, y, z);
+    }
+    long terrainSectionRevision(int x, int y, int z) {
+        return terrain == null ? 0 : terrain.getSectionRevision(x, y, z);
+    }
     String status() {
         return api == null ? "native renderer stopped" : "native renderer active; frames=" + frames
-                + "; sections=" + (terrain == null ? 0 : terrain.getSectionCount())
-                + "; pending=" + (terrain == null ? 0 : terrain.getPendingSectionCount())
+                + "; terrain radius=" + terrainRadius() + "; columns=" + terrainColumnCount()
+                + "; sections=" + terrainSectionCount() + "; pending=" + terrainPendingSectionCount()
+                + "; retiring=" + terrainRetirementCount() + "; terrain bytes=" + terrainCapturedBytes()
+                + (terrain != null && terrain.isCapacityLimited() ? "; terrain capacity limit reached" : "")
                 + "; entity parts=" + capturedEntityParts()
                 + "; sky=" + (sky == null ? "released" : sky.status());
     }
