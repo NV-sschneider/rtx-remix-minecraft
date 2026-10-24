@@ -33,6 +33,12 @@ dependencies {
 
 tasks.withType(JavaCompile) { options.encoding = 'UTF-8' }
 
+test {
+    if (System.getProperty('rtxremix.betterFoliageJar')) {
+        systemProperty 'rtxremix.betterFoliageJar', System.getProperty('rtxremix.betterFoliageJar')
+    }
+}
+
 jar {
     manifest {
         attributes(

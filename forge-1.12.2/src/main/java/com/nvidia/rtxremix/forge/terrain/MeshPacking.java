@@ -9,14 +9,14 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 
 /** Packs the current Remix ABI, independently of Minecraft and an active renderer. */
-final class MeshPacking {
+final class MeshPacking implements BlockQuadSink {
     static final int STRIDE = HardcodedVertex.STRIDE;
     static final int MAX_VERTICES = 262144;
     private ByteBuffer vertices = direct(STRIDE * 256);
     private ByteBuffer indices = direct(256 / 4 * 6 * Integer.BYTES);
     private int vertexCount;
 
-    void quad(float[] positions, float[] uv, int[] colors,
+    @Override public void quad(float[] positions, float[] uv, int[] colors,
               float nx, float ny, float nz, float minU, float minV, float maxU, float maxV) {
         ensureVertices(4);
         int minimum = HardcodedVertex.packHalf2x16(minU, minV);

@@ -28,21 +28,16 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.WorldClient;
 import net.minecraft.client.renderer.GlStateManager;
 import net.minecraft.client.renderer.OpenGlHelper;
-import net.minecraft.client.renderer.block.model.BakedQuad;
-import net.minecraft.client.renderer.block.model.IBakedModel;
 import net.minecraft.client.renderer.texture.TextureAtlasSprite;
 import net.minecraft.client.renderer.texture.TextureMap;
-import net.minecraft.client.renderer.vertex.VertexFormat;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.util.BlockRenderLayer;
 import net.minecraft.util.EnumBlockRenderType;
-import net.minecraft.util.EnumFacing;
 import net.minecraft.util.SoundCategory;
 import net.minecraft.util.SoundEvent;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.MathHelper;
-import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.chunk.Chunk;
 import net.minecraft.world.chunk.storage.ExtendedBlockStorage;
 import net.minecraft.world.IWorldEventListener;
@@ -79,13 +74,14 @@ public final class TerrainCapture implements AutoCloseable {
     private static final int CLEAR_GLASS = LAVA + 1;
     private static final int STAINED_GLASS = CLEAR_GLASS + 1;
     private static final int MATERIAL_COUNT = STAINED_GLASS + 1;
-    private static final EnumFacing[] FACES = EnumFacing.values();
 
     private final RemixAPI api;
     private final Minecraft mc;
     private final WorldClient world;
     private final BlockLightScene lights;
     private final FluidCapture fluids;
+    private final BakedBlockCapture baked;
+    private final BetterFoliageCapture foliage;
     private final IWorldEventListener worldUpdates = new WorldUpdates();
     private final TerrainSchedule schedule = new TerrainSchedule();
     private final TerrainBudget budget = new TerrainBudget();
@@ -98,9 +94,6 @@ public final class TerrainCapture implements AutoCloseable {
     private final int[] checkpoints = new int[MATERIAL_COUNT];
     private final BlockPos.MutableBlockPos blockPosition = new BlockPos.MutableBlockPos();
     private final long[] materials = new long[MATERIAL_COUNT];
-    private final float[] positions = new float[12];
-    private final float[] uvs = new float[8];
-    private final int[] colors = new int[4];
     private long atlas;
     private AtlasAnimations animations;
     private AtlasMaterialMaps materialMaps;
@@ -124,6 +117,7 @@ public final class TerrainCapture implements AutoCloseable {
     private long lavaVertices;
     private long clearGlassVertices;
     private long stainedGlassVertices;
+    private long foliageVertices;
     private Build active;
 
     public TerrainCapture(RemixAPI api, Minecraft mc) {
@@ -135,6 +129,8 @@ public final class TerrainCapture implements AutoCloseable {
         this.world = mc.world;
         this.lights = new BlockLightScene(api, world);
         this.fluids = new FluidCapture(mc);
+        this.baked = new BakedBlockCapture(mc);
+        this.foliage = BetterFoliageCapture.create(mc, baked);
         world.addEventListener(worldUpdates);
     }
 
@@ -236,6 +232,18 @@ public final class TerrainCapture implements AutoCloseable {
     public long getLavaVertexCount() { return lavaVertices; }
     public long getClearGlassVertexCount() { return clearGlassVertices; }
     public long getStainedGlassVertexCount() { return stainedGlassVertices; }
+    public boolean isBetterFoliageActive() { return foliage != null; }
+    public long getBetterFoliageVertexCount() { return foliageVertices; }
+    public long getBetterFoliageCaptureCount() { return foliage == null ? 0 : foliage.captureCount(); }
+    public long getSectionBetterFoliageVertices(int x, int y, int z) {
+        TerrainSchedule.Section section = section(x, y, z);
+        return section == null || section.asset == null ? 0 : ((SectionAsset) section.asset).foliageVertices;
+    }
+    /** Signature of the captured model positions, UVs and unlit colors, excluding lightmap values. */
+    public long getSectionGeometryHash(int x, int y, int z) {
+        TerrainSchedule.Section section = section(x, y, z);
+        return section == null || section.asset == null ? 0 : ((SectionAsset) section.asset).geometryHash;
+    }
     public boolean isCapacityLimited() { return capacityLimited || schedule.failures() != 0; }
     public int getResourceCount() {
         int result = lights.resourceCount() + pageResources + (atlas == 0 ? 0 : 1) + (vertexColorExtension == 0 ? 0 : 1)
@@ -289,12 +297,14 @@ public final class TerrainCapture implements AutoCloseable {
         checkThread();
         if (closed || schedule.radius() < 0) return;
         int radius = schedule.radius();
-        int fromX = Math.max(schedule.centerX() - radius, (minX - 1) >> 4);
-        int toX = Math.min(schedule.centerX() + radius, (maxX + 1) >> 4);
-        int fromY = Math.max(0, (minY - 1) >> 4);
-        int toY = Math.min(SECTION_COUNT - 1, (maxY + 1) >> 4);
-        int fromZ = Math.max(schedule.centerZ() - radius, (minZ - 1) >> 4);
-        int toZ = Math.min(schedule.centerZ() + radius, (maxZ + 1) >> 4);
+        // Connected foliage can depend on a second neighbour (for example, snow above connected grass).
+        int padding = foliage == null ? 1 : 2;
+        int fromX = Math.max(schedule.centerX() - radius, (minX - padding) >> 4);
+        int toX = Math.min(schedule.centerX() + radius, (maxX + padding) >> 4);
+        int fromY = Math.max(0, (minY - padding) >> 4);
+        int toY = Math.min(SECTION_COUNT - 1, (maxY + padding) >> 4);
+        int fromZ = Math.max(schedule.centerZ() - radius, (minZ - padding) >> 4);
+        int toZ = Math.min(schedule.centerZ() + radius, (maxZ + padding) >> 4);
         for (int x = fromX; x <= toX; x++) {
             for (int z = fromZ; z <= toZ; z++) {
                 TerrainSchedule.Column column = schedule.column(x, z);
@@ -355,6 +365,8 @@ public final class TerrainCapture implements AutoCloseable {
                     // Capacity failures are retried only when the section changes again.
                     schedule.fail(section);
                     return count;
+                } catch (BetterFoliageCapture.CaptureFailure error) {
+                    discardBuild(); throw error;
                 } catch (RuntimeException error) {
                     for (int i = 0; i < builders.length; i++) if (builders[i] != null) builders[i].truncate(checkpoints[i]);
                     if (!warnedUnsupportedModel) {
@@ -432,11 +444,13 @@ public final class TerrainCapture implements AutoCloseable {
             long lavaCount = builders[LAVA] == null ? 0 : builders[LAVA].vertexCount();
             long clearGlassCount = builders[CLEAR_GLASS] == null ? 0 : builders[CLEAR_GLASS].vertexCount();
             long stainedGlassCount = builders[STAINED_GLASS] == null ? 0 : builders[STAINED_GLASS].vertexCount();
-            section.asset = new SectionAsset(build.pages, waterCount, lavaCount, clearGlassCount, stainedGlassCount);
+            section.asset = new SectionAsset(build.pages, waterCount, lavaCount, clearGlassCount, stainedGlassCount,
+                    build.foliageVertices, build.geometryHash);
             waterVertices += waterCount;
             lavaVertices += lavaCount;
             clearGlassVertices += clearGlassCount;
             stainedGlassVertices += stainedGlassCount;
+            foliageVertices += build.foliageVertices;
             if (old == null) {
                 sectionCount++;
                 if (section.column.capturedSections++ == 0) capturedColumns++;
@@ -461,73 +475,21 @@ public final class TerrainCapture implements AutoCloseable {
 
     private void emitBlock(MeshPacking[] layers, IBlockState raw, BlockPos pos, int x, int y, int z) {
         IBlockState actual = raw.getActualState(world, pos);
-        IBlockState extended = actual.getBlock().getExtendedState(actual, world, pos);
-        Vec3d offset = actual.getOffset(world, pos);
-        long seed = MathHelper.getPositionRandom(pos);
         GlassMaterials.Kind glass = GlassMaterials.kind(actual.getBlock().getRegistryName());
+        int originX = pos.getX() - x, originY = pos.getY() - y, originZ = pos.getZ() - z;
         for (BlockRenderLayer layer : LAYERS) {
-            if (!actual.getBlock().canRenderInLayer(actual, layer)) continue;
+            if (!(foliage == null ? actual.getBlock().canRenderInLayer(actual, layer) : foliage.canRender(actual, layer))) continue;
             ForgeHooksClient.setRenderLayer(layer);
-            IBakedModel model = mc.getBlockRendererDispatcher().getModelForState(actual);
             int layerIndex = glass == GlassMaterials.Kind.CLEAR ? CLEAR_GLASS
                     : glass == GlassMaterials.Kind.STAINED ? STAINED_GLASS : layer.ordinal();
             if (layers[layerIndex] == null) layers[layerIndex] = new MeshPacking();
-            for (EnumFacing side : FACES) {
-                if (actual.shouldSideBeRendered(world, pos, side)) {
-                    emitQuads(layers[layerIndex], model.getQuads(extended, side, seed), actual, pos,
-                            x + (float) offset.x, y + (float) offset.y, z + (float) offset.z);
-                }
+            if (foliage == null) baked.emit(raw, world, pos, originX, originY, originZ, layers[layerIndex]);
+            else {
+                active.foliageVertices += foliage.capture(raw, world, pos, layer, originX, originY, originZ, layers[layerIndex]);
+                active.geometryHash = (active.geometryHash ^ foliage.geometryHash()) * 0x100000001b3L;
             }
-            emitQuads(layers[layerIndex], model.getQuads(extended, null, seed), actual, pos,
-                    x + (float) offset.x, y + (float) offset.y, z + (float) offset.z);
         }
     }
-
-    private void emitQuads(MeshPacking target, List<BakedQuad> quads, IBlockState state,
-                           BlockPos pos, float x, float y, float z) {
-        for (BakedQuad quad : quads) {
-            VertexFormat format = quad.getFormat();
-            if (!format.hasUvOffset(0)) continue;
-            int[] data = quad.getVertexData();
-            int stride = format.getIntegerSize();
-            int uv = format.getUvOffsetById(0) / 4;
-            if (stride < 3 || data.length < stride * 4 || uv + 1 >= stride) continue;
-            int tint = quad.hasTintIndex() ? mc.getBlockColors().colorMultiplier(state, world, pos, quad.getTintIndex()) : 0xFFFFFF;
-            for (int v = 0; v < 4; v++) {
-                int base = v * stride;
-                positions[v * 3] = Float.intBitsToFloat(data[base]) + x;
-                positions[v * 3 + 1] = Float.intBitsToFloat(data[base + 1]) + y;
-                positions[v * 3 + 2] = Float.intBitsToFloat(data[base + 2]) + z;
-                uvs[v * 2] = Float.intBitsToFloat(data[base + uv]);
-                uvs[v * 2 + 1] = Float.intBitsToFloat(data[base + uv + 1]);
-                if (format.hasColor()) {
-                    int colorByte = base * 4 + format.getColorOffset();
-                    colors[v] = MeshPacking.tintRgba(byteAt(data, colorByte), byteAt(data, colorByte + 1),
-                            byteAt(data, colorByte + 2), byteAt(data, colorByte + 3), tint);
-                } else {
-                    colors[v] = 0xFF000000 | (tint & 0xFFFFFF);
-                }
-            }
-            float ax = positions[3] - positions[0], ay = positions[4] - positions[1], az = positions[5] - positions[2];
-            float bx = positions[6] - positions[0], by = positions[7] - positions[1], bz = positions[8] - positions[2];
-            float nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx;
-            float length = (float) Math.sqrt(nx * nx + ny * ny + nz * nz);
-            if (length > 0.00001f) {
-                nx /= length; ny /= length; nz /= length;
-            } else if (quad.getFace() != null) {
-                nx = quad.getFace().getXOffset(); ny = quad.getFace().getYOffset(); nz = quad.getFace().getZOffset();
-            } else continue;
-            TextureAtlasSprite sprite = quad.getSprite();
-            target.quad(positions, uvs, colors, nx, ny, nz,
-                    sprite == null ? 0 : sprite.getMinU(), sprite == null ? 0 : sprite.getMinV(),
-                    sprite == null ? 1 : sprite.getMaxU(), sprite == null ? 1 : sprite.getMaxV());
-        }
-    }
-
-    private static int byteAt(int[] data, int offset) {
-        return (data[offset / 4] >>> ((offset & 3) * 8)) & 255;
-    }
-
     private void uploadAtlas() {
         int oldActive = GL11.glGetInteger(GL13.GL_ACTIVE_TEXTURE);
         GlStateManager.setActiveTexture(OpenGlHelper.defaultTexUnit);
@@ -611,6 +573,7 @@ public final class TerrainCapture implements AutoCloseable {
         lavaVertices -= asset.lavaVertices;
         clearGlassVertices -= asset.clearGlassVertices;
         stainedGlassVertices -= asset.stainedGlassVertices;
+        foliageVertices -= asset.foliageVertices;
         retiredSections++;
     }
     private void detach(Page page) {
@@ -738,6 +701,8 @@ public final class TerrainCapture implements AutoCloseable {
         int block;
         int layer;
         int vertex;
+        long foliageVertices;
+        long geometryHash = 0xcbf29ce484222325L;
         Build(TerrainSchedule.Section section, Chunk chunk) {
             this.section = section;
             this.chunk = chunk;
@@ -756,13 +721,17 @@ public final class TerrainCapture implements AutoCloseable {
         final long lavaVertices;
         final long clearGlassVertices;
         final long stainedGlassVertices;
+        final long foliageVertices;
+        final long geometryHash;
         SectionAsset(List<Page> pages, long waterVertices, long lavaVertices,
-                     long clearGlassVertices, long stainedGlassVertices) {
+                     long clearGlassVertices, long stainedGlassVertices, long foliageVertices, long geometryHash) {
             this.pages = pages;
             this.waterVertices = waterVertices;
             this.lavaVertices = lavaVertices;
             this.clearGlassVertices = clearGlassVertices;
             this.stainedGlassVertices = stainedGlassVertices;
+            this.foliageVertices = foliageVertices;
+            this.geometryHash = geometryHash;
         }
     }
 }
