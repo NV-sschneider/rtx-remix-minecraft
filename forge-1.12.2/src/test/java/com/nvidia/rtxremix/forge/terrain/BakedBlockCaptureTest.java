@@ -6,15 +6,55 @@ package com.nvidia.rtxremix.forge.terrain;
 
 import java.util.Arrays;
 import java.util.Collections;
+import net.minecraft.client.renderer.BlockRendererDispatcher;
+import net.minecraft.client.renderer.BlockModelRenderer;
 import net.minecraft.client.renderer.block.model.BakedQuad;
 import net.minecraft.client.renderer.texture.TextureAtlasSprite;
 import net.minecraft.client.renderer.vertex.DefaultVertexFormats;
 import net.minecraft.client.renderer.vertex.VertexFormat;
 import net.minecraft.util.EnumFacing;
+import net.minecraftforge.client.model.pipeline.IVertexConsumer;
 import org.junit.Test;
+import org.objectweb.asm.ClassReader;
+import org.objectweb.asm.Opcodes;
+import org.objectweb.asm.tree.AbstractInsnNode;
+import org.objectweb.asm.tree.ClassNode;
+import org.objectweb.asm.tree.MethodNode;
+import org.objectweb.asm.tree.TypeInsnNode;
 import static org.junit.Assert.*;
 
 public class BakedBlockCaptureTest {
+    @Test public void installedForgeDefaultPipelineQualifiesButDispatcherSubclassesDoNot() throws Exception {
+        // Inspect the pinned constructor without initializing Minecraft's GL-dependent fluid renderer.
+        ClassNode dispatcher = new ClassNode();
+        try (java.io.InputStream source = BlockRendererDispatcher.class.getResourceAsStream("BlockRendererDispatcher.class")) {
+            assertNotNull(source); new ClassReader(source).accept(dispatcher, 0);
+        }
+        int found = 0;
+        for (MethodNode method : dispatcher.methods) if (method.name.equals("<init>")) {
+            for (AbstractInsnNode instruction : method.instructions.toArray()) if (instruction.getOpcode() == Opcodes.NEW) {
+                Class<?> type = Class.forName(((TypeInsnNode) instruction).desc.replace('/', '.'), false, getClass().getClassLoader());
+                if (BlockModelRenderer.class.isAssignableFrom(type)) {
+                    assertTrue(BakedBlockCapture.standardPipeline(BlockRendererDispatcher.class, type));
+                    assertFalse(BakedBlockCapture.standardPipeline(CustomDispatcher.class, type)); found++;
+                }
+            }
+        }
+        assertEquals(1, found);
+    }
+    private static final class CustomDispatcher extends BlockRendererDispatcher {
+        CustomDispatcher() { super(null, null); }
+    }
+
+    @Test public void customQuadPipeNeverAuthorizesOmittingItsVanillaDraw() {
+        BakedQuad packed = quad(0);
+        BakedQuad custom = new BakedQuad(packed.getVertexData(), -1, packed.getFace(), packed.getSprite(), true, packed.getFormat()) {
+            @Override public void pipe(IVertexConsumer consumer) { }
+        };
+        BakedBlockCapture capture = new BakedBlockCapture(null); MeshPacking mesh = new MeshPacking();
+        capture.beginBlock(); capture.emitQuads(mesh, Collections.singletonList(custom), null, null, null, 0, 0, 0);
+        assertFalse(capture.complete()); assertEquals(4, mesh.vertexCount());
+    }
     @Test public void validUnlitQuadsQualifyButMalformedNeighborsRevokeTheWholeBlock() {
         BakedBlockCapture capture = new BakedBlockCapture(null); MeshPacking mesh = new MeshPacking();
         capture.beginBlock(); capture.emitQuads(mesh, Collections.singletonList(quad(0)), null, null, null, 0, 0, 0);

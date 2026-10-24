@@ -19,10 +19,18 @@ import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.IBlockAccess;
+import net.minecraftforge.client.model.pipeline.ForgeBlockModelRenderer;
+import net.minecraftforge.client.model.pipeline.IVertexConsumer;
 
 /** The single baked-model emitter; lighting is supplied by Remix, vertex and biome colors by the model. */
 final class BakedBlockCapture {
     private static final EnumFacing[] FACES = EnumFacing.values();
+    private static final ClassValue<Boolean> PACKED_QUAD_PIPE = new ClassValue<Boolean>() {
+        @Override protected Boolean computeValue(Class<?> type) {
+            try { return type.getMethod("pipe", IVertexConsumer.class).getDeclaringClass() == BakedQuad.class; }
+            catch (ReflectiveOperationException failure) { return false; }
+        }
+    };
     private final Minecraft mc;
     private final float[] positions = new float[12], uvs = new float[8];
     private final int[] colors = new int[4];
@@ -34,8 +42,11 @@ final class BakedBlockCapture {
     boolean complete() { return complete; }
     boolean standardPipeline() {
         BlockRendererDispatcher dispatcher = mc.getBlockRendererDispatcher();
-        return dispatcher.getClass() == BlockRendererDispatcher.class
-                && dispatcher.getBlockModelRenderer().getClass() == BlockModelRenderer.class;
+        return standardPipeline(dispatcher.getClass(), dispatcher.getBlockModelRenderer().getClass());
+    }
+    static boolean standardPipeline(Class<?> dispatcher, Class<?> renderer) {
+        return dispatcher == BlockRendererDispatcher.class
+                && (renderer == BlockModelRenderer.class || renderer == ForgeBlockModelRenderer.class);
     }
 
     void emit(IBlockState raw, IBlockAccess world, BlockPos pos,
@@ -57,6 +68,9 @@ final class BakedBlockCapture {
                            BlockPos pos, float x, float y, float z) {
         for (int q = 0; q < quads.size(); q++) {
             BakedQuad quad = quads.get(q);
+            // Forge's normal lighter consumes these packed quads. A custom pipe can emit
+            // different geometry, so its packed approximation cannot authorize a skipped draw.
+            if (!PACKED_QUAD_PIPE.get(quad.getClass())) complete = false;
             VertexFormat format = quad.getFormat();
             if (!supportedFormat(format)) { complete = false; continue; }
             int[] data = quad.getVertexData();
