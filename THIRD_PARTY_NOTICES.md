@@ -22,17 +22,15 @@ locations given.
 - License: Apache License, Version 2.0 (see [LICENSE](LICENSE))
 - Source: https://github.com/gradle/gradle
 
-### Forge prototype bridge snapshot
+### Forge prototype OpenGL adapter
 
-`forge-1.12.2/bridge/` contains a Java 8 adaptation of this project's Java/JNI
-bridge at commit `f2c6fdaa763f45676f1576e63f8e054bf4ef16af`, together with a
-separate OpenGL interop adapter. The copied Java and JNI sources retain their
-NVIDIA copyright and Apache-2.0 notices. The copied
-`forge-1.12.2/bridge/native/include/remix_c.h` retains its NVIDIA copyright and
-MIT license text. See the snapshot's
+`forge-1.12.2/bridge/` contains the Forge OpenGL interop adapter and Java 8/native
+contract tests. Fabric and Forge compile the same Java/JNI sources and MIT C API
+header from `rtxremix-java/`; there is no separate facade or header copy. The
+adapter retains NVIDIA copyright and Apache-2.0 notices. See its
 [third-party notices](forge-1.12.2/bridge/THIRD_PARTY_NOTICES.md),
 [license](forge-1.12.2/bridge/LICENSE), and [notice](forge-1.12.2/bridge/NOTICE).
-The isolated snapshot does not bundle Minecraft, Forge, Java, or runtime binaries.
+The adapter does not bundle Minecraft, Forge, Java, or runtime binaries.
 
 ## Redistributed binaries (packaged releases)
 

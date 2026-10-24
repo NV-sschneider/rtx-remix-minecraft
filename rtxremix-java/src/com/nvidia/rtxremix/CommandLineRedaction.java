@@ -23,10 +23,35 @@ final class CommandLineRedaction {
     static final char BLANK = '*';
 
     /** The blanked command line, and how many option values it blanked. */
-    record Result(String commandLine, int blankedValues) {}
+    static final class Result {
+        private final String commandLine;
+        private final int blankedValues;
+
+        Result(String commandLine, int blankedValues) {
+            this.commandLine = commandLine;
+            this.blankedValues = blankedValues;
+        }
+
+        String commandLine() { return commandLine; }
+        int blankedValues() { return blankedValues; }
+    }
 
     /** One argument: its text after unquoting, and its span in the raw command line. */
-    private record Argument(String text, int start, int end) {}
+    private static final class Argument {
+        private final String text;
+        private final int start;
+        private final int end;
+
+        Argument(String text, int start, int end) {
+            this.text = text;
+            this.start = start;
+            this.end = end;
+        }
+
+        String text() { return text; }
+        int start() { return start; }
+        int end() { return end; }
+    }
 
     private CommandLineRedaction() {}
 
@@ -115,7 +140,9 @@ final class CommandLineRedaction {
                     }
                     backslashes /= 2;
                 }
-                text.repeat('\\', backslashes);
+                for (int i = 0; i < backslashes; i++) {
+                    text.append('\\');
+                }
                 if (pos == length || (!inQuotes && isBlank(line.charAt(pos)))) {
                     break;
                 }

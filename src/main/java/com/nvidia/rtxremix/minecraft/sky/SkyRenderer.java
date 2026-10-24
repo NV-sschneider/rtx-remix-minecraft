@@ -900,7 +900,7 @@ public class SkyRenderer {
                 (float) cameraPos.x,
                 (float) cameraPos.y,
                 (float) cameraPos.z,
-                rotation,
+                rotation.x, rotation.y, rotation.z, rotation.w,
                 STAR_DISTANCE_SCALE);
         System.arraycopy(rotated.matrix, 0, transform.matrix, 0, transform.matrix.length);
     }

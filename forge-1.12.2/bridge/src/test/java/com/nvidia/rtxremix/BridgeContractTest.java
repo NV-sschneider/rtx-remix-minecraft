@@ -9,10 +9,13 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Arrays;
+import java.util.Iterator;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Stream;
 
 /** Executable Java 8 checks for layouts shared with the native API. */
 public final class BridgeContractTest {
@@ -20,10 +23,26 @@ public final class BridgeContractTest {
         String header = new String(Files.readAllBytes(
                 Paths.get(args[0], "native", "include", "remix_c.h")), StandardCharsets.UTF_8);
         verifyHeaderConstants(header);
+        verifySharedSources(Paths.get(args[0]), Paths.get(args[1]));
         verifyVertexLayout();
         verifyTransforms();
         verifyCommandLineRedaction();
-        System.out.println("PASS: header/version agreement, vertex/transform layouts, command-line redaction");
+        System.out.println("PASS: shared-source boundary, header/version agreement, vertex/transform layouts, command-line redaction");
+    }
+
+    private static void verifySharedSources(Path shared, Path adapter) throws Exception {
+        Path sources = shared.resolve("src");
+        Path adapterSources = adapter.resolve("src/main/java");
+        check(Files.isRegularFile(sources.resolve("com/nvidia/rtxremix/RemixAPI.java")), "Shared Java facade is missing");
+        check(!Files.exists(adapter.resolve("native/remixbridge.cpp")), "Forge must compile the shared JNI implementation");
+        check(!Files.exists(adapter.resolve("native/include/remix_c.h")), "Forge must compile against the shared C API header");
+        try (Stream<Path> paths = Files.walk(adapterSources)) {
+            Iterator<Path> files = paths.filter(path -> path.toString().endsWith(".java")).iterator();
+            while (files.hasNext()) {
+                Path relative = adapterSources.relativize(files.next());
+                check(!Files.exists(sources.resolve(relative)), "Duplicated Java facade: " + relative);
+            }
+        }
     }
 
     private static void verifyHeaderConstants(String header) throws Exception {

@@ -13,6 +13,7 @@ $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $repositoryRoot = Split-Path -Parent $projectRoot
 $bridgeRoot = Join-Path $projectRoot 'bridge'
+$sharedBridgeRoot = Join-Path $repositoryRoot 'rtxremix-java'
 if ($RuntimeDirectory) { $RuntimeDirectory = (Resolve-Path -LiteralPath $RuntimeDirectory).Path }
 if ($GpuSmoke -and (-not $RuntimeDirectory -or $SkipNative -or $SkipTests)) {
     throw '-GpuSmoke requires -RuntimeDirectory and native builds/tests enabled.'
@@ -50,7 +51,7 @@ $testClasses = Join-Path $buildRoot 'test-classes'
 $nativeOutput = Join-Path $buildRoot 'native/win64'
 $libs = Join-Path $buildRoot 'libs'
 New-Item -ItemType Directory -Force -Path $classes,$headers,$testClasses,$nativeOutput,$libs | Out-Null
-$sources = @(Get-ChildItem -LiteralPath (Join-Path $bridgeRoot 'src/main/java') -Recurse -Filter '*.java' |
+$sources = @(Get-ChildItem -LiteralPath (Join-Path $sharedBridgeRoot 'src'),(Join-Path $bridgeRoot 'src/main/java') -Recurse -Filter '*.java' |
     ForEach-Object FullName)
 & $javac -source 8 -target 8 -encoding UTF-8 -h $headers -d $classes @sources
 if ($LASTEXITCODE -ne 0) { throw 'Bridge Java compilation failed.' }
@@ -70,11 +71,13 @@ if (-not $SkipNative) {
     if (-not $visualStudio) { throw 'Visual Studio with x64 C++ tools is required.' }
     $previousJdk = $env:BRIDGE_JAVA_HOME
     $previousRoot = $env:BRIDGE_ROOT
+    $previousSharedRoot = $env:BRIDGE_SHARED_ROOT
     $previousVs = $env:BRIDGE_VISUAL_STUDIO
     $previousSmoke = $env:BRIDGE_GPU_SMOKE
     try {
         $env:BRIDGE_JAVA_HOME = $JdkPath
         $env:BRIDGE_ROOT = $bridgeRoot
+        $env:BRIDGE_SHARED_ROOT = $sharedBridgeRoot
         $env:BRIDGE_VISUAL_STUDIO = $visualStudio
         $env:BRIDGE_GPU_SMOKE = if ($GpuSmoke) { '1' } else { '0' }
         & $env:ComSpec /d /c (Join-Path $bridgeRoot 'native/build-native.cmd')
@@ -82,6 +85,7 @@ if (-not $SkipNative) {
     } finally {
         $env:BRIDGE_JAVA_HOME = $previousJdk
         $env:BRIDGE_ROOT = $previousRoot
+        $env:BRIDGE_SHARED_ROOT = $previousSharedRoot
         $env:BRIDGE_VISUAL_STUDIO = $previousVs
         $env:BRIDGE_GPU_SMOKE = $previousSmoke
     }
@@ -92,7 +96,7 @@ if (-not $SkipTests) {
         ForEach-Object FullName)
     & $javac -source 8 -target 8 -encoding UTF-8 -cp $classes -d $testClasses @testSources
     if ($LASTEXITCODE -ne 0) { throw 'Bridge test compilation failed.' }
-    & $java -ea -cp "$classes;$testClasses" com.nvidia.rtxremix.BridgeContractTest $bridgeRoot
+    & $java -ea -cp "$classes;$testClasses" com.nvidia.rtxremix.BridgeContractTest $sharedBridgeRoot $bridgeRoot
     if ($LASTEXITCODE -ne 0) { throw 'Bridge contract tests failed.' }
     if (-not $SkipNative) {
         $smokeArgs = @((Join-Path $nativeOutput 'remixbridge.dll'))

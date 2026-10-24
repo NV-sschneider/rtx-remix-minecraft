@@ -13,16 +13,19 @@ Forge MDK wrapper (Gradle 4.9), pinned ForgeGradle 3.0.197, MCP stable
 in the ignored launcher and development caches; they are not distributed
 as source or included in the mod JAR.
 
-`forge-1.12.2/bridge/` contains a temporary, isolated snapshot of NVIDIA's
-Java/JNI facade adapted to Java 8, plus the port's OpenGL interop implementation.
-This prototype does not refactor or replace the shared `rtxremix-java/` sources.
+Fabric and Forge compile the shared Java facade, JNI implementation and C API
+header in repository-root `rtxremix-java/`. The facade supports Java 8 without
+external dependencies. `forge-1.12.2/bridge/` contains the port's separate
+OpenGL interop adapter, native build entry point and contract tests. The Forge
+native build enables its existing runtime-module pin through a compile-time
+option; the Fabric native build retains its module-loading behavior.
 The existing Remix native API remains 0.16.0. Use only the matching runtime
 pinned by the root `packman/remix-sdk.packman.xml`:
 `rtx_remix_runtime@minecraft-rtx2-71a581da-win64-release`.
 The runtime is separately licensed and staged under the ignored root
 `remix-runtime/win64` directory. Runtime binaries are not tracked in this source
-repository. Apache-2.0 license and attribution files accompany the copied bridge
-sources; the C API header retains its MIT license.
+repository. Apache-2.0 license and attribution files accompany the shared
+bridge and the Forge adapter; the shared C API header retains its MIT license.
 
 The original development setup records official download URLs and verified
 checksums for Java, Forge, Prism, and Minecraft in ignored manifests under the

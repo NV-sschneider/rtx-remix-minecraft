@@ -6,9 +6,9 @@ renderer with terrain, fluids, a time-driven sky, entities, items, and world eff
 It is not a complete RLCraft-compatible release.
 
 The Fabric renderer remains at the repository root. This module has its own
-Gradle 4.9 build and a temporary, isolated Java 8 bridge snapshot under
-`forge-1.12.2/bridge/`; it does not change the shared `rtxremix-java/` facade or
-the Fabric build.
+Gradle 4.9 build. Both builds compile the shared Java 8-compatible facade and
+JNI shim under `rtxremix-java/`; `forge-1.12.2/bridge/` supplies the LWJGL 2
+interop adapter and its native build.
 
 ## Build an installable package
 

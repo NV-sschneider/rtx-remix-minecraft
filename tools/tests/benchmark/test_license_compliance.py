@@ -58,14 +58,13 @@ HEADERED_SUFFIXES = frozenset(
 # gradle/ and gradlew.bat are the Gradle wrapper and packman/ contains the
 # Packman bootstrap; both keep their upstream licensing, attributed in
 # THIRD_PARTY_NOTICES.md. remix_c.h is vendored from dxvk-remix and remains MIT.
-# The isolated Forge module preserves the same licenses for its copies.
+# The Forge module shares the wrapper and keeps its Gradle wrapper's license.
 EXCLUDED_PREFIXES = ("gradle/", "packman/")
 EXCLUDED_PATHS = frozenset(
     {
         "gradlew.bat",
         "rtxremix-java/native/include/remix_c.h",
         "forge-1.12.2/gradlew.bat",
-        "forge-1.12.2/bridge/native/include/remix_c.h",
     }
 )
 

@@ -24,6 +24,7 @@ minecraft {
 }
 
 sourceSets.main.java.srcDir 'bridge/src/main/java'
+sourceSets.main.java.srcDir '../rtxremix-java/src'
 
 dependencies {
     minecraft 'net.minecraftforge:forge:1.12.2-14.23.5.2860'

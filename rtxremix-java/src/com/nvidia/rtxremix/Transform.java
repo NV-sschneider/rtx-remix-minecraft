@@ -4,7 +4,6 @@
  */
 package com.nvidia.rtxremix;
 
-import org.joml.Quaternionf;
 import java.util.Arrays;
 
 /**
@@ -61,11 +60,11 @@ public class Transform {
 
     /**
      * Builds a 3x4 TRS matrix: translate, then rotate, then uniform scale.
-     * Row-major layout: [R*s | t] where R is the rotation matrix from q.
+     * Row-major layout: [R*s | t] for the supplied unit quaternion (x, y, z, w).
      */
-    public static Transform fromTRS(float tx, float ty, float tz, Quaternionf q, float s) {
+    public static Transform fromTRS(float tx, float ty, float tz,
+                                    float x, float y, float z, float w, float s) {
         Transform t = new Transform();
-        float x = q.x, y = q.y, z = q.z, w = q.w;
         float x2 = x + x, y2 = y + y, z2 = z + z;
         float xx = x * x2, xy = x * y2, xz = x * z2;
         float yy = y * y2, yz = y * z2, zz = z * z2;

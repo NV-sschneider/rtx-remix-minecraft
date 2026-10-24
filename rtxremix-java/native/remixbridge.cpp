@@ -551,6 +551,18 @@ static jint initializeRuntime(const wchar_t* dllPath)
             g_remixDll = nullptr;
             return REMIXAPI_ERROR_CODE_INCOMPATIBLE_VERSION;
         }
+#if defined(REMIX_PIN_RUNTIME_DLL)
+        // Legacy clients keep the initialized module resident through process exit;
+        // Shutdown still releases its GPU resources before the loader lock is held.
+        HMODULE pinnedRuntime = nullptr;
+        if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+                reinterpret_cast<LPCWSTR>(pfnInit), &pinnedRuntime)) {
+            memset(&g_remix, 0, sizeof(g_remix));
+            FreeLibrary(g_remixDll);
+            g_remixDll = nullptr;
+            return REMIXAPI_ERROR_CODE_LOAD_LIBRARY_FAILURE;
+        }
+#endif
         g_inited = true;
         {
             std::lock_guard<std::mutex> lock(s_tracyMutex);

@@ -21,6 +21,22 @@ class RemixJavaBoundaryTest {
             "(?m)^\\s*import\\s+(?:static\\s+)?net\\.(?:minecraft|fabricmc)\\.");
 
     @Test
+    void forgeAdaptersDoNotDuplicateTheSharedFacade() throws Exception {
+        Path shared = Path.of("rtxremix-java", "src");
+        Path adapters = Path.of("forge-1.12.2", "bridge", "src", "main", "java");
+        assertTrue(Files.isDirectory(adapters), "missing Forge adapters: " + adapters);
+        Set<String> duplicates = new TreeSet<>();
+        try (Stream<Path> sources = Files.walk(adapters)) {
+            var iterator = sources.filter(path -> path.toString().endsWith(".java")).iterator();
+            while (iterator.hasNext()) {
+                Path relative = adapters.relativize(iterator.next());
+                if (Files.exists(shared.resolve(relative))) duplicates.add(relative.toString());
+            }
+        }
+        assertEquals(Set.of(), duplicates, "clients must compile the shared facade directly");
+    }
+
+    @Test
     void shimSourcesDoNotImportMinecraftOrFabric() throws Exception {
         Path sourceRoot = Path.of("rtxremix-java", "src");
         assertTrue(Files.isDirectory(sourceRoot), "missing Java shim sources: " + sourceRoot);
