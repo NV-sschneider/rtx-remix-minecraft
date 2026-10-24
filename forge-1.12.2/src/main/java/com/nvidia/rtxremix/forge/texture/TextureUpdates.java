@@ -31,13 +31,16 @@ public final class TextureUpdates implements AutoCloseable {
         final Long2ObjectOpenHashMap<Slot> rectangles = new Long2ObjectOpenHashMap<Slot>(4);
         final LostTextureRegions lost;
         int pending;
-        boolean deleted, released;
-        Binding(int glId, long texture, int width, int height) {
+        boolean deleted, released, opaque;
+        Binding(int glId, long texture, int width, int height, boolean opaque) {
             this.glId = glId; this.width = width; this.height = height; entry.handle = texture;
+            this.opaque = opaque;
             lost = new LostTextureRegions(width, height);
         }
         public boolean current() { return lost.empty() && !deleted && !released && pending == 0; }
         public boolean deleted() { return deleted || released; }
+        /** Strict all-alpha-255 proof; partial repairs never promote a previously unknown image. */
+        public boolean opaque() { return opaque && current(); }
     }
 
     private final Thread thread = Thread.currentThread();
@@ -62,10 +65,15 @@ public final class TextureUpdates implements AutoCloseable {
     TextureUpdates(Publisher publisher) { this.publisher = publisher; TextureRevisionHooks.attach(this); }
 
     public Binding subscribe(int glId, long texture, int width, int height) {
+        return subscribe(glId, texture, width, height, false);
+    }
+
+    /** The caller may seed opacity only from the complete initial level-zero snapshot. */
+    public Binding subscribe(int glId, long texture, int width, int height, boolean opaque) {
         checkThread();
         if (closed || glId <= 0 || texture == 0 || width <= 0 || height <= 0 || width > 65535 || height > 65535) throw new IllegalArgumentException("Invalid texture observer binding");
         for (int i = 0; i < bindings.length; i++) if (bindings[i] == null) {
-            Binding value = new Binding(glId, texture, width, height); bindings[i] = value; return value;
+            Binding value = new Binding(glId, texture, width, height, opaque); bindings[i] = value; return value;
         }
         throw new IllegalStateException("Scene texture observer capacity exceeded");
     }
@@ -184,6 +192,7 @@ public final class TextureUpdates implements AutoCloseable {
         ByteBuffer rgba = found.patch.pixelData; rgba.clear();
         for (int i = 0; i < width * height; i++) {
             int color = source.get(start + i);
+            if ((color >>> 24) != 255) owner.opaque = false;
             rgba.put((byte) (color >>> 16)).put((byte) (color >>> 8)).put((byte) color).put((byte) (color >>> 24));
         }
         rgba.flip();
@@ -219,6 +228,7 @@ public final class TextureUpdates implements AutoCloseable {
         }
     }
     private void lose(Binding owner, int x, int y, int width, int height, String reason) {
+        owner.opaque = false;
         if (firstReason == null) {
             firstReason = reason; failedId = owner.glId; failedX = x; failedY = y; failedW = width; failedH = height;
             failedPending = owner.pending; failedRetained = retained; failedCaptured = capturedBytes;

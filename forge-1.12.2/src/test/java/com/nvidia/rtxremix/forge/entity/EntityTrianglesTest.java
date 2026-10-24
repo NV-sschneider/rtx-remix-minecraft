@@ -17,6 +17,20 @@ import org.lwjgl.util.vector.Matrix4f;
 import static org.junit.Assert.*;
 
 public class EntityTrianglesTest {
+    @Test public void opacityChecksOnlyTheRetainedRangeAndRejectsEvenOneFractionalVertex() {
+        EntityTriangles triangles = new EntityTriangles(); ByteBuffer source = source(6);
+        for (int vertex = 0; vertex < 3; vertex++) source.put(vertex * 28 + 23, (byte) 255);
+        assertTrue(append(triangles, source, 6));
+        assertTrue(triangles.opaque(0, 3)); assertFalse(triangles.opaque(3, 3));
+        assertFalse(triangles.opaque(0, 6)); assertFalse(triangles.opaque(0, 0));
+        assertFalse(triangles.opaque(-1, 3)); assertFalse(triangles.opaque(3, 6));
+        assertFalse(triangles.opaque(Integer.MAX_VALUE, 3)); assertFalse(triangles.opaque(0, Integer.MAX_VALUE));
+        triangles.truncate(3); assertTrue(triangles.opaque(0, 3)); assertFalse(triangles.opaque(3, 3));
+        source.put(23, (byte) 254); assertTrue(append(triangles, source, 3));
+        assertFalse(triangles.opaque(3, 3)); assertTrue(triangles.opaque(0, 3));
+        triangles.reset(); assertFalse(triangles.opaque(0, 3));
+    }
+
     @Test public void itemGlintShellSeparatesBothFacesWithoutChangingUvsColorsNormalsOrSource() {
         ByteBuffer source = source(6);
         for (int vertex = 3; vertex < 6; vertex++) source.put(vertex * 28 + 26, (byte) -127);

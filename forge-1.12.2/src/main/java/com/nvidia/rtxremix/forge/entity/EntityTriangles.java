@@ -28,6 +28,14 @@ final class EntityTriangles {
     EntityTriangles() { info.surfaces = new MeshInfoSurfaceTriangles[] {surface}; }
     int count() { return count; }
     long fingerprint() { return fingerprint; }
+    /** Evaluated once when a retained mesh is created, never during unchanged per-frame submission. */
+    boolean opaque(int first, int vertexCount) {
+        if (first < 0 || vertexCount <= 0 || vertexCount % 3 != 0 || first > count - vertexCount) return false;
+        for (int vertex = first; vertex < first + vertexCount; vertex++) {
+            if ((vertices.getInt(vertex * HardcodedVertex.STRIDE + 32) >>> 24) != 255) return false;
+        }
+        return true;
+    }
     Rejection rejection() { return rejection; }
     int rejectedVertex() { return rejectedVertex; }
     void reset() { count = 0; }

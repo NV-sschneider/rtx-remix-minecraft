@@ -12,6 +12,48 @@ import org.junit.Test;
 import static org.junit.Assert.*;
 
 public class TextureUpdatesTest {
+    @Test public void opaqueProofSurvivesOpaquePatchesButNeverPromotesUnknownOrTranslucentPixels() {
+        try (TextureUpdates updates = new TextureUpdates(batch -> { })) {
+            TextureUpdates.Binding proven = updates.subscribe(1, 11, 2, 2, true);
+            TextureUpdates.Binding unknown = updates.subscribe(2, 22, 1, 1);
+            assertTrue(proven.opaque()); assertFalse(unknown.opaque());
+            updates.begin(1, 1, 0, 1, 1);
+            upload(updates, 1, 0, 1, 1, IntBuffer.wrap(new int[] {0xff123456})); updates.end(true);
+            assertFalse(proven.opaque()); // Pending pixels cannot authorize an opaque native draw.
+            updates.flush(); assertTrue(proven.opaque());
+            updates.begin(1, 0, 1, 1, 1);
+            upload(updates, 0, 1, 1, 1, IntBuffer.wrap(new int[] {0xfe123456})); updates.end(true);
+            assertFalse(proven.opaque()); updates.flush(); assertFalse(proven.opaque()); assertTrue(proven.current());
+            updates.begin(1, 0, 1, 1, 1);
+            upload(updates, 0, 1, 1, 1, IntBuffer.wrap(new int[] {0xff123456})); updates.end(true); updates.flush();
+            assertFalse(proven.opaque()); // Partial repair cannot prove the complete image again.
+            updates.begin(2, 0, 0, 1, 1);
+            upload(updates, 0, 0, 1, 1, IntBuffer.wrap(new int[] {-1})); updates.end(true); updates.flush();
+            assertFalse(unknown.opaque());
+        }
+    }
+
+    @Test public void unknownFailedDeletedAndReleasedRevisionsRevokeTheInitialOpaqueProof() {
+        try (TextureUpdates updates = new TextureUpdates(batch -> { })) {
+            TextureUpdates.Binding wrongFormat = updates.subscribe(1, 11, 1, 1, true);
+            TextureUpdates.Binding failed = updates.subscribe(2, 22, 1, 1, true);
+            TextureUpdates.Binding deleted = updates.subscribe(3, 33, 1, 1, true);
+            TextureUpdates.Binding released = updates.subscribe(4, 44, 1, 1, true);
+            updates.begin(1, 0, 0, 1, 1);
+            updates.uploaded(3553, 0, 0, 0, 1, 1, 6408, 5121, IntBuffer.wrap(new int[] {-1})); updates.end(true);
+            updates.begin(2, 0, 0, 1, 1);
+            upload(updates, 0, 0, 1, 1, IntBuffer.wrap(new int[] {-1})); updates.end(false);
+            updates.deleted(3); updates.unsubscribe(released);
+            assertFalse(wrongFormat.opaque()); assertFalse(failed.opaque());
+            assertFalse(deleted.opaque()); assertFalse(released.opaque());
+            for (int id = 1; id <= 2; id++) {
+                updates.begin(id, 0, 0, 1, 1); upload(updates, 0, 0, 1, 1, IntBuffer.wrap(new int[] {-1})); updates.end(true);
+            }
+            updates.flush(); assertTrue(wrongFormat.current()); assertTrue(failed.current());
+            assertFalse(wrongFormat.opaque()); assertFalse(failed.opaque());
+        }
+    }
+
     @Test public void copiesActualUploadPositionAndCoalescesOverlapsBeforeMinecraftReusesMemory() {
         final int[] actual = new int[4];
         try (TextureUpdates updates = new TextureUpdates(batch -> {

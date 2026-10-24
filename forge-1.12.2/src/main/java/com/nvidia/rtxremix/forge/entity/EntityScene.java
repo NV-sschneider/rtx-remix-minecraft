@@ -299,7 +299,8 @@ public final class EntityScene implements AutoCloseable {
         }
         long handle = api.createMesh(triangles ? captured.triangles.info(captured.firstVertex, captured.vertexCount,
                 material, HASHES.incrementAndGet()) : geometry.info(HASHES.incrementAndGet()));
-        MeshAsset created = new MeshAsset(handle, bytes, texture, triangles, captured.surface);
+        MeshAsset created = new MeshAsset(handle, bytes, texture, triangles, captured.surface,
+                !triangles || captured.triangles.opaque(captured.firstVertex, captured.vertexCount));
         MeshKey key = new MeshKey();
         key.set(captured, texture);
         meshes.put(key, created);
@@ -323,12 +324,17 @@ public final class EntityScene implements AutoCloseable {
 
     private void submit(Part part, MeshAsset mesh, CapturedEntityPart captured, Owner owner) {
         boolean first = part.instance == 0;
+        // Some fixed-function renderers enable ordinary blending for fully opaque models.
+        // Keep those out of unordered translucency, which can ghost the base over the sky.
+        // Texture revisions are consulted every frame, including when geometry is retained.
+        boolean alphaBlend = captured.alphaBlend && !(captured.surface == EntitySurface.ORDINARY
+                && mesh.texture.opaque() && mesh.opaqueVertices && (captured.argb >>> 24) == 255);
         boolean transformChanged = !Arrays.equals(part.transform, captured.transform);
-        boolean blendChanged = first || part.argb != captured.argb || part.alphaBlend != captured.alphaBlend
+        boolean blendChanged = first || part.argb != captured.argb || part.alphaBlend != alphaBlend
                 || part.alphaCompare != captured.alphaCompare || part.alphaReference != captured.alphaReference
                 || part.vertexColors != mesh.triangles || part.surface != captured.surface;
         if (!first && !transformChanged && !blendChanged && part.mesh == mesh) return;
-        long blend = blendChanged ? api.createBlend(blendState(captured.argb, captured.alphaBlend,
+        long blend = blendChanged ? api.createBlend(blendState(captured.argb, alphaBlend,
                 captured.alphaCompare, captured.alphaReference, mesh.triangles, captured.surface)) : part.blend;
         try {
             if (first) {
@@ -352,7 +358,7 @@ public final class EntityScene implements AutoCloseable {
             part.retiredBlend = part.blend;
             part.blend = blend;
             part.argb = captured.argb;
-            part.alphaBlend = captured.alphaBlend;
+            part.alphaBlend = alphaBlend;
             part.alphaCompare = captured.alphaCompare;
             part.alphaReference = captured.alphaReference;
             part.vertexColors = mesh.triangles;
@@ -579,10 +585,12 @@ public final class EntityScene implements AutoCloseable {
         final long bytes;
         final EntityTextures.Asset texture;
         final boolean triangles;
+        final boolean opaqueVertices;
         final int surface;
         int references;
-        MeshAsset(long handle, long bytes, EntityTextures.Asset texture, boolean triangles, int surface) {
+        MeshAsset(long handle, long bytes, EntityTextures.Asset texture, boolean triangles, int surface, boolean opaqueVertices) {
             this.handle = handle; this.bytes = bytes; this.texture = texture; this.triangles = triangles; this.surface = surface;
+            this.opaqueVertices = opaqueVertices;
         }
     }
 

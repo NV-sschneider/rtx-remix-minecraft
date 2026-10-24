@@ -24,6 +24,47 @@ import sun.reflect.ReflectionFactory;
 import static org.junit.Assert.*;
 
 public class EntitySceneTest {
+    @Test public void provenOpaqueBaseLeavesTranslucencyAndRevisionChangesBlendWithoutRebuildingTheMesh() {
+        Fake api = new Fake(); api.opaqueTexture = true;
+        EntityScene scene = new EntityScene(api); List<CapturedEntityPart> parts = parts(1);
+        CapturedEntityPart part = parts.get(0); part.alphaBlend = true; part.alphaCompare = 4; part.alphaReference = 12;
+        scene.sync(parts);
+        assertEquals(0, api.createdBlends.get(0).alphaBlendEnabled);
+        assertEquals(4, api.createdBlends.get(0).alphaTestCompareOp);
+        assertEquals(12, api.createdBlends.get(0).alphaTestReferenceValue);
+        int meshCreates = api.meshCreates;
+        scene.sync(parts); assertEquals(1, api.createdBlends.size());
+        // Represents a completed CPU revision which invalidated the texture's all-opaque proof.
+        api.uploaded.get(0).opaquePixels = false;
+        scene.sync(parts);
+        assertEquals(1, api.createdBlends.get(1).alphaBlendEnabled);
+        assertEquals(meshCreates, api.meshCreates); assertEquals(1, api.uploaded.size());
+        assertEquals(2, api.instanceUpdates); scene.close(); api.assertEmpty();
+    }
+
+    @Test public void fractionalVertexOrTintAlphaAndEveryEmissiveSurfaceKeepBlending() {
+        Fake api = new Fake(); api.opaqueTexture = true;
+        EntityScene scene = new EntityScene(api); List<CapturedEntityPart> parts = parts(1);
+        CapturedEntityPart part = parts.get(0); part.alphaBlend = true;
+        part.triangles.info(0, 3, 1, 2).surfaces[0].vertexBuffer.putInt(32, 0xfeffffff);
+        scene.sync(parts); assertEquals(1, api.createdBlends.get(0).alphaBlendEnabled);
+        scene.close(); api.assertEmpty();
+
+        for (int surface : new int[] {EntitySurface.ORDINARY, EntitySurface.EYES, EntitySurface.GLINT, EntitySurface.ADDITIVE_ALPHA}) {
+            api = new Fake(); api.opaqueTexture = true; scene = new EntityScene(api); parts = parts(1); part = parts.get(0);
+            part.alphaBlend = true; part.surface = surface;
+            if (surface == EntitySurface.ORDINARY) part.argb = 0xfeffffff;
+            scene.sync(parts); assertEquals(1, api.createdBlends.get(0).alphaBlendEnabled);
+            scene.close(); api.assertEmpty();
+        }
+    }
+
+    @Test public void unknownTextureOpacityKeepsTheOriginalOrdinaryBlend() {
+        Fake api = new Fake(); EntityScene scene = new EntityScene(api); List<CapturedEntityPart> parts = parts(1);
+        parts.get(0).alphaBlend = true; scene.sync(parts);
+        assertEquals(1, api.createdBlends.get(0).alphaBlendEnabled); scene.close(); api.assertEmpty();
+    }
+
     @Test public void tileReadinessUsesItsLiveTextureEvenWhenAnotherTextureIsDirty() {
         Fake api = new Fake(); EntityScene scene = new EntityScene(api); List<CapturedEntityPart> parts = parts(2);
         BlockPos target = new BlockPos(3, 4, 5), other = new BlockPos(6, 7, 8);
@@ -231,8 +272,9 @@ public class EntitySceneTest {
         final Map<Long, Integer> categories = new HashMap<>();
         final Set<Long> textures = new HashSet<>(), blends = new HashSet<>();
         final List<EntityTextures.Asset> uploaded = new ArrayList<>();
+        final List<InstanceInfoBlendEXT> createdBlends = new ArrayList<>();
         final Set<EntityTextures.Asset> dirty = new HashSet<>(), deleted = new HashSet<>(), released = new HashSet<>();
-        boolean observerClosed;
+        boolean observerClosed, opaqueTexture;
         long next = 1, failMesh, failBlend;
         int meshCreates, instanceUpdates;
         boolean failMaterialCreation;
@@ -253,13 +295,14 @@ public class EntitySceneTest {
             categories.put(instance, category); instanceUpdates++;
         }
         public void removeInstance(long handle) { assertNotNull(instances.remove(handle)); positions.remove(handle); categories.remove(handle); }
-        public long createBlend(InstanceInfoBlendEXT blend) { long handle = next++; blends.add(handle); return handle; }
+        public long createBlend(InstanceInfoBlendEXT blend) { long handle = next++; blends.add(handle); createdBlends.add(blend); return handle; }
         public void freeBlend(long handle) {
             if (handle == failBlend) { failBlend = 0; throw new IllegalStateException("blend release"); }
             assertTrue(blends.remove(handle));
         }
         public boolean uploadTexture(EntityTextures.Asset asset, long budget, long hash) {
             uploaded.add(asset);
+            asset.opaquePixels = opaqueTexture;
             asset.texture = next++; asset.bytes = 4; textures.add(asset.texture);
             if (failMaterialCreation) throw new IllegalStateException("material creation");
             asset.material = next++; materials.put(asset.material, asset.texture); return true;
