@@ -28,6 +28,7 @@ public class CloudCaptureTransformerTest {
     private static final String RENDER = "net/minecraft/client/renderer/RenderGlobal";
     private static final String UPLOADER = "net/minecraft/client/renderer/WorldVertexBufferUploader";
     private static final String TEXTURES = "net/minecraft/client/renderer/texture/TextureManager";
+    private static final String FORGE = "net/minecraftforge/client/CloudRenderer";
     private final CloudCaptureTransformer transformer = new CloudCaptureTransformer();
 
     @Test public void scopesCloudsBeforeForgeCallbackAndPreservesAllVanillaDraws() throws Exception {
@@ -81,6 +82,28 @@ public class CloudCaptureTransformerTest {
             render.getMethod("renderClouds", float.class, int.class, double.class, double.class, double.class).invoke(instance, 1f, 2, 1d, 2d, 3d); fail();
         } catch (InvocationTargetException expected) { assertTrue(expected.getCause() instanceof IllegalArgumentException); }
         assertEquals(2, hooks.getField("begins").getInt(null)); assertEquals(2, hooks.getField("ends").getInt(null));
+    }
+
+    @Test public void forgeCompiledCloudsCaptureBuildDisposeAndBothActualDrawPaths() throws Exception {
+        byte[] original = bytes(FORGE), patched = transform(FORGE, original);
+        ClassNode node = read(patched);
+        assertEquals(1, calls(method(node, "vertices", "(Lnet/minecraft/client/renderer/BufferBuilder;)V"), HOOKS, "forgeCloudBuilt"));
+        assertEquals(1, calls(method(node, "dispose", "()V"), HOOKS, "forgeCloudDisposed"));
+        MethodNode render = method(node, "render", "(IF)Z");
+        assertEquals(4, calls(render, HOOKS, "drawForgeCloud"));
+        assertEquals(2, calls(render, "net/minecraft/client/renderer/vertex/VertexBuffer", "drawArrays"));
+        assertEquals(2, calls(render, "net/minecraft/client/renderer/GlStateManager", "callList"));
+        verify(node); assertArrayEquals(patched, transform(FORGE, patched));
+        ClassNode srg = read(original);
+        for (AbstractInsnNode instruction : method(srg, "render", "(IF)Z").instructions.toArray()) {
+            if (!(instruction instanceof MethodInsnNode)) continue;
+            MethodInsnNode call = (MethodInsnNode) instruction;
+            if (call.name.equals("drawArrays")) call.name = "func_177358_a";
+            else if (call.name.equals("callList")) call.name = "func_179148_o";
+        }
+        ClassWriter writer = new ClassWriter(0); srg.accept(writer);
+        ClassNode patchedSrg = read(transform(FORGE, writer.toByteArray())); verify(patchedSrg);
+        assertEquals(4, calls(method(patchedSrg, "render", "(IF)Z"), HOOKS, "drawForgeCloud"));
     }
 
     private byte[] transform(String name, byte[] bytes) { return transformer.transform("obfuscated", name.replace('/', '.'), bytes); }

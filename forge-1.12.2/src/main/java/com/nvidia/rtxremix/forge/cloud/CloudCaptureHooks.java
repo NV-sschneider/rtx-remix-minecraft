@@ -34,6 +34,7 @@ public final class CloudCaptureHooks {
     private static final List<CapturedCloudBatch> VIEW = Collections.unmodifiableList(BATCHES);
     private static final CapturedCloudBatch[] POOL = new CapturedCloudBatch[MAX_BATCHES];
     private static final CloudGeometry GEOMETRY = new CloudGeometry();
+    private static final ForgeCloudSnapshot FORGE = new ForgeCloudSnapshot();
     private static final FloatBuffer FLOATS = BufferUtils.createFloatBuffer(16);
     private static final ByteBuffer MASK = BufferUtils.createByteBuffer(16);
     private static final Matrix4f BASE = new Matrix4f(), INVERSE = new Matrix4f();
@@ -112,19 +113,54 @@ public final class CloudCaptureHooks {
 
     public static void drawBuffer(Object buffer) {
         if (!observing() || depth != 1 || !valid) return;
-        try { capture((BufferBuilder) buffer); }
+        try {
+            // GL_COMPILE records a draw; its geometry is observed when Forge actually calls the list.
+            if (GL11.glGetInteger(GL11.GL_LIST_INDEX) == 0) capture((BufferBuilder) buffer);
+        }
         catch (Throwable error) { failure = error; }
+    }
+
+    /** Forge builds outside the world draw; retain actual vertices before BufferBuilder resets them. */
+    public static void forgeCloudBuilt(Object renderer, Object source) {
+        try {
+            BufferBuilder buffer = (BufferBuilder) source;
+            VertexFormat format = buffer.getVertexFormat();
+            if (buffer.getDrawMode() != GL11.GL_QUADS || !supported(format)) { FORGE.dispose(renderer); return; }
+            FORGE.capture(renderer, buffer.getByteBuffer(), buffer.getVertexCount(), format.getSize(),
+                    format.hasUvOffset(0) ? format.getUvOffsetById(0) : -1, format.hasColor() ? format.getColorOffset() : -1);
+        } catch (Throwable error) { FORGE.dispose(renderer); failure = error; }
+    }
+
+    public static void forgeCloudDisposed(Object renderer) { FORGE.dispose(renderer); }
+
+    /** Invoked at the actual compiled draw, after Forge has applied placement, UV phase and weather tint. */
+    public static void drawForgeCloud(Object renderer, Object colorTexture) {
+        if (!observing() || depth != 1 || !valid || sky) return;
+        try {
+            ByteBuffer source = FORGE.data(renderer);
+            if (source == null) { skipped++; return; }
+            int tint = ((DynamicTexture) colorTexture).getTextureData()[0];
+            capture(source, FORGE.count, GL11.GL_QUADS, FORGE.stride, FORGE.uvOffset, FORGE.colorOffset, tint);
+            if (FORGE.originalCount > FORGE.count) skipped++;
+        } catch (Throwable error) { failure = error; }
     }
 
     private static void capture(BufferBuilder buffer) {
         int count = buffer.getVertexCount();
         if (count == 0) return;
+        VertexFormat format = buffer.getVertexFormat();
+        if (!supported(format)) { skipped++; return; }
+        capture(buffer.getByteBuffer(), count, buffer.getDrawMode(), format.getSize(),
+                format.hasUvOffset(0) ? format.getUvOffsetById(0) : -1, format.hasColor() ? format.getColorOffset() : -1, -1);
+    }
+
+    private static void capture(ByteBuffer source, int count, int mode, int stride, int uvOffset, int colorOffset, int tint) {
+        if (count == 0) return;
         // Fancy clouds render their complete geometry twice, first with color writes disabled.
         MASK.clear(); GL11.glGetBoolean(GL11.GL_COLOR_WRITEMASK, MASK);
         if (MASK.get(0) == 0 && MASK.get(1) == 0 && MASK.get(2) == 0) return;
-        VertexFormat format = buffer.getVertexFormat();
-        if (world != Minecraft.getMinecraft().world || CloudGeometry.triangles(buffer.getDrawMode(), count) < 0
-                || !supported(format) || GL11.glGetInteger(GL20.GL_CURRENT_PROGRAM) != 0) { skipped++; return; }
+        if (world != Minecraft.getMinecraft().world || CloudGeometry.triangles(mode, count) < 0
+                || GL11.glGetInteger(GL20.GL_CURRENT_PROGRAM) != 0) { skipped++; return; }
         int active = GL11.glGetInteger(GL13.GL_ACTIVE_TEXTURE);
         int textureId;
         boolean textured;
@@ -133,7 +169,7 @@ public final class CloudCaptureHooks {
             textured = GL11.glIsEnabled(GL11.GL_TEXTURE_2D);
             textureId = textured ? GL11.glGetInteger(GL11.GL_TEXTURE_BINDING_2D) : 0;
             if (textured && (texture == null || texture instanceof DynamicTexture || textureId <= 0
-                    || texture.getGlTextureId() != textureId || !format.hasUvOffset(0))) { skipped++; return; }
+                    || texture.getGlTextureId() != textureId || uvOffset < 0)) { skipped++; return; }
             readMatrix(GL11.GL_TEXTURE_MATRIX, TEXTURE);
         } finally { GlStateManager.setActiveTexture(active); }
         long blend = CloudBlend.key(GL11.glIsEnabled(GL11.GL_BLEND), GL11.glGetInteger(GL14.GL_BLEND_SRC_RGB),
@@ -158,15 +194,14 @@ public final class CloudCaptureHooks {
         }
         readMatrix(GL11.GL_MODELVIEW_MATRIX, CURRENT); Matrix4f.mul(INVERSE, CURRENT, RELATIVE);
         int color = 0xffffffff;
-        if (!format.hasColor()) {
+        if (colorOffset < 0) {
             FLOATS.clear(); GL11.glGetFloat(GL11.GL_CURRENT_COLOR, FLOATS);
             color = channel(FLOATS.get(3)) << 24 | channel(FLOATS.get(0)) << 16 | channel(FLOATS.get(1)) << 8 | channel(FLOATS.get(2));
         }
-        int accepted = GEOMETRY.append(buffer.getByteBuffer(), count, buffer.getDrawMode(), format.getSize(),
-                textured ? format.getUvOffsetById(0) : -1, format.hasColor() ? format.getColorOffset() : -1,
-                color, RELATIVE, TEXTURE, MAX_VERTICES - vertices, batch);
+        int accepted = GEOMETRY.append(source, count, mode, stride, textured ? uvOffset : -1, colorOffset,
+                color, tint, RELATIVE, TEXTURE, MAX_VERTICES - vertices, batch);
         vertices += accepted;
-        if (accepted / 3 != CloudGeometry.triangles(buffer.getDrawMode(), count)) skipped++;
+        if (accepted / 3 != CloudGeometry.triangles(mode, count)) skipped++;
     }
 
     private static boolean supported(VertexFormat format) {

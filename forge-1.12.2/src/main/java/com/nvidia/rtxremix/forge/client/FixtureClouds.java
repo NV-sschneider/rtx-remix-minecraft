@@ -98,12 +98,13 @@ final class FixtureClouds implements AutoCloseable {
             case FAST:
                 if (settled(present() && events.cloudTextureSnapshots() > 0)) {
                     fastTriangles = events.cloudTriangles(); geometryBaseline = events.cloudGeometryHash();
+                    placementBaseline = events.cloudPlacementHash();
                     frameBaseline = events.renderedFrames(); capture("clouds-fast"); log("FAST_PASS"); transition(Phase.MOTION);
                 }
                 break;
             case MOTION:
                 if (settled(present() && events.renderedFrames() > frameBaseline + 40
-                        && events.cloudGeometryHash() != geometryBaseline)) {
+                        && (events.cloudGeometryHash() != geometryBaseline || events.cloudPlacementHash() != placementBaseline))) {
                     capture("clouds-fast-moving"); log("MOTION_PASS");
                     mc.gameSettings.clouds = 2; transition(Phase.FANCY);
                 }
@@ -256,6 +257,8 @@ final class FixtureClouds implements AutoCloseable {
                 }
                 tessellator.draw();
                 GlStateManager.enableTexture2D(); mc.getTextureManager().bindTexture(SUN);
+                // Vanilla's sun artwork has a black backdrop and is intended for additive RGB.
+                GlStateManager.tryBlendFuncSeparate(GL11.GL_ONE, GL11.GL_ONE, GL11.GL_ZERO, GL11.GL_ONE);
                 GlStateManager.color(1, 1, 1, 1);
                 buffer.begin(GL11.GL_QUADS, DefaultVertexFormats.POSITION_TEX);
                 buffer.pos(35, 30, -100).tex(0, 1).endVertex(); buffer.pos(65, 30, -100).tex(1, 1).endVertex();
