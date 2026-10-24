@@ -206,11 +206,11 @@ final class FixtureCompatibility implements AutoCloseable {
         return true;
     }
     private boolean offscreenReady() {
-        // Dragons opt out of culling and Rahovart has a 400-block render box. MakaAlpha
-        // exercises supplementary capture while the large models remain normal draws.
+        // Ice and Fire dragons opt out of frustum culling. Installed RLMixins bounds
+        // Rahovart's render box, so both Lycanites models must survive supplementary capture.
         for (int i = 0; i < layout.ids.length; i++)
-            if (EntityCaptureHooks.normallyRendered(layout.ids[i]) != (i != 2)) return false;
-        return EntityCaptureHooks.offscreenEntityCount() >= 1;
+            if (EntityCaptureHooks.normallyRendered(layout.ids[i]) != (i < 2)) return false;
+        return EntityCaptureHooks.offscreenEntityCount() >= 2;
     }
     private boolean moved() {
         for (int i = 0; i < layout.ids.length; i++) {

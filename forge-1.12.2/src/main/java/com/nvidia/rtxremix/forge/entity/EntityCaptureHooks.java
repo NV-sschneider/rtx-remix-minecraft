@@ -76,7 +76,8 @@ public final class EntityCaptureHooks {
     private static ITextureObject texture;
     private static Throwable failure;
     private static long unsupportedTriangles, rejectedTriangles;
-    private static boolean warnedTriangles;
+    private static final int MAX_TRIANGLE_WARNINGS = 16;
+    private static int triangleWarnings;
 
     private EntityCaptureHooks() { }
 
@@ -305,9 +306,12 @@ public final class EntityCaptureHooks {
             if (buffer.getVertexCount() == 0) return;
             VertexFormat format = buffer.getVertexFormat();
             if (group == null || buffer.getDrawMode() != GL11.GL_TRIANGLES
-                    || !DefaultVertexFormats.POSITION_TEX_COLOR_NORMAL.equals(format)
-                    || GL11.glGetInteger(GL20.GL_CURRENT_PROGRAM) != 0) {
-                rejectTriangles();
+                    || !DefaultVertexFormats.POSITION_TEX_COLOR_NORMAL.equals(format)) {
+                rejectTriangles("cpu-layout", buffer.getVertexCount(), group);
+                return;
+            }
+            if (GL11.glGetInteger(GL20.GL_CURRENT_PROGRAM) != 0) {
+                rejectTriangles("cpu-program", buffer.getVertexCount(), group);
                 return;
             }
             CapturedEntityPart part = captureState(true);
@@ -315,7 +319,7 @@ public final class EntityCaptureHooks {
             int first = TRIANGLES.count();
             if (!TRIANGLES.append(buffer.getByteBuffer(), buffer.getVertexCount(), format.getSize(),
                     format.getUvOffsetById(0), format.getColorOffset(), format.getNormalOffset())) {
-                rejectTriangles();
+                rejectTriangles("cpu-append", buffer.getVertexCount(), group);
                 return;
             }
             part.triangles = TRIANGLES;
@@ -370,7 +374,7 @@ public final class EntityCaptureHooks {
                     format.getSize(), format.getUvOffsetById(0), format.hasColor() ? format.getColorOffset() : -1,
                     format.hasNormal() ? format.getNormalOffset() : -1, argb, VBO_TEXTURE,
                     part.surface == EntitySurface.GLINT ? EntitySurface.ITEM_GLINT_SHELL_OFFSET : 0)) {
-                rejectTriangles(); return;
+                rejectTriangles("buffer-append", buffer.getVertexCount(), BUFFER_GROUPS[occurrence]); return;
             }
             if (TRIANGLES.count() == start) return;
             part.categoryFlags = EntitySurface.categories(FirstPersonCapture.category(), part.surface,
@@ -404,17 +408,31 @@ public final class EntityCaptureHooks {
     /** Current fixed-function state is observed at VBOModel's actual array draw. */
     public static void captureVboTriangles(int mode, int first, int count, Object group, Object mesh) {
         if (!armed || SCOPE.owner() == null || texture == null || failure != null) return;
+        // OBJ loaders can retain an empty root group alongside populated children.
+        // Its draw emits no geometry and must not reject the owner's other parts.
+        if (count == 0) return;
         try {
             if (mode != GL11.GL_TRIANGLES || first != 0 || count <= 0 || count % 3 != 0
-                    || count > EntityTriangles.MAX_GROUP_VERTICES || group == null || mesh == null
-                    || GL11.glGetInteger(GL20.GL_CURRENT_PROGRAM) != 0 || GL11.glIsEnabled(GL11.GL_COLOR_ARRAY)
-                    || GL11.glGetInteger(GL13.GL_CLIENT_ACTIVE_TEXTURE) != OpenGlHelper.defaultTexUnit) {
+                    || group == null || mesh == null) {
                 unsupportedTriangles++;
-                rejectTriangles();
+                rejectTriangles("vbo-layout", count, group);
+                return;
+            }
+            if (count > EntityTriangles.MAX_GROUP_VERTICES) {
+                unsupportedTriangles++; rejectTriangles("vbo-group-limit", count, group); return;
+            }
+            if (GL11.glGetInteger(GL20.GL_CURRENT_PROGRAM) != 0) {
+                unsupportedTriangles++; rejectTriangles("vbo-program", count, group); return;
+            }
+            if (GL11.glIsEnabled(GL11.GL_COLOR_ARRAY)) {
+                unsupportedTriangles++; rejectTriangles("vbo-color-array", count, group); return;
+            }
+            if (GL11.glGetInteger(GL13.GL_CLIENT_ACTIVE_TEXTURE) != OpenGlHelper.defaultTexUnit) {
+                unsupportedTriangles++; rejectTriangles("vbo-client-texture", count, group);
                 return;
             }
             int bufferId = GL11.glGetInteger(GL15.GL_ARRAY_BUFFER_BINDING);
-            if (bufferId == 0) { rejectTriangles(); return; }
+            if (bufferId == 0) { rejectTriangles("vbo-unbound", count, group); return; }
             EntityVboCache.Snapshot snapshot = VBO_CACHE.get(mesh, bufferId, count);
             if (snapshot == null) {
                 if (!VBO_CACHE.reserveReadback(count)) {
@@ -424,7 +442,7 @@ public final class EntityCaptureHooks {
                 }
                 int bytes = count * EntityVboCache.STRIDE;
                 if (GL15.glGetBufferParameteri(GL15.GL_ARRAY_BUFFER, GL15.GL_BUFFER_SIZE) < bytes) {
-                    rejectTriangles();
+                    rejectTriangles("vbo-buffer-size", count, group);
                     return;
                 }
                 if (vboReadback == null || vboReadback.capacity() < bytes) vboReadback = EntityMesh.direct(bytes);
@@ -432,7 +450,7 @@ public final class EntityCaptureHooks {
                 // The actual bound VBO is read once after a cache miss, under a one-read/frame cap.
                 GL15.glGetBufferSubData(GL15.GL_ARRAY_BUFFER, 0L, vboReadback);
                 vboReadbacks++;
-                if (!VBO_CACHE.put(mesh, bufferId, vboReadback)) { rejectTriangles(); return; }
+                if (!VBO_CACHE.put(mesh, bufferId, vboReadback)) { rejectTriangles("vbo-cache", count, group); return; }
                 snapshot = VBO_CACHE.get(mesh, bufferId, count);
             }
             CapturedEntityPart part = captureState(true);
@@ -447,7 +465,7 @@ public final class EntityCaptureHooks {
                 BUFFER.clear(); GL11.glGetFloat(GL11.GL_TEXTURE_MATRIX, BUFFER); VBO_TEXTURE.load(BUFFER);
             } finally { OpenGlHelper.setActiveTexture(active); }
             int start = TRIANGLES.count();
-            if (!TRIANGLES.appendVbo(snapshot.vertices, count, argb, VBO_TEXTURE)) { rejectTriangles(); return; }
+            if (!TRIANGLES.appendVbo(snapshot.vertices, count, argb, VBO_TEXTURE)) { rejectTriangles("vbo-append", count, group); return; }
             part.triangles = TRIANGLES;
             part.triangleGroup = group;
             part.firstVertex = start;
@@ -473,13 +491,30 @@ public final class EntityCaptureHooks {
     public static long unsupportedTriangleDraws() { return unsupportedTriangles; }
     public static long rejectedTriangleDraws() { return rejectedTriangles; }
 
-    private static void rejectTriangles() {
+    private static void rejectTriangles(String reason, int count, Object group) {
         rejectedTriangles++;
-        if (!warnedTriangles) {
-            warnedTriangles = true;
-            LOGGER.warn("OBJ capture rejected an unsupported or over-budget triangle group; that owner's partial capture is omitted");
+        if (triangleWarnings < MAX_TRIANGLE_WARNINGS) {
+            triangleWarnings++;
+            Object owner = SCOPE.owner();
+            LOGGER.warn("Entity triangle capture rejected reason={} owner={} uuid={} group={} vertices={} arena={} append={} vertex={} program={} colorArray={} clientTexture={} vbo={} warning={}/{}; owner's partial capture omitted",
+                    reason, owner == null ? "none" : owner.getClass().getName(),
+                    owner instanceof Entity ? ((Entity) owner).getUniqueID() : "none", triangleGroupName(group),
+                    count, TRIANGLES.count(), reason.endsWith("append") ? TRIANGLES.rejection() : "not-applicable",
+                    reason.endsWith("append") ? TRIANGLES.rejectedVertex() : -1,
+                    GL11.glGetInteger(GL20.GL_CURRENT_PROGRAM), GL11.glIsEnabled(GL11.GL_COLOR_ARRAY),
+                    GL11.glGetInteger(GL13.GL_CLIENT_ACTIVE_TEXTURE), GL11.glGetInteger(GL15.GL_ARRAY_BUFFER_BINDING),
+                    triangleWarnings, MAX_TRIANGLE_WARNINGS);
         }
         rejectOwner();
+    }
+
+    /** Optional public OBJ metadata is consulted only for the bounded diagnostics. */
+    private static String triangleGroupName(Object group) {
+        if (group == null) return "none";
+        try { return group.getClass().getName() + "/" + group.getClass().getMethod("getName").invoke(group); }
+        catch (ReflectiveOperationException error) {
+            return group.getClass().getName() + "@" + Integer.toHexString(System.identityHashCode(group));
+        }
     }
 
     private static void rejectOwner() {

@@ -15,16 +15,21 @@ import org.lwjgl.util.vector.Matrix4f;
 final class EntityTriangles {
     static final int MAX_GROUP_VERTICES = 32766;
     static final int MAX_FRAME_VERTICES = MAX_GROUP_VERTICES * 4;
+    enum Rejection { NONE, LAYOUT, GROUP_LIMIT, FRAME_LIMIT, TEXTURE_TRANSFORM, VERTEX_DATA, ZERO_NORMAL }
     private ByteBuffer vertices;
     private ByteBuffer indices;
     private final MeshInfoSurfaceTriangles surface = new MeshInfoSurfaceTriangles();
     private final MeshInfo info = new MeshInfo();
     private int count;
     private long fingerprint;
+    private Rejection rejection = Rejection.NONE;
+    private int rejectedVertex = -1;
 
     EntityTriangles() { info.surfaces = new MeshInfoSurfaceTriangles[] {surface}; }
     int count() { return count; }
     long fingerprint() { return fingerprint; }
+    Rejection rejection() { return rejection; }
+    int rejectedVertex() { return rejectedVertex; }
     void reset() { count = 0; }
     void truncate(int checkpoint) {
         if (checkpoint < 0 || checkpoint > count || checkpoint % 3 != 0) throw new IllegalArgumentException("Invalid OBJ checkpoint");
@@ -37,9 +42,10 @@ final class EntityTriangles {
     }
 
     boolean appendVbo(ByteBuffer source, int vertexCount, int argb, Matrix4f texture) {
+        beginAppend();
         if (!Float.isFinite(texture.m00) || !Float.isFinite(texture.m01) || !Float.isFinite(texture.m10)
                 || !Float.isFinite(texture.m11) || !Float.isFinite(texture.m30) || !Float.isFinite(texture.m31)
-                || texture.m03 != 0 || texture.m13 != 0 || texture.m33 != 1) return false;
+                || texture.m03 != 0 || texture.m13 != 0 || texture.m33 != 1) return reject(Rejection.TEXTURE_TRANSFORM, -1);
         return append(source, vertexCount, EntityVboCache.STRIDE, 12, -1, 20, argb, texture);
     }
 
@@ -66,15 +72,17 @@ final class EntityTriangles {
 
     private boolean appendPrimitivesRange(ByteBuffer source, int firstVertex, int vertexCount, int primitiveSize, int stride,
             int uvOffset, int colorOffset, int normalOffset, int argb, Matrix4f texture, float shellOffset) {
+        beginAppend();
         if (primitiveSize != 3 && primitiveSize != 4 || firstVertex < 0 || firstVertex % primitiveSize != 0
                 || !Float.isFinite(shellOffset)
                 || vertexCount <= 0 || vertexCount % primitiveSize != 0
                 || stride < 12 || uvOffset < 12 || uvOffset + 8 > stride
                 || colorOffset != -1 && (colorOffset < 12 || colorOffset + 4 > stride)
                 || normalOffset != -1 && (normalOffset < 12 || normalOffset + 3 > stride)
-                || ((long) firstVertex + vertexCount) * stride > source.limit()) return false;
+                || ((long) firstVertex + vertexCount) * stride > source.limit()) return reject(Rejection.LAYOUT, -1);
         long outputCount = (long) vertexCount / primitiveSize * (primitiveSize == 4 ? 6 : 3);
-        if (outputCount > MAX_GROUP_VERTICES || outputCount > MAX_FRAME_VERTICES - count) return false;
+        if (outputCount > MAX_GROUP_VERTICES) return reject(Rejection.GROUP_LIMIT, -1);
+        if (outputCount > MAX_FRAME_VERTICES - count) return reject(Rejection.FRAME_LIMIT, -1);
         if (vertices == null) vertices = EntityMesh.direct(MAX_FRAME_VERTICES * HardcodedVertex.STRIDE);
         int checkpoint = count * HardcodedVertex.STRIDE;
         vertices.position(checkpoint);
@@ -103,13 +111,14 @@ final class EntityTriangles {
                         || !Float.isFinite(v) || !Float.isFinite(length) || length == 0
                         || texture.m03 != 0 || texture.m13 != 0 || texture.m33 != 1) {
                     vertices.position(checkpoint);
-                    return false;
+                    return reject(texture.m03 != 0 || texture.m13 != 0 || texture.m33 != 1 ? Rejection.TEXTURE_TRANSFORM
+                            : length == 0 ? Rejection.ZERO_NORMAL : Rejection.VERTEX_DATA, primitive + corner);
                 }
                 nx /= length; ny /= length; nz /= length;
                 if (shellOffset != 0) {
                     x += nx * shellOffset; y += ny * shellOffset; z += nz * shellOffset;
                     if (!Float.isFinite(x) || !Float.isFinite(y) || !Float.isFinite(z)) {
-                        vertices.position(checkpoint); return false;
+                        vertices.position(checkpoint); return reject(Rejection.VERTEX_DATA, primitive + corner);
                     }
                 }
                 int color = base + colorOffset;
@@ -130,11 +139,13 @@ final class EntityTriangles {
 
     private boolean append(ByteBuffer source, int vertexCount, int stride, int uvOffset, int colorOffset,
             int normalOffset, int argb, Matrix4f texture) {
-        if (vertexCount <= 0 || vertexCount % 3 != 0 || vertexCount > MAX_GROUP_VERTICES
-                || vertexCount > MAX_FRAME_VERTICES - count || stride < 12
+        beginAppend();
+        if (vertexCount <= 0 || vertexCount % 3 != 0 || stride < 12
                 || uvOffset < 12 || uvOffset + 8 > stride
                 || colorOffset != -1 && (colorOffset < 12 || colorOffset + 4 > stride)
-                || normalOffset < 12 || normalOffset + 3 > stride || (long) vertexCount * stride > source.limit()) return false;
+                || normalOffset < 12 || normalOffset + 3 > stride || (long) vertexCount * stride > source.limit()) return reject(Rejection.LAYOUT, -1);
+        if (vertexCount > MAX_GROUP_VERTICES) return reject(Rejection.GROUP_LIMIT, -1);
+        if (vertexCount > MAX_FRAME_VERTICES - count) return reject(Rejection.FRAME_LIMIT, -1);
         if (vertices == null) vertices = EntityMesh.direct(MAX_FRAME_VERTICES * HardcodedVertex.STRIDE);
         vertices.position(count * HardcodedVertex.STRIDE);
         long hash = 0xcbf29ce484222325L;
@@ -153,7 +164,7 @@ final class EntityTriangles {
             if (!Float.isFinite(x) || !Float.isFinite(y) || !Float.isFinite(z)
                     || !Float.isFinite(u) || !Float.isFinite(v) || length == 0) {
                 vertices.position(count * HardcodedVertex.STRIDE);
-                return false;
+                return reject(length == 0 ? Rejection.ZERO_NORMAL : Rejection.VERTEX_DATA, i);
             }
             vertices.putFloat(x).putFloat(y).putFloat(z);
             vertices.putFloat(nx / length).putFloat(ny / length).putFloat(nz / length);
@@ -169,6 +180,11 @@ final class EntityTriangles {
         count += vertexCount;
         fingerprint = hash;
         return true;
+    }
+
+    private void beginAppend() { rejection = Rejection.NONE; rejectedVertex = -1; }
+    private boolean reject(Rejection cause, int vertex) {
+        rejection = cause; rejectedVertex = vertex; return false;
     }
 
     MeshInfo info(int first, int vertexCount, long material, long hash) {

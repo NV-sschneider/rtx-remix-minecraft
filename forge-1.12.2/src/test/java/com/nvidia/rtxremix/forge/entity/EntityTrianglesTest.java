@@ -135,12 +135,16 @@ public class EntityTrianglesTest {
         assertTrue(append(triangles, source, 3));
         source.putFloat(28, Float.NaN);
         assertFalse(append(triangles, source, 3));
+        assertEquals(EntityTriangles.Rejection.VERTEX_DATA, triangles.rejection());
+        assertEquals(1, triangles.rejectedVertex());
         assertEquals(3, triangles.count());
         assertFalse(append(triangles, source, 2));
         assertFalse(append(triangles, source, EntityTriangles.MAX_GROUP_VERTICES + 3));
         source.putFloat(28, 1);
         source.put(26, (byte) 0);
         assertFalse(append(triangles, source, 3));
+        assertEquals(EntityTriangles.Rejection.ZERO_NORMAL, triangles.rejection());
+        assertEquals(0, triangles.rejectedVertex());
         assertEquals(3, triangles.count());
     }
 
@@ -150,12 +154,37 @@ public class EntityTrianglesTest {
         for (int i = 0; i < 4; i++) assertTrue(append(triangles, source, EntityTriangles.MAX_GROUP_VERTICES));
         assertEquals(EntityTriangles.MAX_FRAME_VERTICES, triangles.count());
         assertFalse(append(triangles, source, 3));
+        assertEquals(EntityTriangles.Rejection.FRAME_LIMIT, triangles.rejection());
         triangles.truncate(EntityTriangles.MAX_GROUP_VERTICES);
         assertTrue(append(triangles, source, EntityTriangles.MAX_GROUP_VERTICES));
         assertEquals(EntityTriangles.MAX_GROUP_VERTICES * 2, triangles.count());
         triangles.reset();
         assertTrue(append(triangles, source, 3));
         assertEquals(3, triangles.count());
+        assertEquals(EntityTriangles.Rejection.NONE, triangles.rejection());
+        assertEquals(-1, triangles.rejectedVertex());
+    }
+
+    @Test public void vboDiagnosticsDistinguishTextureLayoutAndPackedNormalWithoutChangingInput() {
+        ByteBuffer source = EntityMesh.direct(3 * EntityVboCache.STRIDE);
+        for (int i = 0; i < 3; i++) source.putFloat(i == 1 ? 1 : 0).putFloat(i == 2 ? 1 : 0).putFloat(0)
+                .putFloat(0.25f).putFloat(0.75f).put((byte) 0).put((byte) 0).put((byte) 127).put((byte) 0);
+        source.flip(); source.position(2).mark().position(5);
+        EntityTriangles triangles = new EntityTriangles(); Matrix4f texture = new Matrix4f();
+        assertTrue(triangles.appendVbo(source, 3, -1, texture));
+        long fingerprint = triangles.fingerprint();
+        texture.m03 = 1;
+        assertFalse(triangles.appendVbo(source, 3, -1, texture));
+        assertEquals(EntityTriangles.Rejection.TEXTURE_TRANSFORM, triangles.rejection());
+        texture.m03 = 0;
+        source.put(22, (byte) 0);
+        assertFalse(triangles.appendVbo(source, 3, -1, texture));
+        assertEquals(EntityTriangles.Rejection.ZERO_NORMAL, triangles.rejection());
+        assertEquals(0, triangles.rejectedVertex());
+        assertEquals(3, triangles.count()); assertEquals(fingerprint, triangles.fingerprint());
+        assertEquals(5, source.position()); source.reset(); assertEquals(2, source.position());
+        assertFalse(triangles.appendVbo(source, 4, -1, texture));
+        assertEquals(EntityTriangles.Rejection.LAYOUT, triangles.rejection());
     }
 
     @Test public void unrelatedBoxPartsDoNotDelayTriangleAdmission() {
