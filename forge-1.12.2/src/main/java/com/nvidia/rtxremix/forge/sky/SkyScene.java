@@ -74,7 +74,8 @@ public final class SkyScene implements AutoCloseable {
         api.drawLightInstance(lights[2]);
         if (state.sunStrength() > 0.0f) api.drawLightInstance(lights[0]);
         if (state.moonStrength() > 0.0f) api.drawLightInstance(lights[1]);
-        if (state.kind == SkyState.NORMAL) celestials.draw(state, cameraPosition);
+        // A Forge sky handler replaces vanilla's celestial draw pass, rather than adding to it.
+        if (state.kind == SkyState.NORMAL && world.provider.getSkyRenderer() == null) celestials.draw(state, cameraPosition);
     }
 
     private void capture(WorldClient world, float partialTicks) {
