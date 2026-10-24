@@ -13,12 +13,17 @@ import com.nvidia.rtxremix.forge.entity.FastTileCaptureHooks;
 import com.nvidia.rtxremix.forge.item.CapturedItem;
 import com.nvidia.rtxremix.forge.item.ItemCaptureHooks;
 import com.nvidia.rtxremix.forge.item.ItemScene;
+import com.nvidia.rtxremix.forge.item.HeldItemLights;
+import com.nvidia.rtxremix.forge.light.HeldLightScene;
 import com.nvidia.rtxremix.forge.effect.CapturedEffectBatch;
 import com.nvidia.rtxremix.forge.effect.EffectCaptureHooks;
 import com.nvidia.rtxremix.forge.effect.EffectScene;
 import com.nvidia.rtxremix.forge.interop.LegacyGlInterop;
 import com.nvidia.rtxremix.forge.sky.SkyScene;
 import com.nvidia.rtxremix.forge.terrain.TerrainCapture;
+import com.nvidia.rtxremix.forge.terrain.TerrainDrawGate;
+import com.nvidia.rtxremix.forge.terrain.VanillaTerrainDraws;
+import com.nvidia.rtxremix.forge.frame.LastGoodFrame;
 import com.nvidia.rtxremix.forge.runtime.ForgeRuntime;
 import com.nvidia.rtxremix.forge.cloud.CapturedCloudBatch;
 import com.nvidia.rtxremix.forge.cloud.CloudCaptureHooks;
@@ -35,10 +40,30 @@ import java.util.UUID;
 
 /** All methods are called on Minecraft's render thread; native handles never cross threads. */
 final class PrototypeRenderer {
+    // Opt in while the draw-replacement path is being validated on modded renderers.
+    private static final boolean SUPPRESS_SOLID = (Boolean.getBoolean("rlcraftremix.suppressSolidTerrain")
+            || (Boolean.getBoolean("rlcraftremix.smoke") && Boolean.getBoolean("rlcraftremix.smoke.terrainOptimization")))
+            && !Boolean.getBoolean("rlcraftremix.disableSolidTerrainSuppression");
     private final Minecraft mc;
     private final CameraCapture camera = new CameraCapture();
     private final CameraInfo viewModelCamera = new CameraInfo();
     private final OverlayFrame overlayFrame = new OverlayFrame();
+    private final LastGoodFrame lastGoodFrame = new LastGoodFrame();
+    private final TerrainFrameState terrainFrame = new TerrainFrameState();
+    private final TerrainDrawGate.Replacement solidReplacement = new TerrainDrawGate.Replacement() {
+        @Override public boolean available(int x, int y, int z) {
+            net.minecraft.entity.Entity view = mc.getRenderViewEntity();
+            if (world != mc.world || terrain == null || view == null) return false;
+            // update() moves the native window later in this pass. Do not omit a draw it will retire.
+            int centerX = net.minecraft.util.math.MathHelper.floor(view.posX) >> 4;
+            int centerZ = net.minecraft.util.math.MathHelper.floor(view.posZ) >> 4;
+            int radius = mc.gameSettings.renderDistanceChunks;
+            return Math.abs((long) x - centerX) <= radius && Math.abs((long) z - centerZ) <= radius
+                    && terrain.isSectionSolidReplacementReady(x, y, z);
+        }
+    };
+    private long fallbackWindow;
+    private boolean fallbackFault;
     private CameraInfo preparedCamera;
     private WorldClient preparedWorld;
     private RemixAPI api;
@@ -46,6 +71,7 @@ final class PrototypeRenderer {
     private TerrainCapture terrain;
     private EntityScene entities;
     private ItemScene items;
+    private HeldLightScene heldLights;
     private EffectScene effects;
     private CloudScene clouds;
     private SkyScene sky;
@@ -71,6 +97,53 @@ final class PrototypeRenderer {
         preparedWorld = mc.world;
     }
 
+    void beginTerrainFrame(boolean eligible) {
+        terrainFrame.begin();
+        // Disarm before any window/context inspection that could itself fail.
+        VanillaTerrainDraws.beginFrame(false, solidReplacement);
+        if (!SUPPRESS_SOLID || fallbackFault || !eligible || !initialized || windowClosing) return;
+        if (world != mc.world || fallbackWindow != hwnd || LegacyGlInterop.currentWindowHandle() != hwnd) {
+            lastGoodFrame.invalidate(); return;
+        }
+        if (lastGoodFrame.available(mc.world, mc.displayWidth, mc.displayHeight)) {
+            VanillaTerrainDraws.beginFrame(true, solidReplacement);
+        }
+    }
+
+    /** Called independently of native capture, while the completed world is still before the HUD. */
+    boolean finishTerrainFrame(boolean beforeHud) {
+        VanillaTerrainDraws.endFrame();
+        boolean needsFallback = terrainFrame.finish(VanillaTerrainDraws.skippedDrawCount(), VanillaTerrainDraws.vanillaDrawCount());
+        if (!needsFallback) return false;
+        boolean restored = false;
+        try {
+            if (beforeHud && fallbackWindow == hwnd && LegacyGlInterop.currentWindowHandle() == hwnd) {
+                restored = lastGoodFrame.restore(mc.world, mc.getFramebuffer().framebufferObject,
+                        mc.displayWidth, mc.displayHeight, terrainFrame.frame());
+            }
+            if (!restored) throw new IllegalStateException("Skipped terrain draws have no valid pre-HUD fallback");
+            return true;
+        } finally {
+            terrainFrame.recovered(restored);
+            // Recovery is for this frame only; the next frame must draw vanilla or rebuild a cache.
+            lastGoodFrame.invalidate();
+        }
+    }
+
+    void invalidateTerrainFallback() { VanillaTerrainDraws.endFrame(); lastGoodFrame.invalidate(); }
+
+    private void captureTerrainFallback() {
+        if (!SUPPRESS_SOLID || fallbackFault) return;
+        try {
+            if (lastGoodFrame.capture(mc.world, mc.getFramebuffer().framebufferObject, mc.displayWidth, mc.displayHeight)) fallbackWindow = hwnd;
+        } catch (RuntimeException | LinkageError failure) {
+            // The native world copy has already succeeded, so keep rendering while disabling this optimization.
+            fallbackFault = true;
+            invalidateTerrainFallback();
+            RemixForgeMod.LOG.warn("SOLID terrain draw suppression disabled after fallback capture failure", failure);
+        }
+    }
+
     void render(float partialTicks, List<CapturedEntityPart> capturedParts,
             List<CapturedItem> capturedItems, List<CapturedEffectBatch> capturedEffects,
             List<CapturedCloudBatch> capturedClouds) {
@@ -79,11 +152,13 @@ final class PrototypeRenderer {
         if (!initialized) { throw new IllegalStateException("Native initialization failed; restart Minecraft before retrying."); }
         followWindow();
         if (world != mc.world) {
+            lastGoodFrame.invalidate();
             releaseScene();
             world = mc.world;
             terrain = new TerrainCapture(api, mc);
             entities = new EntityScene(api);
             items = new ItemScene(api);
+            heldLights = new HeldLightScene(api, mc.world);
             effects = new EffectScene(api);
             clouds = new CloudScene(api);
             sky = new SkyScene(api);
@@ -97,6 +172,7 @@ final class PrototypeRenderer {
             throw new IllegalStateException("No camera was prepared for this world frame");
         }
         CameraInfo captured = preparedCamera;
+        heldLights.sync(HeldItemLights.samples(), items::containsOccurrence, captured.parameterizedExt);
         api.setupCamera(captured);
         viewModelCamera.parameterizedExt = captured.parameterizedExt;
         api.setupCamera(viewModelCamera);
@@ -108,6 +184,8 @@ final class PrototypeRenderer {
         nativeFramePending = true;
         interop.acquireToFramebuffer(api.dxvkGetInteropInfo(), mc.getFramebuffer().framebufferObject,
                 mc.displayWidth, mc.displayHeight, true);
+        terrainFrame.copied();
+        captureTerrainFallback();
         overlayFrame.capture(mc.getFramebuffer().framebufferObject, mc.displayWidth, mc.displayHeight);
         if (++frames == 1) {
             RemixForgeMod.LOG.info("RTX Remix Forge: first native frame submitted and copied into Minecraft's framebuffer.");
@@ -142,6 +220,8 @@ final class PrototypeRenderer {
         // LWJGL 2 replaces the HWND for display-mode changes while retaining its GL context.
         // Keep the imported semaphores and their monotonically increasing timeline alive.
         interop.validateContext();
+        invalidateTerrainFallback();
+        lastGoodFrame.close();
         OverlayHooks.releaseSession();
         overlayFrame.close();
         hwnd = current;
@@ -150,6 +230,7 @@ final class PrototypeRenderer {
     }
 
     void refreshTextures() {
+        invalidateTerrainFallback();
         EntityCaptureHooks.clearVboCache();
         if (medium != null) { medium.close(); medium = null; }
         // These scenes borrow the terrain atlas. Release their materials first.
@@ -157,6 +238,7 @@ final class PrototypeRenderer {
         if (terrain != null) { terrain.refreshTextures(); }
         if (terrain != null) {
             items = new ItemScene(api);
+            heldLights = new HeldLightScene(api, mc.world);
             effects = new EffectScene(api);
             medium = new CameraMedium(api);
         }
@@ -176,10 +258,26 @@ final class PrototypeRenderer {
     }
     long frameCount() { return api == null ? 0 : frames; }
     long windowChanges() { return windowChanges; }
+    boolean terrainSuppressionRequested() { return SUPPRESS_SOLID; }
+    boolean terrainSuppressionSupported() { return VanillaTerrainDraws.supported(); }
+    int terrainSkippedDraws() { return terrainFrame.skipped(); }
+    int terrainVanillaDraws() { return terrainFrame.vanilla(); }
+    long terrainSkippedDrawTotal() { return terrainFrame.skippedTotal(); }
+    long terrainFallbackFrames() { return terrainFrame.fallbackFrames(); }
+    long terrainFallbackFailures() { return terrainFrame.fallbackFailures(); }
+    long terrainFallbackCaptures() { return lastGoodFrame.captureCount(); }
+    int terrainFallbackResources() { return lastGoodFrame.resourceCount(); }
+    long terrainFallbackBytes() { return lastGoodFrame.byteCount(); }
+    int heldLightCount() { return heldLights == null ? 0 : heldLights.count(); }
+    int localHeldLightCount() { return heldLights == null ? 0 : heldLights.localCount(); }
+    boolean heldLightCaptured(UUID id, int hand) { return heldLights != null && heldLights.contains(id, hand); }
+    long heldLightUpdates() { return heldLights == null ? 0 : heldLights.updateCount(); }
+    double heldLightLocalDistance(UUID id, int hand) { return heldLights == null ? Double.NaN : heldLights.localDistance(id, hand); }
     int entityCategoryCount(int flags) { return entities == null ? 0 : entities.categoryCount(flags); }
     int itemCategoryCount(int flags) { return items == null ? 0 : items.categoryCount(flags); }
     int tileTrianglePartCount(net.minecraft.util.math.BlockPos pos) { return entities == null ? 0 : entities.tileTrianglePartCount(pos); }
     long tileGeometryUpdates(net.minecraft.util.math.BlockPos pos) { return entities == null ? 0 : entities.tileGeometryUpdates(pos); }
+    boolean tileTextureCurrent(net.minecraft.util.math.BlockPos pos, int glId) { return entities != null && entities.tileTextureCurrent(pos, glId); }
     boolean menuAvailable() { return initialized && api != null && world != null && !windowClosing; }
     void writeConfig(String name, String value) { api.setConfigVariable(name, value); }
     int readConfig(String name, byte[] value) { return api.getConfigVariableResolved(name, value); }
@@ -221,6 +319,12 @@ final class PrototypeRenderer {
     boolean entityCaptured(UUID id) { return entities != null && entities.contains(id); }
     int trianglePartCount(UUID id) { return entities == null ? 0 : entities.trianglePartCount(id); }
     long entityTransformUpdates(UUID id) { return entities == null ? 0 : entities.transformUpdates(id); }
+    int entityEmissivePartCount(UUID id) { return entities == null ? 0 : entities.emissivePartCount(id); }
+    long entityTextureUpdates() { return entities == null ? 0 : entities.textureUpdateCount(); }
+    long entityTexturePatches() { return entities == null ? 0 : entities.texturePatchCount(); }
+    long entityTexturePatchBytes() { return entities == null ? 0 : entities.texturePatchBytes(); }
+    long droppedEntityTextureRevisions() { return entities == null ? 0 : entities.droppedTextureRevisionCount(); }
+    int dirtyEntityTextures() { return entities == null ? 0 : entities.dirtyTextureCount(); }
     int capturedEntityParts() { return entities == null ? 0 : entities.partCount(); }
     int entityResourceCount() { return entities == null ? 0 : entities.resourceCount(); }
     int capturedTileParts() { return entities == null ? 0 : entities.tilePartCount(); }
@@ -232,6 +336,8 @@ final class PrototypeRenderer {
     int itemResourceCount() { return items == null ? 0 : items.resourceCount(); }
     int particleQuads() { return effects == null ? 0 : effects.particleQuads(); }
     int weatherQuads() { return effects == null ? 0 : effects.weatherQuads(); }
+    int damageQuads() { return effects == null ? 0 : effects.damageQuads(); }
+    long damageGeometryHash() { return effects == null ? 0 : effects.damageGeometryHash(); }
     int effectResourceCount() { return effects == null ? 0 : effects.resourceCount(); }
     long effectSkippedQuads() { return effects == null ? 0 : effects.skippedQuadCount(); }
     int effectBatchCount() { return effects == null ? 0 : effects.batchCount(); }
@@ -249,6 +355,12 @@ final class PrototypeRenderer {
     double cameraMediumY() { return medium == null ? 0 : medium.cameraY(); }
     double cameraMediumZ() { return medium == null ? 0 : medium.cameraZ(); }
     long effectTextureSnapshotCount() { return effects == null ? 0 : effects.textureSnapshotCount(); }
+    int effectAdditivePrimitives() { return effects == null ? 0 : effects.additivePrimitives(); }
+    int effectTrianglePrimitives() { return effects == null ? 0 : effects.trianglePrimitives(); }
+    long effectTextureUpdateCount() { return effects == null ? 0 : effects.textureUpdateCount(); }
+    long effectTexturePatchCount() { return effects == null ? 0 : effects.texturePatchCount(); }
+    long effectTextureDroppedUpdateCount() { return effects == null ? 0 : effects.textureDroppedUpdateCount(); }
+    int effectDirtyTextureCount() { return effects == null ? 0 : effects.dirtyTextureCount(); }
     int skyResourceCount() { return sky == null ? 0 : sky.resourceCount(); }
     long skyTextureUpdates() { return sky == null ? 0 : sky.textureUpdates(); }
     int cloudTriangles() { return clouds == null ? 0 : clouds.cloudTriangles(); }
@@ -264,6 +376,11 @@ final class PrototypeRenderer {
     boolean customSkyHandlerActive() { return clouds != null && clouds.customSkyHandlerActive(); }
     boolean customSkyUncaptured() { return clouds != null && clouds.customSkyUncaptured(); }
     int pbrSpriteCount() { return terrain == null ? 0 : terrain.getPbrSpriteCount(); }
+    boolean betterFoliageActive() { return terrain != null && terrain.isBetterFoliageActive(); }
+    long betterFoliageVertexCount() { return terrain == null ? 0 : terrain.getBetterFoliageVertexCount(); }
+    long betterFoliageCaptureCount() { return terrain == null ? 0 : terrain.getBetterFoliageCaptureCount(); }
+    long sectionBetterFoliageVertices(int x, int y, int z) { return terrain == null ? 0 : terrain.getSectionBetterFoliageVertices(x, y, z); }
+    long sectionGeometryHash(int x, int y, int z) { return terrain == null ? 0 : terrain.getSectionGeometryHash(x, y, z); }
     int pbrTextureCount() { return terrain == null ? 0 : terrain.getPbrTextureCount(); }
     long pbrUpdateCount() { return terrain == null ? 0 : terrain.getPbrUpdateCount(); }
     int pbrSkippedCount() { return terrain == null ? 0 : terrain.getPbrSkippedCount(); }
@@ -303,6 +420,7 @@ final class PrototypeRenderer {
                 + "; terrain radius=" + terrainRadius() + "; columns=" + terrainColumnCount()
                 + "; sections=" + terrainSectionCount() + "; pending=" + terrainPendingSectionCount()
                 + "; retiring=" + terrainRetirementCount() + "; terrain bytes=" + terrainCapturedBytes()
+                + "; SOLID draws skipped=" + terrainSkippedDraws() + "; fallback frames=" + terrainFallbackFrames()
                 + "; water vertices=" + terrainWaterVertexCount() + "; lava vertices=" + terrainLavaVertexCount()
                 + "; atlas updates=" + atlasTextureUpdates() + "; block lights=" + blockLightCount()
                 + (terrain != null && terrain.isCapacityLimited() ? "; terrain capacity limit reached" : "")
@@ -321,6 +439,7 @@ final class PrototypeRenderer {
 
     /** Toggle/world changes retain the runtime and its monotonically increasing GL timeline. */
     void releaseWorld() {
+        invalidateTerrainFallback();
         OverlayHooks.releaseSession();
         preparedWorld = null;
         preparedCamera = null;
@@ -329,7 +448,9 @@ final class PrototypeRenderer {
         ItemCaptureHooks.discard();
         EffectCaptureHooks.discard();
         CloudCaptureHooks.discard();
-        try { releaseScene(); } finally { overlayFrame.close(); }
+        try { releaseScene(); } finally {
+            try { overlayFrame.close(); } finally { lastGoodFrame.close(); }
+        }
     }
 
     /** A delayed unload must never release a newer world session. */
@@ -339,8 +460,10 @@ final class PrototypeRenderer {
 
     private void closeAtlasBorrowers() {
         Throwable failure = null;
-        try { if (effects != null) { effects.close(); effects = null; } }
+        try { if (heldLights != null) { heldLights.close(); heldLights = null; } }
         catch (RuntimeException | LinkageError ex) { failure = ex; }
+        try { if (effects != null) { effects.close(); effects = null; } }
+        catch (RuntimeException | LinkageError ex) { failure = append(failure, ex); }
         try { if (items != null) { items.close(); items = null; } }
         catch (RuntimeException | LinkageError ex) { failure = append(failure, ex); }
         rethrow(failure);

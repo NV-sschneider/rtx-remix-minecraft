@@ -9,11 +9,14 @@ import com.nvidia.rtxremix.forge.entity.EntityCaptureHooks;
 import com.nvidia.rtxremix.forge.entity.FirstPersonCapture;
 import com.nvidia.rtxremix.forge.entity.FastTileCaptureHooks;
 import com.nvidia.rtxremix.forge.item.ItemCaptureHooks;
+import com.nvidia.rtxremix.forge.light.HeldLightState;
 import com.nvidia.rtxremix.forge.effect.EffectCaptureHooks;
 import com.nvidia.rtxremix.forge.cloud.CloudCaptureHooks;
 import com.nvidia.rtxremix.forge.overlay.OverlayHooks;
 import com.nvidia.rtxremix.forge.overlay.OverlayInputGate;
 import com.nvidia.rtxremix.forge.overlay.PresentationHooks;
+import com.nvidia.rtxremix.forge.frame.WorldFallbackHooks;
+import com.nvidia.rtxremix.forge.terrain.VanillaTerrainDraws;
 import java.util.UUID;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.resources.IReloadableResourceManager;
@@ -37,14 +40,18 @@ public final class ClientEvents {
     private final FrameSubmission submission = new FrameSubmission();
     private final CapturedParts capturedParts = new CapturedParts();
     private final KeyBinding toggle = new KeyBinding("key.rlcraftremix.toggle", Keyboard.KEY_NONE, "key.categories.rlcraftremix");
+    private final KeyBinding heldLightToggle = new KeyBinding("key.rlcraftremix.heldLights", Keyboard.KEY_NONE, "key.categories.rlcraftremix");
     private boolean enabled;
     private boolean resetRequested;
     private boolean textureReloadRequested;
+    private net.minecraft.client.multiplayer.WorldClient failureFixtureWorld, recoveryFixtureWorld, cacheFixtureWorld;
+    private Runnable afterTerrainRecovery, afterTerrainCache;
     private String failure;
 
     public void register() {
         RendererLifecycle.attach(renderer);
         FirstPersonCapture.setSubmitCallback(this::submitCapturedFrame);
+        WorldFallbackHooks.setBeforeHudCallback(this::finishWorld);
         OverlayHooks.setPresentCallback(this::finishOverlay);
         PresentationHooks.attach(new PresentationHooks.Backend() {
             @Override public boolean ownsSwapchain() { return renderer.ownsSwapchain(); }
@@ -59,8 +66,9 @@ public final class ClientEvents {
             @Override public int read(String name, byte[] value) { return renderer.readConfig(name, value); }
         });
         ClientRegistry.registerKeyBinding(toggle);
+        ClientRegistry.registerKeyBinding(heldLightToggle);
         ClientCommandHandler.instance.registerCommand(new RemixCommand(this));
-        ((IReloadableResourceManager) mc.getResourceManager()).registerReloadListener(manager -> textureReloadRequested = true);
+        ((IReloadableResourceManager) mc.getResourceManager()).registerReloadListener(manager -> reload());
     }
 
     @SubscribeEvent(priority = EventPriority.NORMAL)
@@ -73,6 +81,7 @@ public final class ClientEvents {
     public void clientTick(TickEvent.ClientTickEvent event) {
         if (event.phase != TickEvent.Phase.END) { return; }
         while (toggle.isPressed()) { setEnabled(!enabled); }
+        while (heldLightToggle.isPressed()) { HeldLightState.toggleLocalHeldLights(); }
         if (resetRequested || !enabled || mc.world == null) {
             try { renderer.releaseWorld(); }
             catch (RuntimeException | LinkageError ex) {
@@ -88,12 +97,21 @@ public final class ClientEvents {
     public void renderTick(TickEvent.RenderTickEvent event) {
         if (event.phase == TickEvent.Phase.START) {
             submission.clear();
+            try {
+                if (textureReloadRequested) renderer.invalidateTerrainFallback();
+                // A color-only replacement cannot supply vanilla post-processing depth or two anaglyph passes.
+                renderer.beginTerrainFrame(enabled && mc.world != null && Display.isVisible()
+                        && mc.displayWidth > 0 && mc.displayHeight > 0 && !textureReloadRequested && !resetRequested
+                        && !mc.gameSettings.anaglyph && !mc.entityRenderer.isShaderActive());
+            } catch (RuntimeException | LinkageError ex) { renderingFailed(ex); }
             EntityCaptureHooks.beginFrame(enabled && mc.world != null);
             FastTileCaptureHooks.beginFrame(enabled && mc.world != null);
             ItemCaptureHooks.beginFrame(enabled && mc.world != null);
             EffectCaptureHooks.beginFrame(enabled && mc.world != null);
             CloudCaptureHooks.beginFrame(enabled && mc.world != null);
         } else {
+            try { renderer.finishTerrainFrame(false); }
+            catch (RuntimeException | LinkageError ex) { renderingFailed(ex); }
             submission.clear();
             discardCaptures();
         }
@@ -124,9 +142,21 @@ public final class ClientEvents {
             discardCaptures(); return;
         }
         try {
+            if (failureFixtureWorld != null && VanillaTerrainDraws.skippedDrawCount() != 0) {
+                net.minecraft.client.multiplayer.WorldClient expected = failureFixtureWorld;
+                failureFixtureWorld = null;
+                if (mc.world == expected) {
+                    requireSmokeWorld();
+                    throw new IllegalStateException("intentional smoke terrain recovery");
+                }
+            }
+            long cacheCount = renderer.terrainFallbackCaptures();
             renderer.render(submission.partialTicks(),
                     capturedParts.set(EntityCaptureHooks.finishFrame(), FastTileCaptureHooks.finishFrame()),
                     ItemCaptureHooks.finishFrame(), EffectCaptureHooks.finishFrame(), CloudCaptureHooks.finishFrame());
+            if (afterTerrainCache != null && mc.world == cacheFixtureWorld && renderer.terrainFallbackCaptures() != cacheCount) {
+                afterTerrainCache.run();
+            }
         } catch (RuntimeException | LinkageError ex) { renderingFailed(ex); }
     }
 
@@ -135,8 +165,20 @@ public final class ClientEvents {
         catch (RuntimeException | LinkageError ex) { renderingFailed(ex); }
     }
 
+    private void finishWorld() {
+        RuntimeException gateFailure = VanillaTerrainDraws.failure();
+        if (gateFailure != null) renderingFailed(gateFailure);
+        try {
+            if (renderer.finishTerrainFrame(true) && afterTerrainRecovery != null && mc.world == recoveryFixtureWorld) {
+                afterTerrainRecovery.run();
+            }
+        } catch (RuntimeException | LinkageError ex) { renderingFailed(ex); }
+    }
+
     private void renderingFailed(Throwable ex) {
         submission.clear();
+        // Keep skipped-draw counts and the cached image alive until the independent pre-HUD hook.
+        VanillaTerrainDraws.endFrame();
         failure = ex.getClass().getSimpleName() + ": " + ex.getMessage();
         RemixForgeMod.LOG.error("RTX Remix rendering disabled after failure", ex);
         OverlayHooks.releaseSession();
@@ -149,6 +191,9 @@ public final class ClientEvents {
     @SubscribeEvent
     public void worldUnload(WorldEvent.Unload event) {
         if (event.getWorld().isRemote) {
+            if (failureFixtureWorld == event.getWorld()) failureFixtureWorld = null;
+            if (cacheFixtureWorld == event.getWorld()) { cacheFixtureWorld = null; afterTerrainCache = null; }
+            if (recoveryFixtureWorld == event.getWorld()) { recoveryFixtureWorld = null; afterTerrainRecovery = null; }
             mc.addScheduledTask(() -> renderer.releaseWorld(event.getWorld()));
         }
     }
@@ -157,11 +202,14 @@ public final class ClientEvents {
         if (!value) OverlayHooks.releaseSession();
         enabled = value;
         failure = null;
-        if (!value) { submission.clear(); discardCaptures(); }
+        if (!value) { failureFixtureWorld = null; submission.clear(); VanillaTerrainDraws.endFrame(); discardCaptures(); }
         message(value ? "Remix prototype enabled. Use /mrtx off to restore vanilla rendering." : "Vanilla rendering enabled.");
     }
 
-    void reload() { textureReloadRequested = true; }
+    void reload() {
+        textureReloadRequested = true;
+        if (mc.isCallingFromMinecraftThread()) renderer.invalidateTerrainFallback();
+    }
     void openSettings() {
         if (!OverlayHooks.requestMenu(OverlayInputGate.Menu.GRAPHICS_SETTINGS)) {
             message("Enable Remix in a world before opening its graphics settings.");
@@ -171,6 +219,23 @@ public final class ClientEvents {
     int fixtureReadConfig(String name, byte[] value) { return renderer.readConfig(name, value); }
     void fixtureWriteConfig(String name, String value) { renderer.writeConfig(name, value); }
 
+    void fixtureFailNextReplacedFrame() { requireSmokeWorld(); failureFixtureWorld = mc.world; }
+    void fixtureCancelTerrainFailure() { failureFixtureWorld = null; }
+    void fixtureAfterTerrainRecovery(Runnable callback) {
+        if (callback != null) requireSmokeWorld();
+        afterTerrainRecovery = callback; recoveryFixtureWorld = callback == null ? null : mc.world;
+    }
+    void fixtureAfterTerrainCache(Runnable callback) {
+        if (callback != null) requireSmokeWorld();
+        afterTerrainCache = callback; cacheFixtureWorld = callback == null ? null : mc.world;
+    }
+    private void requireSmokeWorld() {
+        if (!Boolean.getBoolean("rlcraftremix.smoke") || mc.world == null || mc.getIntegratedServer() == null
+                || !mc.getIntegratedServer().getFolderName().startsWith("rlcraft-remix-smoke-")) {
+            throw new IllegalStateException("Terrain recovery injection requires an owned integrated smoke world");
+        }
+    }
+
     private static void discardCaptures() {
         EntityCaptureHooks.discard(); ItemCaptureHooks.discard(); EffectCaptureHooks.discard();
         FastTileCaptureHooks.discard();
@@ -179,10 +244,26 @@ public final class ClientEvents {
 
     long renderedFrames() { return renderer.frameCount(); }
     long windowChanges() { return renderer.windowChanges(); }
+    boolean terrainSuppressionRequested() { return renderer.terrainSuppressionRequested(); }
+    boolean terrainSuppressionSupported() { return renderer.terrainSuppressionSupported(); }
+    int terrainSkippedDraws() { return renderer.terrainSkippedDraws(); }
+    int terrainVanillaDraws() { return renderer.terrainVanillaDraws(); }
+    long terrainSkippedDrawTotal() { return renderer.terrainSkippedDrawTotal(); }
+    long terrainFallbackFrames() { return renderer.terrainFallbackFrames(); }
+    long terrainFallbackFailures() { return renderer.terrainFallbackFailures(); }
+    long terrainFallbackCaptures() { return renderer.terrainFallbackCaptures(); }
+    int terrainFallbackResources() { return renderer.terrainFallbackResources(); }
+    long terrainFallbackBytes() { return renderer.terrainFallbackBytes(); }
+    int heldLightCount() { return renderer.heldLightCount(); }
+    int localHeldLightCount() { return renderer.localHeldLightCount(); }
+    boolean heldLightCaptured(UUID id, int hand) { return renderer.heldLightCaptured(id, hand); }
+    long heldLightUpdates() { return renderer.heldLightUpdates(); }
+    double heldLightLocalDistance(UUID id, int hand) { return renderer.heldLightLocalDistance(id, hand); }
     int entityCategoryCount(int flags) { return renderer.entityCategoryCount(flags); }
     int itemCategoryCount(int flags) { return renderer.itemCategoryCount(flags); }
     int tileTrianglePartCount(net.minecraft.util.math.BlockPos pos) { return renderer.tileTrianglePartCount(pos); }
     long tileGeometryUpdates(net.minecraft.util.math.BlockPos pos) { return renderer.tileGeometryUpdates(pos); }
+    boolean tileTextureCurrent(net.minecraft.util.math.BlockPos pos, int glId) { return renderer.tileTextureCurrent(pos, glId); }
     boolean isEnabled() { return enabled; }
     int cloudTriangles() { return renderer.cloudTriangles(); }
     int customSkyTriangles() { return renderer.customSkyTriangles(); }
@@ -197,6 +278,11 @@ public final class ClientEvents {
     boolean customSkyHandlerActive() { return renderer.customSkyHandlerActive(); }
     boolean customSkyUncaptured() { return renderer.customSkyUncaptured(); }
     int pbrSpriteCount() { return renderer.pbrSpriteCount(); }
+    boolean betterFoliageActive() { return renderer.betterFoliageActive(); }
+    long betterFoliageVertexCount() { return renderer.betterFoliageVertexCount(); }
+    long betterFoliageCaptureCount() { return renderer.betterFoliageCaptureCount(); }
+    long sectionBetterFoliageVertices(int x, int y, int z) { return renderer.sectionBetterFoliageVertices(x, y, z); }
+    long sectionGeometryHash(int x, int y, int z) { return renderer.sectionGeometryHash(x, y, z); }
     int pbrTextureCount() { return renderer.pbrTextureCount(); }
     long pbrUpdateCount() { return renderer.pbrUpdateCount(); }
     int pbrSkippedCount() { return renderer.pbrSkippedCount(); }
@@ -204,6 +290,12 @@ public final class ClientEvents {
     boolean entityCaptured(UUID id) { return renderer.entityCaptured(id); }
     int trianglePartCount(UUID id) { return renderer.trianglePartCount(id); }
     long entityTransformUpdates(UUID id) { return renderer.entityTransformUpdates(id); }
+    int entityEmissivePartCount(UUID id) { return renderer.entityEmissivePartCount(id); }
+    long entityTextureUpdates() { return renderer.entityTextureUpdates(); }
+    long entityTexturePatches() { return renderer.entityTexturePatches(); }
+    long entityTexturePatchBytes() { return renderer.entityTexturePatchBytes(); }
+    long droppedEntityTextureRevisions() { return renderer.droppedEntityTextureRevisions(); }
+    int dirtyEntityTextures() { return renderer.dirtyEntityTextures(); }
     int capturedEntityParts() { return renderer.capturedEntityParts(); }
     int entityResourceCount() { return renderer.entityResourceCount(); }
     long vboUploadSnapshots() { return EntityCaptureHooks.vboUploadSnapshots(); }
@@ -220,6 +312,8 @@ public final class ClientEvents {
     int itemResourceCount() { return renderer.itemResourceCount(); }
     int particleQuads() { return renderer.particleQuads(); }
     int weatherQuads() { return renderer.weatherQuads(); }
+    int damageQuads() { return renderer.damageQuads(); }
+    long damageGeometryHash() { return renderer.damageGeometryHash(); }
     int effectResourceCount() { return renderer.effectResourceCount(); }
     long effectSkippedQuads() { return renderer.effectSkippedQuads(); }
     int effectBatchCount() { return renderer.effectBatchCount(); }
@@ -237,6 +331,12 @@ public final class ClientEvents {
     double cameraMediumY() { return renderer.cameraMediumY(); }
     double cameraMediumZ() { return renderer.cameraMediumZ(); }
     long effectTextureSnapshotCount() { return renderer.effectTextureSnapshotCount(); }
+    int effectAdditivePrimitives() { return renderer.effectAdditivePrimitives(); }
+    int effectTrianglePrimitives() { return renderer.effectTrianglePrimitives(); }
+    long effectTextureUpdateCount() { return renderer.effectTextureUpdateCount(); }
+    long effectTexturePatchCount() { return renderer.effectTexturePatchCount(); }
+    long effectTextureDroppedUpdateCount() { return renderer.effectTextureDroppedUpdateCount(); }
+    int effectDirtyTextureCount() { return renderer.effectDirtyTextureCount(); }
     int skyResourceCount() { return renderer.skyResourceCount(); }
     long skyTextureUpdates() { return renderer.skyTextureUpdates(); }
     int terrainRadius() { return renderer.terrainRadius(); }

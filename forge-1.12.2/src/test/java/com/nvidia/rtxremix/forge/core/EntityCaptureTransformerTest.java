@@ -479,7 +479,13 @@ public class EntityCaptureTransformerTest {
                 "com.nvidia.rtxremix.forge.core.CloudCaptureTransformer",
                 "com.nvidia.rtxremix.forge.core.FirstPersonCaptureTransformer",
                 "com.nvidia.rtxremix.forge.core.OverlayInputTransformer",
-                "com.nvidia.rtxremix.forge.core.FastTileCaptureTransformer"
+                "com.nvidia.rtxremix.forge.core.FastTileCaptureTransformer",
+            "com.nvidia.rtxremix.forge.core.HeldLightCaptureTransformer",
+            "com.nvidia.rtxremix.forge.core.EntityGlintTransformer",
+            "com.nvidia.rtxremix.forge.core.TextureRevisionTransformer",
+            "com.nvidia.rtxremix.forge.core.BetterFoliageCaptureTransformer",
+            "com.nvidia.rtxremix.forge.core.TerrainDrawTransformer",
+            "com.nvidia.rtxremix.forge.core.WorldFallbackTransformer"
         }, new RemixCorePlugin().getASMTransformerClass());
     }
 
