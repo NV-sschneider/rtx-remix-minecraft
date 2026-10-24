@@ -89,7 +89,8 @@ public final class AtlasMaterialMaps implements AutoCloseable {
             MaterialImage normal = load(mc.getResourceManager(), atlas.getBasePath(), id, "_n", sprite);
             MaterialImage specular = load(mc.getResourceManager(), atlas.getBasePath(), id, "_s", sprite);
             if (normal == null && specular == null) continue;
-            if (!SpriteMaterial.supported(sprite)) { omitted(id, "rotated or custom animated sprite"); continue; }
+            String unsupported = SpriteMaterial.unsupportedReason(sprite);
+            if (unsupported != null) { omitted(id, unsupported); continue; }
             if (sprite.getOriginX() < 0 || sprite.getOriginY() < 0
                     || sprite.getOriginX() + sprite.getIconWidth() > width
                     || sprite.getOriginY() + sprite.getIconHeight() > height) {

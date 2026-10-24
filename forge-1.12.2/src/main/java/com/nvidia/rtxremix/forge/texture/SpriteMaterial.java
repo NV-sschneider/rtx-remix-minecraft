@@ -31,10 +31,10 @@ final class SpriteMaterial {
         snapshot();
     }
 
-    static boolean supported(TextureAtlasSprite sprite) {
+    static String unsupportedReason(TextureAtlasSprite sprite) {
         try {
-            return !ROTATED.getBoolean(sprite) && (!sprite.hasAnimationMetadata()
-                    || sprite.getClass() == TextureAtlasSprite.class);
+            if (ROTATED.getBoolean(sprite)) return "rotated atlas sprite";
+            return sprite.hasAnimationMetadata() ? SpriteAnimationContract.unsupported(sprite) : null;
         } catch (IllegalAccessException error) { throw new IllegalStateException("Cannot read atlas sprite orientation", error); }
     }
 
