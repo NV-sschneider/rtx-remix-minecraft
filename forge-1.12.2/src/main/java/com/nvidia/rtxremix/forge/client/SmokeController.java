@@ -67,7 +67,7 @@ final class SmokeController {
         INACTIVE, WAIT_MENU, WAIT_WORLD, BUILD_SCENE, SETTLE, REMIX, VANILLA,
         REENABLE, MATERIALS, GLASS, OBJECTS, EFFECTS, COMBAT, CLOUDS, PBR, FIRSTPERSON, HELD_LIGHTS, GLINT, TILES, FOLIAGE, WINDOW, TERRAIN,
         COMPATIBILITY, SURVIVAL, DIMENSIONS, TERRAIN_OPTIMIZATION, SOAK, MULTIPLAYER, RESTORE_MULTIPLAYER,
-        SKY_APPLY, SKY_CAPTURE, RESTORE_DIMENSIONS, RESTORE_RULES, DISCONNECT, UNLOAD, EXIT, DONE
+        SKY_APPLY, SKY_CAPTURE, RESTORE_SURVIVAL, RESTORE_DIMENSIONS, RESTORE_RULES, DISCONNECT, UNLOAD, EXIT, DONE
     }
 
     private enum SkyPhase {
@@ -478,7 +478,11 @@ final class SmokeController {
                 case SURVIVAL:
                     if (!fixtureReady()) break;
                     lastFrames = events.renderedFrames();
-                    if (survivalFixture.tick()) beginAfterSurvival();
+                    if (survivalFixture.tick()) {
+                        survivalFixture.close();
+                        survivalFixture = null;
+                        beginAfterSurvival();
+                    }
                     break;
                 case DIMENSIONS:
                     // A real transfer replaces WorldClient and temporarily has no client world.
@@ -523,6 +527,12 @@ final class SmokeController {
                     break;
                 case SKY_CAPTURE:
                     captureSkyPhase();
+                    break;
+                case RESTORE_SURVIVAL:
+                    if (survivalFixture.cleanupComplete()) {
+                        survivalFixture = null;
+                        beginDimensionRestoration();
+                    }
                     break;
                 case RESTORE_DIMENSIONS:
                     if (dimensionsFixture.cleanupComplete()) {
@@ -776,6 +786,14 @@ final class SmokeController {
         closeRenderFixtures();
         restoreForSuccess = success;
         pendingFailure = failureFields;
+        if (survivalFixture != null) {
+            transition(State.RESTORE_SURVIVAL);
+            return;
+        }
+        beginDimensionRestoration();
+    }
+
+    private void beginDimensionRestoration() {
         if (dimensionsFixture != null) {
             dimensionsFixture.close();
             transition(State.RESTORE_DIMENSIONS);
@@ -1292,7 +1310,7 @@ final class SmokeController {
     private long timeoutForState() {
         if (state == State.SOAK) return TimeUnit.SECONDS.toNanos(FixtureSoak.seconds() + 600);
         if (state == State.MULTIPLAYER) return NATIVE_TIMEOUT * 4;
-        if (state == State.RESTORE_MULTIPLAYER) return SETTLE_TIMEOUT;
+        if (state == State.RESTORE_MULTIPLAYER || state == State.RESTORE_SURVIVAL) return SETTLE_TIMEOUT;
         // Terrain owns a bounded deadline for each independent readiness phase.
         if (state == State.TERRAIN || state == State.MATERIALS || state == State.GLASS
                 || state == State.OBJECTS || state == State.EFFECTS || state == State.COMBAT
@@ -1321,12 +1339,13 @@ final class SmokeController {
             pendingFailure = "reason=" + reason + " multiplayer=true " + multiplayerFixture.status();
             multiplayerFixture.close(); transition(State.RESTORE_MULTIPLAYER); return;
         }
-        if (state == State.RESTORE_RULES || state == State.DISCONNECT || state == State.RESTORE_DIMENSIONS
+        if (state == State.RESTORE_RULES || state == State.DISCONNECT || state == State.RESTORE_DIMENSIONS || state == State.RESTORE_SURVIVAL
                 || state == State.RESTORE_MULTIPLAYER) {
             // A failed cleanup must not close another world or exit while the fixture
             // could still be restoring settings or saving on the server thread.
             finishNow(false, (pendingFailure == null ? "reason=fixture_cleanup_failed" : pendingFailure)
                     + " phase=" + state.name()
+                    + (state == State.RESTORE_SURVIVAL && survivalFixture != null ? " " + survivalFixture.status() : "")
                     + " cleanup=" + reason + " rulesRestored=" + rulesRestored + " exitSuppressed=true", false);
             return;
         }

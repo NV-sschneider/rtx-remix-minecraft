@@ -54,7 +54,10 @@ final class FixtureSurvival implements AutoCloseable {
     private final float returnYaw, returnPitch;
     private Phase phase = Phase.ARRIVE;
     private Future<?> action, cleanup;
-    private FixtureSurvivalState saved;
+    private Future<FixtureSurvivalState.Verification> restoreCheck;
+    private FixtureSurvivalState.Verification restored;
+    private boolean modeRestorationQueued, restorationComplete;
+    private volatile FixtureSurvivalState saved;
     private EntityZombie zombie;
     private ProjectileOwner projectiles;
     private EnumDifficulty difficulty;
@@ -65,6 +68,7 @@ final class FixtureSurvival implements AutoCloseable {
     private volatile float healthBeforeDamage, zombieBeforeMelee;
     private long since = System.nanoTime(), progress = since, frame = -1, reloadBaseline, usePoseBaseline;
     private int readyTick, foodBefore, foodCountBefore;
+    private int restoredClientTick;
     private float yaw = 180;
     private boolean started, hurtObserved, swingObserved, useObserved, eatingCaptured;
 
@@ -232,11 +236,11 @@ final class FixtureSurvival implements AutoCloseable {
                 }
                 break;
             case RESTORE:
-                if (complete()) transition(Phase.RETIRED);
+                if (cleanupComplete()) { log("RESTORE_PASS"); transition(Phase.RETIRED); }
                 break;
             case RETIRED:
                 if (settled(!events.entityCaptured(zombieId) && (projectileId == null || !events.entityCaptured(projectileId))
-                        && mc.playerController.getCurrentGameType() == saved.gameType, 30, 10)) { transition(Phase.DONE); log("PASS"); }
+                        && cleanupComplete(), 30, 10)) { transition(Phase.DONE); log("PASS"); }
                 break;
             default: break;
         }
@@ -283,7 +287,7 @@ final class FixtureSurvival implements AutoCloseable {
             if (projectiles != null) { MinecraftForge.EVENT_BUS.unregister(projectiles); if (projectiles.entity != null) projectiles.entity.setDead(); }
             if (zombie != null) zombie.setDead();
             EntityPlayerMP player = player();
-            try { if (saved != null) saved.restore(player); }
+            try { if (saved != null) saved.beginRestore(player); }
             finally {
                 try { player.connection.setPlayerLocation(returnX, returnY, returnZ, returnYaw, returnPitch); }
                 finally {
@@ -299,7 +303,8 @@ final class FixtureSurvival implements AutoCloseable {
     private void restoreClient() {
         mc.gameSettings.thirdPersonView = originalView; mc.gameSettings.hideGUI = originalHud;
         clientWorld.getWorldInfo().setDifficulty(originalClientDifficulty);
-        if (mc.player != null && playerId.equals(mc.player.getUniqueID())) mc.player.resetActiveHand();
+        if (mc.world == clientWorld && mc.getIntegratedServer() == server
+                && mc.player != null && playerId.equals(mc.player.getUniqueID())) mc.player.resetActiveHand();
         KeyBinding.setKeyBindState(useKey, originalUseDown);
     }
     private boolean complete() throws Exception { if (action == null || !action.isDone()) return false; action.get(); return true; }
@@ -322,6 +327,12 @@ final class FixtureSurvival implements AutoCloseable {
                 + " projectileCaptured=" + (projectileId != null && events.entityCaptured(projectileId))
                 + " use=" + useObserved + " active=" + (mc.player != null && mc.player.isHandActive())
                 + " useTicks=" + (mc.player == null ? 0 : mc.player.getItemInUseMaxCount())
+                + " " + (saved == null ? "savedHealth=pending" : saved.expectedStatus())
+                + " restoredServerHealth=" + (restored == null ? -1 : restored.health)
+                + " restoredServerLimbHealth=" + (restored == null ? -1 : restored.limbHealth)
+                + " restoreServerTicks=" + (restored == null ? -1 : restored.elapsed)
+                + " restoreBody=" + (restored != null && restored.body) + " restoreMode=" + modeRestorationQueued
+                + " restored=" + restorationComplete
                 + " frames=" + events.renderedFrames();
     }
     @Override public void close() {
@@ -329,7 +340,29 @@ final class FixtureSurvival implements AutoCloseable {
     }
     boolean cleanupComplete() throws Exception {
         if (cleanup == null || !cleanup.isDone()) return false;
-        cleanup.get(); return mc.player != null && (saved == null || mc.playerController.getCurrentGameType() == saved.gameType);
+        cleanup.get();
+        if (saved == null) return true; // Snapshot failed before any server-player mutation.
+        if (mc.world != clientWorld || mc.getIntegratedServer() != server || mc.player == null || mc.playerController == null)
+            throw new IllegalStateException("Survival restoration lost its owned client world");
+        if (restorationComplete)
+            return saved.clientMatches(mc.player, mc.playerController.getCurrentGameType(), restored, true,
+                    mc.player.ticksExisted - restoredClientTick);
+        if (restoreCheck == null) {
+            restoreCheck = server.callFromMainThread(() -> { requireWorld(); return saved.verify(player()); });
+            return false;
+        }
+        if (!restoreCheck.isDone()) return false;
+        restored = restoreCheck.get(); restoreCheck = null;
+        if (!restored.body || !saved.clientMatches(mc.player, mc.playerController.getCurrentGameType(), restored, false)) return false;
+        if (!modeRestorationQueued) {
+            cleanup = server.callFromMainThread(() -> { requireWorld(); saved.finishRestore(player()); return null; });
+            modeRestorationQueued = true;
+            return false;
+        }
+        restorationComplete = restored.complete
+                && saved.clientMatches(mc.player, mc.playerController.getCurrentGameType(), restored, true);
+        if (restorationComplete) restoredClientTick = mc.player.ticksExisted;
+        return restorationComplete;
     }
 
     public final class ProjectileOwner {
