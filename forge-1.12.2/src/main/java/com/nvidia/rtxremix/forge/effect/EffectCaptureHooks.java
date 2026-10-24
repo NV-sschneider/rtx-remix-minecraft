@@ -37,7 +37,7 @@ public final class EffectCaptureHooks {
     private static final FloatBuffer FLOATS = BufferUtils.createFloatBuffer(16);
     private static final Matrix4f BASE = new Matrix4f(), INVERSE = new Matrix4f();
     private static final Matrix4f CURRENT = new Matrix4f(), RELATIVE = new Matrix4f();
-    private static boolean armed, weather, scopeValid;
+    private static boolean armed, weather, damage, scopeValid;
     private static Thread renderThread;
     private static Object world;
     private static ITextureObject texture;
@@ -74,13 +74,17 @@ public final class EffectCaptureHooks {
     public static long skippedQuadCount() { return lastSkippedQuads; }
 
     public static void beginParticles(Object entity, float partialTicks) { begin(false, entity, partialTicks); }
+    public static void beginDamage(Object entity, float partialTicks) {
+        begin(false, entity, partialTicks);
+        if (observing() && depth == 1) damage = true;
+    }
     public static void beginWeather(float partialTicks) {
         if (!observing()) return;
         begin(true, Minecraft.getMinecraft().getRenderViewEntity(), partialTicks);
     }
     private static void begin(boolean isWeather, Object entity, float partialTicks) {
         if (!observing() || ++depth != 1) return;
-        scopeValid = false; texture = null; weather = isWeather;
+        scopeValid = false; texture = null; weather = isWeather; damage = false;
         try {
             if (!(entity instanceof Entity) || world == null || world != Minecraft.getMinecraft().world) return;
             readMatrix(GL11.GL_MODELVIEW_MATRIX, BASE);
@@ -122,7 +126,7 @@ public final class EffectCaptureHooks {
             omit(attempted); return;
         }
         boolean blend = GL11.glIsEnabled(GL11.GL_BLEND), alpha = GL11.glIsEnabled(GL11.GL_ALPHA_TEST);
-        long blendKey = EffectBlend.key(blend, GL11.glGetInteger(GL14.GL_BLEND_SRC_RGB),
+        long blendKey = EffectBlend.key(damage, blend, GL11.glGetInteger(GL14.GL_BLEND_SRC_RGB),
                 GL11.glGetInteger(GL14.GL_BLEND_DST_RGB), GL11.glGetInteger(GL20.GL_BLEND_EQUATION_RGB),
                 GL11.glGetInteger(GL14.GL_BLEND_SRC_ALPHA), GL11.glGetInteger(GL14.GL_BLEND_DST_ALPHA),
                 GL11.glGetInteger(GL20.GL_BLEND_EQUATION_ALPHA), alpha, GL11.glGetInteger(GL11.GL_ALPHA_TEST_FUNC),
@@ -139,14 +143,14 @@ public final class EffectCaptureHooks {
         boolean atlas = texture == Minecraft.getMinecraft().getTextureMapBlocks();
         // Lit particles run before renderParticles updates these fields. Read the origin
         // that the actual particle renderer subtracted, not a newly inferred camera origin.
-        double x = weather ? weatherX : Particle.interpPosX;
-        double y = weather ? weatherY : Particle.interpPosY;
-        double z = weather ? weatherZ : Particle.interpPosZ;
+        double x = weather || damage ? weatherX : Particle.interpPosX;
+        double y = weather || damage ? weatherY : Particle.interpPosY;
+        double z = weather || damage ? weatherZ : Particle.interpPosZ;
         if (!Double.isFinite(x) || !Double.isFinite(y) || !Double.isFinite(z)) { omit(attempted); return; }
         CapturedEffectBatch batch = null;
         for (int i = 0; i < BATCHES.size(); i++) {
             CapturedEffectBatch candidate = BATCHES.get(i);
-            if (candidate.matches(texture, textureId, weather, atlas, blendKey, x, y, z)
+            if (candidate.damage == damage && candidate.matches(texture, textureId, weather, atlas, blendKey, x, y, z)
                     && candidate.quads < CapturedEffectBatch.MAX_QUADS) { batch = candidate; break; }
         }
         if (quads == MAX_QUADS || batch == null && BATCHES.size() == MAX_BATCHES) { omit(attempted); return; }
@@ -155,6 +159,7 @@ public final class EffectCaptureHooks {
             if (POOL[index] == null) POOL[index] = new CapturedEffectBatch();
             batch = POOL[index];
             batch.initialize(texture, textureId, weather, atlas, blendKey, x, y, z);
+            batch.damage = damage;
             BATCHES.add(batch);
         }
         readMatrix(GL11.GL_MODELVIEW_MATRIX, CURRENT);

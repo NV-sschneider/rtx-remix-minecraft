@@ -27,12 +27,29 @@ public class EffectCaptureTransformerTest {
     private static final String HOOKS = "com/nvidia/rtxremix/forge/effect/EffectCaptureHooks";
     private static final String PARTICLES = "net/minecraft/client/particle/ParticleManager";
     private static final String WEATHER = "net/minecraft/client/renderer/EntityRenderer";
+    private static final String DAMAGE = "net/minecraft/client/renderer/RenderGlobal";
+    private static final String DAMAGE_DESC = "(Lnet/minecraft/client/renderer/Tessellator;Lnet/minecraft/client/renderer/BufferBuilder;Lnet/minecraft/entity/Entity;F)V";
     private static final String UPLOADER = "net/minecraft/client/renderer/WorldVertexBufferUploader";
     private static final String TEXTURES = "net/minecraft/client/renderer/texture/TextureManager";
     private static final String PARTICLE_DESC = "(Lnet/minecraft/entity/Entity;F)V";
     private static final String BUFFER_DESC = "(Lnet/minecraft/client/renderer/BufferBuilder;)V";
     private static final String TEXTURE_DESC = "(Lnet/minecraft/util/ResourceLocation;)V";
     private final EffectCaptureTransformer transformer = new EffectCaptureTransformer();
+
+    @Test public void bracketsActualDamageTraversalAndPreservesItsGlStateAndDraws() throws Exception {
+        MethodNode original = method(read(bytes(DAMAGE)), "drawBlockDamageTexture", DAMAGE_DESC);
+        byte[] patched = transform(DAMAGE, bytes(DAMAGE));
+        ClassNode type = read(patched);
+        MethodNode damage = method(type, "drawBlockDamageTexture", DAMAGE_DESC);
+        assertEquals(1, calls(damage, HOOKS, "beginDamage"));
+        assertEquals(2, calls(damage, HOOKS, "endPass"));
+        for (String call : new String[] {"preRenderDamagedBlocks", "postRenderDamagedBlocks"})
+            assertEquals(calls(original, DAMAGE, call), calls(damage, DAMAGE, call));
+        assertEquals(1, calls(damage, "net/minecraft/client/renderer/Tessellator", "draw"));
+        assertEquals(1, calls(damage, "net/minecraft/client/renderer/BlockRendererDispatcher", "renderBlockDamage"));
+        verify(type);
+        assertArrayEquals(patched, transform(DAMAGE, patched));
+    }
 
     @Test public void bracketsPinnedPassesWithoutRemovingVanillaDrawsOrCrashHandlers() throws Exception {
         ClassNode original = read(bytes(PARTICLES));
@@ -83,6 +100,7 @@ public class EffectCaptureTransformerTest {
             {PARTICLES, "renderParticles", "func_78874_a", PARTICLE_DESC, "beginParticles"},
             {PARTICLES, "renderLitParticles", "func_78872_b", PARTICLE_DESC, "beginParticles"},
             {WEATHER, "renderRainSnow", "func_78474_d", "(F)V", "beginWeather"},
+            {DAMAGE, "drawBlockDamageTexture", "func_174981_a", DAMAGE_DESC, "beginDamage"},
             {UPLOADER, "draw", "func_181679_a", BUFFER_DESC, "drawBuffer"},
             {TEXTURES, "bindTexture", "func_110577_a", TEXTURE_DESC, "boundTexture"}
         };

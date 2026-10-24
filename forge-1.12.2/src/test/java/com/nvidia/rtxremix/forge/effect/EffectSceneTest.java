@@ -15,6 +15,23 @@ import org.lwjgl.util.vector.Matrix4f;
 import static org.junit.Assert.*;
 
 public class EffectSceneTest {
+    @Test public void damageIsAStaticDecalAndDisappearsOnTheFirstEmptyFrame() {
+        Fake api = new Fake();
+        EffectScene scene = new EffectScene(api);
+        CapturedEffectBatch batch = batch();
+        batch.damage = true;
+        scene.sync(Collections.singletonList(batch), 42);
+        assertEquals(com.nvidia.rtxremix.InstanceCategoryBit.DECAL_STATIC, api.category);
+        assertEquals(1, scene.damageQuads());
+        assertEquals(0, scene.particleQuads());
+        assertNotEquals(0, scene.damageGeometryHash());
+        scene.sync(Collections.<CapturedEffectBatch>emptyList(), 42);
+        assertEquals(0, scene.damageQuads());
+        assertEquals(0, scene.damageGeometryHash());
+        assertTrue(api.meshes.isEmpty());
+        scene.close();
+        assertEquals(0, scene.resourceCount());
+    }
     @Test public void replacesTransientMeshesButNeverOwnsTheBorrowedAtlas() {
         Fake api = new Fake();
         EffectScene scene = new EffectScene(api);
@@ -70,7 +87,7 @@ public class EffectSceneTest {
     private static final class Fake implements EffectScene.Backend {
         long next = 100;
         final Set<Long> meshes = new HashSet<Long>(), materials = new HashSet<Long>(), blends = new HashSet<Long>();
-        int draws;
+        int draws, category;
         boolean failDestroy;
         public long createMesh(MeshInfo info) { long handle = next++; meshes.add(handle); return handle; }
         public void destroyMesh(long handle) {
@@ -78,6 +95,7 @@ public class EffectSceneTest {
             assertTrue(meshes.remove(handle));
         }
         public void drawInstance(long mesh, float[] transform, int category, int doubleSided, long blend) {
+            this.category = category;
             assertTrue(meshes.contains(mesh)); assertTrue(blends.contains(blend)); draws++;
         }
         public long createTextureFromMemory(TextureFromMemoryInfo info) { throw new AssertionError("Borrow the atlas"); }

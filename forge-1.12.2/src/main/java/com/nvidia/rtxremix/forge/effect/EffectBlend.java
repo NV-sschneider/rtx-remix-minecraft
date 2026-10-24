@@ -8,11 +8,28 @@ import com.nvidia.rtxremix.InstanceInfoBlendEXT;
 
 /** Exact fixed-function alpha state for the supported ordinary alpha-blended passes. */
 final class EffectBlend {
+    private static final long DAMAGE = 1L << 20;
     private EffectBlend() {}
 
     static long key(boolean blend, int source, int destination, int equation,
                     int sourceAlpha, int destinationAlpha, int alphaEquation,
                     boolean alphaTest, int compare, int reference) {
+        return key(false, blend, source, destination, equation, sourceAlpha, destinationAlpha,
+                alphaEquation, alphaTest, compare, reference);
+    }
+
+    static long key(boolean damage, boolean blend, int source, int destination, int equation,
+                    int sourceAlpha, int destinationAlpha, int alphaEquation,
+                    boolean alphaTest, int compare, int reference) {
+        // Minecraft's crack pass uses DST_COLOR + SRC_COLOR (2 * source * destination).
+        // Accept that material only within its explicit terrain-decal capture scope.
+        if (damage) {
+            if (!blend || source != 774 || destination != 768 || equation != 32774
+                    || sourceAlpha != 1 || destinationAlpha != 0 || alphaEquation != 32774) return -1;
+            long ordinary = key(false, true, 770, 771, equation, sourceAlpha, destinationAlpha,
+                    alphaEquation, alphaTest, compare, reference);
+            return ordinary < 0 ? -1 : ordinary | DAMAGE;
+        }
         // Premultiplied, additive and shader-specific effects need separate material semantics.
         if (blend && (source != 770 || destination != 771 || equation != 32774
                 || alphaEquation != 32774 || factor(sourceAlpha) < 0 || factor(destinationAlpha) < 0)) return -1;
@@ -30,8 +47,10 @@ final class EffectBlend {
         ext.alphaTestEnabled = ext.alphaTestCompareOp == 7 ? 0 : 1;
         ext.alphaTestReferenceValue = (byte) (key >> 4);
         if (ext.alphaBlendEnabled != 0) {
-            ext.srcColorBlendFactor = InstanceInfoBlendEXT.VK_BLEND_FACTOR_SRC_ALPHA;
-            ext.dstColorBlendFactor = InstanceInfoBlendEXT.VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+            ext.srcColorBlendFactor = (key & DAMAGE) != 0 ? 4 /* VK_BLEND_FACTOR_DST_COLOR */
+                    : InstanceInfoBlendEXT.VK_BLEND_FACTOR_SRC_ALPHA;
+            ext.dstColorBlendFactor = (key & DAMAGE) != 0 ? 2 /* VK_BLEND_FACTOR_SRC_COLOR */
+                    : InstanceInfoBlendEXT.VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
             ext.srcAlphaBlendFactor = (int) (key >> 12) & 15;
             ext.dstAlphaBlendFactor = (int) (key >> 16) & 15;
         }

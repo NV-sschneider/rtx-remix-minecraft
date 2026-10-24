@@ -9,6 +9,18 @@ import org.junit.Test;
 import static org.junit.Assert.*;
 
 public class EffectBlendTest {
+    @Test public void damagePreservesMultiplicativeBlendOnlyInsideItsDecalScope() {
+        long key = EffectBlend.key(true, true, 774, 768, 32774, 1, 0, 32774, true, 516, 26);
+        assertTrue(key >= 0);
+        InstanceInfoBlendEXT state = EffectBlend.extension(key);
+        assertEquals(4, state.srcColorBlendFactor);
+        assertEquals(2, state.dstColorBlendFactor);
+        assertEquals(1, state.srcAlphaBlendFactor);
+        assertEquals(0, state.dstAlphaBlendFactor);
+        assertEquals(26, state.alphaTestReferenceValue & 255);
+        assertEquals(-1, EffectBlend.key(false, true, 774, 768, 32774, 1, 0, 32774, true, 516, 26));
+        assertEquals(-1, EffectBlend.key(true, true, 770, 771, 32774, 1, 0, 32774, true, 516, 26));
+    }
     @Test public void preservesVertexAlphaAndSeparateAlphaBlendFactors() {
         long key = EffectBlend.key(true, 770, 771, 32774, 770, 771, 32774, true, 516, 128);
         InstanceInfoBlendEXT state = EffectBlend.extension(key);

@@ -47,7 +47,8 @@ public final class EffectScene implements AutoCloseable {
     private final MeshInfo meshInfo = new MeshInfo();
     private long atlas, textureBytes, meshBytes, skippedBatches, skippedQuads;
     private long particleHash, weatherHash, particleFrames, weatherFrames, textureSnapshots;
-    private int batches, particles, precipitation, snapshots;
+    private int batches, particles, precipitation, damage, snapshots;
+    private long damageHash;
     private boolean closed;
 
     public EffectScene(RemixAPI api) { this(backend(api)); }
@@ -69,7 +70,8 @@ public final class EffectScene implements AutoCloseable {
         if (closed) throw new IllegalStateException("Effect scene is closed");
         if (atlas != 0 && atlas != blockAtlasTexture) throw new IllegalStateException("Close effects before replacing the terrain atlas");
         retireMeshes();
-        batches = particles = precipitation = snapshots = 0;
+        batches = particles = precipitation = damage = snapshots = 0;
+        damageHash = 0;
         particleHash = weatherHash = 0;
         skippedBatches = EffectCaptureHooks.skippedBatchCount(); skippedQuads = EffectCaptureHooks.skippedQuadCount();
         int total = 0;
@@ -97,10 +99,14 @@ public final class EffectScene implements AutoCloseable {
             draw.bytes = (long) batch.quads * (4 * HardcodedVertex.STRIDE + 6 * 4);
             meshBytes += draw.bytes;
             // These are per-frame draws. No retained scene instances can outlive their meshes.
-            int category = batch.blockAtlas ? 0 : InstanceCategoryBit.PARTICLE;
+            int category = batch.damage ? InstanceCategoryBit.DECAL_STATIC
+                    : batch.blockAtlas ? 0 : InstanceCategoryBit.PARTICLE;
             api.drawInstance(draw.mesh, batch.transform, category, 1, draw.blend);
             batches++; total += batch.quads;
-            if (batch.weather) {
+            if (batch.damage) {
+                damage += batch.quads;
+                damageHash = CapturedEffectBatch.mix(damageHash, batch.contentHash);
+            } else if (batch.weather) {
                 precipitation += batch.quads;
                 weatherHash = CapturedEffectBatch.mix(weatherHash, batch.contentHash);
             } else {
@@ -162,6 +168,8 @@ public final class EffectScene implements AutoCloseable {
     public int batchCount() { return batches; }
     public int particleQuads() { return particles; }
     public int weatherQuads() { return precipitation; }
+    public int damageQuads() { return damage; }
+    public long damageGeometryHash() { return damageHash; }
     public long skippedBatchCount() { return skippedBatches; }
     public long skippedQuadCount() { return skippedQuads; }
     public long retainedBytes() { return textureBytes + meshBytes; }
@@ -206,7 +214,8 @@ public final class EffectScene implements AutoCloseable {
             if (texture.material == 0 && (!texture.owned || texture.handle == 0)) textures[i] = null;
         }
         if (failure != null) throw failure;
-        closed = true; atlas = 0; batches = particles = precipitation = 0;
+        closed = true; atlas = 0; batches = particles = precipitation = damage = 0;
+        damageHash = 0;
         particleHash = weatherHash = 0;
     }
     private boolean referenced(Texture texture) {

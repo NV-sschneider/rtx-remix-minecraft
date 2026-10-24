@@ -24,13 +24,14 @@ import org.objectweb.asm.tree.VarInsnNode;
 public final class EffectCaptureTransformer implements IClassTransformer {
     private static final String PARTICLES = "net.minecraft.client.particle.ParticleManager";
     private static final String WEATHER = "net.minecraft.client.renderer.EntityRenderer";
+    private static final String DAMAGE = "net.minecraft.client.renderer.RenderGlobal";
     private static final String UPLOADER = "net.minecraft.client.renderer.WorldVertexBufferUploader";
     private static final String TEXTURES = "net.minecraft.client.renderer.texture.TextureManager";
     private static final String HOOKS = "com/nvidia/rtxremix/forge/effect/EffectCaptureHooks";
 
     @Override public byte[] transform(String name, String transformedName, byte[] bytes) {
         if (bytes == null || !(PARTICLES.equals(transformedName) || WEATHER.equals(transformedName)
-                || UPLOADER.equals(transformedName) || TEXTURES.equals(transformedName))) return bytes;
+                || DAMAGE.equals(transformedName) || UPLOADER.equals(transformedName) || TEXTURES.equals(transformedName))) return bytes;
         ClassReader reader = new ClassReader(bytes);
         ClassNode type = new ClassNode(Opcodes.ASM5);
         reader.accept(type, 0);
@@ -41,6 +42,10 @@ public final class EffectCaptureTransformer implements IClassTransformer {
                     || named(method.name, "renderLitParticles", "func_78872_b"))) changed |= scope(method, false);
             else if (WEATHER.equals(transformedName) && "(F)V".equals(method.desc)
                     && named(method.name, "renderRainSnow", "func_78474_d")) changed |= scope(method, true);
+            else if (DAMAGE.equals(transformedName)
+                    && "(Lnet/minecraft/client/renderer/Tessellator;Lnet/minecraft/client/renderer/BufferBuilder;Lnet/minecraft/entity/Entity;F)V".equals(method.desc)
+                    && named(method.name, "drawBlockDamageTexture", "func_174981_a"))
+                changed |= scope(method, "beginDamage", 3, 4);
             else if (UPLOADER.equals(transformedName) && "(Lnet/minecraft/client/renderer/BufferBuilder;)V".equals(method.desc)
                     && named(method.name, "draw", "func_181679_a")) changed |= observe(method, "drawBuffer", true);
             else if (TEXTURES.equals(transformedName) && "(Lnet/minecraft/util/ResourceLocation;)V".equals(method.desc)
@@ -53,12 +58,14 @@ public final class EffectCaptureTransformer implements IClassTransformer {
     }
 
     private static boolean scope(MethodNode method, boolean weather) {
-        String beginHook = weather ? "beginWeather" : "beginParticles";
+        return scope(method, weather ? "beginWeather" : "beginParticles", weather ? -1 : 1, weather ? 1 : 2);
+    }
+    private static boolean scope(MethodNode method, String beginHook, int entitySlot, int partialTicksSlot) {
         if (hasHook(method, beginHook)) return false;
         InsnList begin = new InsnList();
-        if (!weather) begin.add(new VarInsnNode(Opcodes.ALOAD, 1));
-        begin.add(new VarInsnNode(Opcodes.FLOAD, weather ? 1 : 2));
-        begin.add(hook(beginHook, weather ? "(F)V" : "(Ljava/lang/Object;F)V"));
+        if (entitySlot >= 0) begin.add(new VarInsnNode(Opcodes.ALOAD, entitySlot));
+        begin.add(new VarInsnNode(Opcodes.FLOAD, partialTicksSlot));
+        begin.add(hook(beginHook, entitySlot < 0 ? "(F)V" : "(Ljava/lang/Object;F)V"));
         LabelNode start = new LabelNode(), end = new LabelNode(), handler = new LabelNode();
         begin.add(start);
         method.instructions.insert(begin);

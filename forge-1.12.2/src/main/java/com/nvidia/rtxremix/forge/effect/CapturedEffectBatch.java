@@ -15,7 +15,7 @@ public final class CapturedEffectBatch {
     ByteBuffer vertices = direct(64 * 4 * HardcodedVertex.STRIDE);
     Object textureIdentity;
     int textureId;
-    boolean weather, blockAtlas;
+    boolean weather, blockAtlas, damage;
     long blend;
     double originX, originY, originZ;
     int quads;
@@ -49,7 +49,7 @@ public final class CapturedEffectBatch {
     }
 
     void clear() {
-        textureIdentity = null; textureId = 0; quads = 0; vertices.clear();
+        textureIdentity = null; textureId = 0; quads = 0; damage = false; vertices.clear();
         contentHash = 0xcbf29ce484222325L;
     }
     static long mix(long hash, long value) { return (hash ^ value) * 0x100000001b3L; }
