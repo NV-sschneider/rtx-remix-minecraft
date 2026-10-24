@@ -50,7 +50,7 @@ public final class ItemCaptureHooks {
     private static EntityItem owner;
     private static CapturedItem active;
     private static int entityDepth, modelDepth, occurrence, quadStart;
-    private static int supplementaryStart, supplementaryVertices;
+    private static int supplementaryStart, supplementaryVertices, supplementaryLights;
     private static double originX, originY, originZ;
     private static TextureAtlasSprite sprite;
     private static boolean rejected;
@@ -70,15 +70,19 @@ public final class ItemCaptureHooks {
         for (int i = 0; i < POOL.size(); i++) POOL.get(i).clear();
         PARTS.clear();
         GEOMETRY.truncate(0);
+        HeldItemLights.reset();
     }
     private static void clearScope() { owner = null; active = null; sprite = null; entityDepth = modelDepth = 0; }
 
     public static void beginFirstPerson() { if (armed) occurrence = 0; }
     public static boolean modelScopeOpen() { return armed && modelDepth != 0; }
-    public static void beginSupplementary() { supplementaryStart = PARTS.size(); supplementaryVertices = GEOMETRY.count(); }
+    public static void beginSupplementary() {
+        supplementaryStart = PARTS.size(); supplementaryVertices = GEOMETRY.count(); supplementaryLights = HeldItemLights.checkpoint();
+    }
     public static void discardSupplementary() {
         for (int i = PARTS.size() - 1; i >= supplementaryStart; i--) PARTS.remove(i).clear();
         GEOMETRY.truncate(supplementaryVertices);
+        HeldItemLights.truncate(supplementaryLights);
         clearScope();
     }
 
@@ -152,6 +156,11 @@ public final class ItemCaptureHooks {
         } else {
             active.fingerprint = GEOMETRY.fingerprint(active.firstVertex, active.vertexCount);
             PARTS.add(active);
+            if (active.owner instanceof EntityLivingBase) {
+                try { HeldItemLights.record((EntityLivingBase) active.owner, (ItemStack) active.stack,
+                        active.categoryFlags, active.occurrence, active.transform); }
+                catch (RuntimeException | LinkageError error) { fail(error); return; }
+            }
         }
         active = null;
         sprite = null;

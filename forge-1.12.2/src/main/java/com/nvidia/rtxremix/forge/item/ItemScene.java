@@ -90,6 +90,13 @@ public final class ItemScene implements AutoCloseable {
     }
 
     public int count() { checkThread(); return count; }
+    public boolean containsOccurrence(Object holder, int category, int occurrence) {
+        checkThread();
+        if (occurrence < 0 || occurrence >= ItemCaptureHooks.MAX_OWNER_PARTS) return false;
+        Owner owner = owners.get(ownerProbe.set(holder, category));
+        Part part = owner == null ? null : owner.parts[occurrence];
+        return part != null && part.instance != 0 && part.lastSeen == frame;
+    }
     public int categoryCount(int category) {
         checkThread();
         int count = 0;
