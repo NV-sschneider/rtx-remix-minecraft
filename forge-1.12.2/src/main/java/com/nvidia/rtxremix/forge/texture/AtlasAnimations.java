@@ -26,6 +26,7 @@ public final class AtlasAnimations implements AutoCloseable {
     private final Object atlas;
     private final Thread renderThread = Thread.currentThread();
     private final AtlasPatchQueue queue;
+    private AtlasMaterialMaps materialMaps;
     private final TextureBatchEntry entry = new TextureBatchEntry();
     private final TexturePatchInfo update = new TexturePatchInfo();
     private final Object[] scopes = new Object[16];
@@ -53,6 +54,9 @@ public final class AtlasAnimations implements AutoCloseable {
         AtlasUploadHooks.attach(this);
     }
 
+    /** Borrows matching map atlases, whose lifetime encloses this observer. */
+    public void materialMaps(AtlasMaterialMaps maps) { checkThread(); materialMaps = maps; }
+
     /** Applies at most 64 patches and 4 MiB before scene submission; idle frames do no work. */
     public void flush() {
         checkThread();
@@ -65,10 +69,13 @@ public final class AtlasAnimations implements AutoCloseable {
             LOGGER.warn("Animated atlas uploads exceeded the bounded rectangle cache or used invalid bounds; {} uploads omitted",
                     queue.droppedCount());
         }
-        TexturePatch[] patches = queue.batch();
+        TexturePatch[] patches = queue.batch(materialMaps == null || materialMaps.resourceCount() == 0
+                ? AtlasPatchQueue.BYTES_PER_FLUSH : AtlasPatchQueue.BYTES_PER_FLUSH / 4);
         if (patches == null) return;
         entry.patches = patches;
+        if (materialMaps != null) update.entries = materialMaps.batch(entry);
         publisher.publish(update);
+        if (materialMaps != null) materialMaps.published(update.entries);
         queue.acknowledge(patches.length);
         updateCount++;
         patchCount += patches.length;
@@ -105,7 +112,10 @@ public final class AtlasAnimations implements AutoCloseable {
         // TextureUtil uploads Minecraft's ARGB ints using BGRA / UNSIGNED_INT_8_8_8_8_REV.
         if (target != 3553 || level != 0) return;
         if (format != 32993 || type != 33639) return;
-        try { queue.capture(x, y, width, height, pixels); }
+        try {
+            queue.capture(x, y, width, height, pixels);
+            if (materialMaps != null) materialMaps.observed(x, y, width, height);
+        }
         // Observer failures are reported by the Remix flush, never from vanilla's
         // GL upload call (including direct-buffer allocation failures).
         catch (Throwable failure) { observationFailure = failure; }
@@ -118,6 +128,7 @@ public final class AtlasAnimations implements AutoCloseable {
         AtlasUploadHooks.detach(this);
         queue.clear();
         entry.patches = null;
+        materialMaps = null;
         for (int i = 0; i < scopes.length; i++) scopes[i] = null;
         depth = 0;
     }

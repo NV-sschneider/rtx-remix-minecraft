@@ -95,11 +95,17 @@ final class AtlasPatchQueue {
     }
 
     TexturePatch[] batch() {
+        return batch(BYTES_PER_FLUSH);
+    }
+
+    TexturePatch[] batch(int byteLimit) {
         int count = 0;
         int bytes = 0;
         for (int i = 0; i < pendingCount; i++) {
             Slot slot = pending[(pendingHead + i) % pending.length];
-            if (count == PATCHES_PER_FLUSH || slot.bytes > BYTES_PER_FLUSH - bytes) break;
+            // A non-PBR upload can be larger than the material-batch share. It
+            // keeps the existing 4 MiB single-patch bound and runs by itself.
+            if (count == PATCHES_PER_FLUSH || count != 0 && slot.bytes > byteLimit - bytes) break;
             count++;
             bytes += slot.bytes;
         }

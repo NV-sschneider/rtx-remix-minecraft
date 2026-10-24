@@ -16,6 +16,7 @@ import com.nvidia.rtxremix.Float3D;
 import com.nvidia.rtxremix.forge.light.BlockLightScene;
 import com.nvidia.rtxremix.forge.light.SectionLights;
 import com.nvidia.rtxremix.forge.texture.AtlasAnimations;
+import com.nvidia.rtxremix.forge.texture.AtlasMaterialMaps;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.ArrayDeque;
@@ -102,6 +103,7 @@ public final class TerrainCapture implements AutoCloseable {
     private final int[] colors = new int[4];
     private long atlas;
     private AtlasAnimations animations;
+    private AtlasMaterialMaps materialMaps;
     private long vertexColorExtension;
     private boolean texturesDirty = true;
     private boolean allDirty;
@@ -204,6 +206,10 @@ public final class TerrainCapture implements AutoCloseable {
     public boolean isBlockLightCaptured(BlockPos pos) { return lights.contains(pos); }
     /** Borrowed by world item/effect scenes; those must close before this atlas. */
     public long getAtlasTexture() { return atlas; }
+    public int getPbrSpriteCount() { return materialMaps == null ? 0 : materialMaps.spriteCount(); }
+    public int getPbrTextureCount() { return materialMaps == null ? 0 : materialMaps.resourceCount(); }
+    public long getPbrUpdateCount() { return materialMaps == null ? 0 : materialMaps.updateCount(); }
+    public int getPbrSkippedCount() { return materialMaps == null ? 0 : materialMaps.skippedCount(); }
     public long getAtlasTextureUpdates() { return animations == null ? 0 : animations.updateCount(); }
     public long getAtlasSpriteUpdates(String name) {
         TextureAtlasSprite sprite = mc.getTextureMapBlocks().getAtlasSprite(name);
@@ -232,7 +238,8 @@ public final class TerrainCapture implements AutoCloseable {
     public long getStainedGlassVertexCount() { return stainedGlassVertices; }
     public boolean isCapacityLimited() { return capacityLimited || schedule.failures() != 0; }
     public int getResourceCount() {
-        int result = lights.resourceCount() + pageResources + (atlas == 0 ? 0 : 1) + (vertexColorExtension == 0 ? 0 : 1);
+        int result = lights.resourceCount() + pageResources + (atlas == 0 ? 0 : 1) + (vertexColorExtension == 0 ? 0 : 1)
+                + (materialMaps == null ? 0 : materialMaps.resourceCount());
         for (long material : materials) if (material != 0) result++;
         return result;
     }
@@ -543,7 +550,10 @@ public final class TerrainCapture implements AutoCloseable {
             GL11.glGetTexImage(GL11.GL_TEXTURE_2D, 0, GL11.GL_RGBA, GL11.GL_UNSIGNED_BYTE, pixels);
             atlas = api.createTextureFromMemory(TextureFromMemoryInfo.builder()
                     .hash(HASHES.incrementAndGet()).pixelData(pixels).size(width, height).build());
+            materialMaps = new AtlasMaterialMaps(api);
+            materialMaps.initialize(mc, pixels, width, height);
             animations = new AtlasAnimations(api, mc.getTextureMapBlocks(), atlas, width, height);
+            animations.materialMaps(materialMaps);
             for (BlockRenderLayer layer : LAYERS) {
                 boolean cutout = layer == BlockRenderLayer.CUTOUT || layer == BlockRenderLayer.CUTOUT_MIPPED;
                 MaterialInfo material = new MaterialInfo(HASHES.incrementAndGet());
@@ -556,12 +566,13 @@ public final class TerrainCapture implements AutoCloseable {
                         .useDrawCallAlphaState(false)
                         .alphaTestType(cutout ? 4 : 7).alphaReferenceValue(cutout ? 128 : 0)
                         .blendEnabled(layer == BlockRenderLayer.TRANSLUCENT).build();
+                materialMaps.apply(material);
                 materials[layer.ordinal()] = api.createMaterial(material);
             }
-            materials[WATER] = api.createMaterial(FluidMaterials.water(HASHES.incrementAndGet(), atlas));
-            materials[LAVA] = api.createMaterial(FluidMaterials.lava(HASHES.incrementAndGet(), atlas));
-            materials[CLEAR_GLASS] = api.createMaterial(GlassMaterials.clear(HASHES.incrementAndGet(), atlas));
-            materials[STAINED_GLASS] = api.createMaterial(GlassMaterials.stained(HASHES.incrementAndGet(), atlas));
+            materials[WATER] = createPhysicalMaterial(FluidMaterials.water(HASHES.incrementAndGet(), atlas));
+            materials[LAVA] = createPhysicalMaterial(FluidMaterials.lava(HASHES.incrementAndGet(), atlas));
+            materials[CLEAR_GLASS] = createPhysicalMaterial(GlassMaterials.clear(HASHES.incrementAndGet(), atlas));
+            materials[STAINED_GLASS] = createPhysicalMaterial(GlassMaterials.stained(HASHES.incrementAndGet(), atlas));
             fluids.refreshSprites();
             vertexColorExtension = InstanceInfoBlendEXT.textureTimesVertexColor().allocNative(0);
             LOGGER.info("Captured block atlas {}x{}; terrain follows Minecraft render distance", width, height);
@@ -571,6 +582,11 @@ public final class TerrainCapture implements AutoCloseable {
             GlStateManager.bindTexture(oldTexture);
             GlStateManager.setActiveTexture(oldActive);
         }
+    }
+
+    private long createPhysicalMaterial(MaterialInfo material) {
+        materialMaps.normal(material);
+        return api.createMaterial(material);
     }
 
     private void retireColumn(TerrainSchedule.Column column) {
@@ -653,6 +669,10 @@ public final class TerrainCapture implements AutoCloseable {
         }
         boolean materialsReleased = true;
         for (long material : materials) if (material != 0) materialsReleased = false;
+        if (materialMaps != null && materialsReleased) {
+            try { materialMaps.close(); materialMaps = null; }
+            catch (RuntimeException | LinkageError error) { failure = appendFailure(failure, error); }
+        }
         if (atlas != 0 && materialsReleased) {
             try {
                 api.destroyTexture(atlas);
