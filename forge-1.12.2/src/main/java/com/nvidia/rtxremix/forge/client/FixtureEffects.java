@@ -31,7 +31,7 @@ final class FixtureEffects implements AutoCloseable {
     private static final long TIMEOUT = TimeUnit.SECONDS.toNanos(180);
     private static final long PROGRESS = TimeUnit.SECONDS.toNanos(10);
     private static final int SETTLE_FRAMES = 20;
-    private enum Phase { ARRIVE, BASELINE, PARTICLES, PARTICLE_MOTION, RAIN, RAIN_READY, RAIN_MOTION,
+    private enum Phase { ARRIVE, BASELINE, PARTICLES, PARTICLE_MOTION, CUSTOM, REVISIONS, DELETED, REPLACED, RAIN, RAIN_READY, RAIN_MOTION,
         MOVE, MOVED, RELOAD, RELOADED, CLEAR, DRY, RETURN, DONE }
     private final Minecraft mc;
     private final ClientEvents events;
@@ -51,6 +51,8 @@ final class FixtureEffects implements AutoCloseable {
     private long since = System.nanoTime(), lastProgress = since;
     private long readyFrame = -1, particleFrames, weatherFrames, particleHash, weatherHash;
     private long reloadBaseline;
+    private long revisionBaseline;
+    private FixtureEffectSprites custom;
     private int ticks, bursts;
     private boolean moved, closed;
 
@@ -88,6 +90,7 @@ final class FixtureEffects implements AutoCloseable {
         }
         if (System.nanoTime() - lastProgress >= PROGRESS) { log("PROGRESS"); lastProgress = System.nanoTime(); }
         if (phase != Phase.RETURN && phase != Phase.DONE) holdPose();
+        if (custom != null) custom.tick();
         if (emitting() && ++ticks % 20 == 0) seedParticles();
         switch (phase) {
             case ARRIVE:
@@ -116,6 +119,39 @@ final class FixtureEffects implements AutoCloseable {
                         && events.particleFrameCount() >= particleFrames + SETTLE_FRAMES
                         && events.particleGeometryHash() != particleHash)) {
                     capture("effects-particles"); log("PARTICLE_PASS");
+                    clearParticles();
+                    mc.gameSettings.particleSetting = 0;
+                    custom = new FixtureEffectSprites(mc, layout.x, layout.y, layout.z);
+                    transition(Phase.CUSTOM);
+                }
+                break;
+            case CUSTOM:
+                if (settled(customReady())) {
+                    capture("effects-additive-triangles"); log("CUSTOM_PASS");
+                    revisionBaseline = events.effectTextureUpdateCount();
+                    transition(Phase.REVISIONS);
+                }
+                break;
+            case REVISIONS:
+                if (settled(customReady() && events.effectTextureUpdateCount() > revisionBaseline + 1
+                        && events.effectTexturePatchCount() > 0 && events.effectTextureDroppedUpdateCount() == 0)) {
+                    capture("effects-dynamic-revisions"); log("REVISION_PASS");
+                    custom.close(); custom = null;
+                    transition(Phase.DELETED);
+                }
+                break;
+            case DELETED:
+                if (settled(events.effectAdditivePrimitives() == 0 && events.effectTrianglePrimitives() == 0
+                        && events.effectDirtyTextureCount() == 0)) {
+                    capture("effects-dynamic-deleted"); log("DELETE_PASS");
+                    custom = new FixtureEffectSprites(mc, layout.x, layout.y, layout.z);
+                    transition(Phase.REPLACED);
+                }
+                break;
+            case REPLACED:
+                if (settled(customReady())) {
+                    capture("effects-dynamic-replaced"); log("REPLACE_PASS");
+                    seedParticles();
                     action = server.callFromMainThread(() -> {
                         requireWorld(); FixtureEnvironment.setSky(world, 9000L, true); return null;
                     });
@@ -165,7 +201,8 @@ final class FixtureEffects implements AutoCloseable {
                 break;
             case RELOAD:
                 if (settled(events.textureReloadCount() > reloadBaseline && wet() && markerReady()
-                        && events.particleQuads() > 0 && events.effectTextureSnapshotCount() > 0)) {
+                        && events.particleQuads() > 0 && events.effectTextureSnapshotCount() > 0 && customReady()
+                        && events.effectTextureUpdateCount() > 0)) {
                     particleFrames = events.particleFrameCount(); particleHash = events.particleGeometryHash();
                     weatherFrames = events.weatherFrameCount(); weatherHash = events.weatherGeometryHash();
                     transition(Phase.RELOADED);
@@ -177,6 +214,7 @@ final class FixtureEffects implements AutoCloseable {
                         && events.weatherFrameCount() >= weatherFrames + SETTLE_FRAMES
                         && events.particleGeometryHash() != particleHash && events.weatherGeometryHash() != weatherHash)) {
                     capture("effects-rain-reloaded"); log("RELOAD_PASS");
+                    custom.close(); custom = null;
                     action = server.callFromMainThread(() -> {
                         requireWorld(); FixtureEnvironment.setSky(world, 9000L, false); return null;
                     });
@@ -272,6 +310,9 @@ final class FixtureEffects implements AutoCloseable {
         mc.effectRenderer.clearEffects(clientWorld);
     }
     private boolean wet() { return clientWorld.getRainStrength(1) > 0.95f && events.weatherQuads() > 0; }
+    private boolean customReady() {
+        return custom != null && events.effectAdditivePrimitives() >= 4 && events.effectTrianglePrimitives() >= 4;
+    }
     private boolean dry() {
         return clientWorld.getRainStrength(1) < 0.01f && events.particleQuads() == 0
                 && events.weatherQuads() == 0 && events.effectBatchCount() == 0;
@@ -327,17 +368,28 @@ final class FixtureEffects implements AutoCloseable {
                 + " weatherHash=" + events.weatherGeometryHash() + " liveSeeded=" + liveSeeded() + " bursts=" + bursts
                 + " textureSnapshots=" + events.effectTextureSnapshotCount() + " reloads=" + events.textureReloadCount()
                 + " skippedQuads=" + events.effectSkippedQuads()
+                + " additive=" + events.effectAdditivePrimitives() + " triangles=" + events.effectTrianglePrimitives()
+                + " textureUpdates=" + events.effectTextureUpdateCount() + " texturePatches=" + events.effectTexturePatchCount()
+                + " dirtyTextures=" + events.effectDirtyTextureCount() + " droppedUpdates=" + events.effectTextureDroppedUpdateCount()
+                + " authoredRevision=" + (custom == null ? -1 : custom.revision())
                 + " rain=" + clientWorld.getRainStrength(1) + " cameraMoved=" + moved;
     }
 
     /** Call on every controller cleanup path, including fixture failure and world loss. */
     @Override public void close() {
         if (closed) return;
-        for (Particle particle : seeded) particle.setExpired();
-        seeded.clear();
-        if (mc.world == clientWorld && mc.getIntegratedServer() == server) mc.effectRenderer.clearEffects(clientWorld);
-        mc.gameSettings.particleSetting = originalParticleSetting;
-        closed = true;
+        try {
+            if (custom != null) { custom.close(); custom = null; }
+        } finally {
+            for (Particle particle : seeded) particle.setExpired();
+            seeded.clear();
+            try {
+                if (mc.world == clientWorld && mc.getIntegratedServer() == server) mc.effectRenderer.clearEffects(clientWorld);
+            } finally {
+                mc.gameSettings.particleSetting = originalParticleSetting;
+                closed = true;
+            }
+        }
     }
     static final class Layout {
         final int x, y, z;

@@ -32,7 +32,7 @@ final class FixtureWindowOverlay implements AutoCloseable {
     private static final long SETTLE_NANOS = TimeUnit.MILLISECONDS.toNanos(1500);
     private enum Phase { BASELINE, GAME_GRAPHICS, GAME_DEVELOPER, GAME_CLOSED, INVENTORY,
         INVENTORY_GRAPHICS, INVENTORY_DEVELOPER, INVENTORY_CLOSED, FULLSCREEN, WINDOWED,
-        RECREATED_MENU, RESIZED, RESIZED_MENU, RESTORE, RETURN, DONE }
+        RECREATED_MENU, RESIZED, RESIZED_MENU, RESTORE, MINIMIZE_REQUEST, MINIMIZED, RESTORE_REQUEST, RETURN, DONE }
     private final Minecraft mc;
     private final ClientEvents events;
     private final IntegratedServer server;
@@ -54,6 +54,7 @@ final class FixtureWindowOverlay implements AutoCloseable {
     private long readySince;
     private int resolvedMenu, resizedWidth, resizedHeight;
     private boolean closed;
+    private long minimizedFrame;
 
     FixtureWindowOverlay(Minecraft mc, ClientEvents events, IntegratedServer server, WorldServer world,
             String saveName, FixtureTerrain.Output output) {
@@ -164,7 +165,26 @@ final class FixtureWindowOverlay implements AutoCloseable {
                 }
                 break;
             case RESTORE:
-                if (settled(menuClosed() && gameplay())) { restoreWindow(); transition(Phase.RETURN); }
+                if (settled(menuClosed() && gameplay())) {
+                    restoreWindow();
+                    transition(Boolean.getBoolean("rlcraftremix.smoke.windowMinimize") ? Phase.MINIMIZE_REQUEST : Phase.RETURN);
+                }
+                break;
+            case MINIMIZE_REQUEST:
+                // The external fixture helper minimizes only this owned client HWND.
+                if (!Display.isVisible()) { minimizedFrame = events.renderedFrames(); transition(Phase.MINIMIZED); }
+                break;
+            case MINIMIZED:
+                if (Display.isVisible()) throw new IllegalStateException("Window restored before minimized validation");
+                if (events.renderedFrames() != minimizedFrame) throw new IllegalStateException("Native scene captured while minimized");
+                if (System.nanoTime() - since >= TimeUnit.SECONDS.toNanos(1)) {
+                    log("MINIMIZED_PASS"); transition(Phase.RESTORE_REQUEST);
+                }
+                break;
+            case RESTORE_REQUEST:
+                if (settled(Display.isVisible() && menuClosed() && gameplay())) {
+                    capture("window-resumed"); log("RESUME_PASS"); transition(Phase.RETURN);
+                }
                 break;
             case RETURN:
                 if (settled(menuClosed() && gameplay() && mc.isFullScreen() == originalFullscreen

@@ -29,13 +29,16 @@ import net.minecraft.world.WorldServer;
 /** Owned-world checks for native hand/body categories and the vanilla equip/use animation path. */
 final class FixtureFirstPerson implements AutoCloseable {
     private enum Phase { ARRIVE, EMPTY, EQUIP_SWORD, SWORD, SWING, EQUIP_BOW, BOW, DRAW_START, DRAW,
-        WIDE_FOV, THIRD_PERSON, FIRST_PERSON, HIDDEN_HUD, HUD_RESTORED, INVENTORY, RELOAD, RETURN, DONE }
+        WIDE_FOV, THIRD_PERSON, FIRST_PERSON, HIDDEN_HUD, HUD_RESTORED, INVENTORY, RELOAD,
+        DAMAGE_EARLY, DAMAGE_LATE, DAMAGE_RELOAD, DAMAGE_CANCELLED, RETURN, DONE }
+    private static final int BREAKER_ID = Integer.MIN_VALUE + 7112;
     private final Minecraft mc;
     private final ClientEvents events;
     private final IntegratedServer server;
     private final WorldServer world;
     private final String save;
     private final Layout layout;
+    private final BlockPos damageBlock;
     private final FixtureTerrain.Output output;
     private final UUID playerId;
     private final double returnX, returnY, returnZ;
@@ -46,6 +49,7 @@ final class FixtureFirstPerson implements AutoCloseable {
     private Phase phase = Phase.ARRIVE;
     private Future<?> action;
     private long since = System.nanoTime(), progress = since, frame = -1, motionBaseline, reloadBaseline;
+    private long damageBaseline;
     private int lastSwingTick = Integer.MIN_VALUE;
     private GuiScreen ownedScreen;
     private boolean cleanupQueued;
@@ -57,6 +61,7 @@ final class FixtureFirstPerson implements AutoCloseable {
             FixtureTerrain.Output output) {
         this.mc = mc; this.events = events; this.server = server; this.world = world;
         this.save = save; this.layout = layout; this.output = output;
+        damageBlock = new BlockPos(layout.x, layout.y + 2, layout.z + 1);
         playerId = mc.player.getUniqueID(); selectedSlot = mc.player.inventory.currentItem;
         returnX = x; returnY = y; returnZ = z; returnYaw = yaw; returnPitch = pitch;
         originalView = mc.gameSettings.thirdPersonView; originalHud = mc.gameSettings.hideGUI;
@@ -184,6 +189,31 @@ final class FixtureFirstPerson implements AutoCloseable {
             case RELOAD:
                 if (settled(events.textureReloadCount() > reloadBaseline && viewItems() > 0 && shadow(), 30)) {
                     capture("firstperson-reloaded"); log("RELOAD_PASS");
+                    mc.renderGlobal.sendBlockBreakProgress(BREAKER_ID, damageBlock, 1); transition(Phase.DAMAGE_EARLY);
+                }
+                break;
+            case DAMAGE_EARLY:
+                if (settled(events.damageQuads() > 0, 30)) {
+                    capture("damage-stage-1"); log("DAMAGE_EARLY_PASS");
+                    damageBaseline = events.damageGeometryHash();
+                    mc.renderGlobal.sendBlockBreakProgress(BREAKER_ID, damageBlock, 8); transition(Phase.DAMAGE_LATE);
+                }
+                break;
+            case DAMAGE_LATE:
+                if (settled(events.damageQuads() > 0 && events.damageGeometryHash() != damageBaseline, 30)) {
+                    capture("damage-stage-8"); log("DAMAGE_STAGE_CHANGE_PASS");
+                    reloadBaseline = events.textureReloadCount(); events.reload(); transition(Phase.DAMAGE_RELOAD);
+                }
+                break;
+            case DAMAGE_RELOAD:
+                if (settled(events.textureReloadCount() > reloadBaseline && events.damageQuads() > 0, 30)) {
+                    capture("damage-reloaded"); log("DAMAGE_RELOAD_PASS");
+                    mc.renderGlobal.sendBlockBreakProgress(BREAKER_ID, damageBlock, -1); transition(Phase.DAMAGE_CANCELLED);
+                }
+                break;
+            case DAMAGE_CANCELLED:
+                if (settled(events.damageQuads() == 0, 30)) {
+                    capture("damage-cancelled"); log("DAMAGE_CANCEL_PASS");
                     restoreClient(); action = restoreServer(); cleanupQueued = true; transition(Phase.RETURN);
                 }
                 break;
@@ -252,9 +282,12 @@ final class FixtureFirstPerson implements AutoCloseable {
                 + " shadowHeld=" + shadowItems() + " normal=" + EntityCaptureHooks.normallyRendered(playerId)
                 + " active=" + mc.player.isHandActive() + " useTicks=" + mc.player.getItemInUseMaxCount()
                 + " useKey=" + mc.gameSettings.keyBindUseItem.isKeyDown()
+                + " damageQuads=" + events.damageQuads()
                 + " itemUpdates=" + events.itemTransformUpdates(playerId) + " frames=" + events.renderedFrames();
     }
     private void restoreClient() {
+        if (mc.getIntegratedServer() == server && mc.world != null)
+            mc.renderGlobal.sendBlockBreakProgress(BREAKER_ID, damageBlock, -1);
         if (ownedScreen != null && mc.currentScreen == ownedScreen && mc.player != null) mc.player.closeScreen();
         ownedScreen = null;
         mc.gameSettings.thirdPersonView = originalView; mc.gameSettings.hideGUI = originalHud; mc.gameSettings.fovSetting = originalFov;

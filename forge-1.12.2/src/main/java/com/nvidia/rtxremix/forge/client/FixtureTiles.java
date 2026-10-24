@@ -15,6 +15,9 @@ import net.minecraft.client.renderer.BufferBuilder;
 import net.minecraft.client.renderer.Tessellator;
 import net.minecraft.client.renderer.texture.TextureAtlasSprite;
 import net.minecraft.client.renderer.texture.TextureMap;
+import net.minecraft.client.renderer.texture.DynamicTexture;
+import net.minecraft.client.renderer.texture.TextureUtil;
+import net.minecraft.util.ResourceLocation;
 import net.minecraft.client.renderer.tileentity.TileEntityRendererDispatcher;
 import net.minecraft.client.renderer.tileentity.TileEntitySpecialRenderer;
 import net.minecraft.client.renderer.vertex.DefaultVertexFormats;
@@ -33,7 +36,8 @@ import org.lwjgl.opengl.GL11;
 /** Original client-only test renderers exercise normal CPU draws and two owners of a shared fast batch. */
 final class FixtureTiles implements AutoCloseable {
     private static final long TIMEOUT = TimeUnit.SECONDS.toNanos(240), PROGRESS = TimeUnit.SECONDS.toNanos(10);
-    private enum Phase { ARRIVE, INSTALL, READY, ANIMATE, RELOAD, RELOADED, REMOVE, REMOVED, RETURN, DONE }
+    private enum Phase { ARRIVE, INSTALL, READY, ANIMATE, TEXTURE_BASE, TEXTURE_UPDATE, TEXTURE_PATCH,
+        TEXTURE_REALLOCATED, RELOAD, RELOADED, REMOVE, REMOVED, RETURN, DONE }
     private final Minecraft mc;
     private final ClientEvents events;
     private final IntegratedServer server;
@@ -51,6 +55,9 @@ final class FixtureTiles implements AutoCloseable {
     private final FastRenderer fastRenderer = new FastRenderer();
     private TileEntitySpecialRenderer<?> originalNormalRenderer, originalFastRenderer;
     private boolean normalPresent, fastPresent, installed, closed;
+    private DynamicTexture dynamicTexture;
+    private ResourceLocation dynamicLocation;
+    private long textureBaseline;
     private Phase phase = Phase.ARRIVE;
     private Future<?> action;
     private long since = System.nanoTime(), lastProgress = since, readyFrame = -1, reloadBaseline, fastBaseline;
@@ -97,8 +104,40 @@ final class FixtureTiles implements AutoCloseable {
                 break;
             case ANIMATE:
                 if (settled(animated())) {
-                    capture("tiles-animated"); log("ANIMATION_PASS"); reloadBaseline = events.textureReloadCount();
-                    events.reload(); transition(Phase.RELOAD);
+                    capture("tiles-animated"); log("ANIMATION_PASS");
+                    dynamicTexture = new DynamicTexture(16, 16); fillTexture(0xffff4040);
+                    dynamicLocation = mc.getTextureManager().getDynamicTextureLocation("rlcraftremix_smoke_tile", dynamicTexture);
+                    normalRenderer.texture = dynamicLocation; transition(Phase.TEXTURE_BASE);
+                }
+                break;
+            case TEXTURE_BASE:
+                if (settled(captured() && events.tileTextureCurrent(layout.tiles[0], dynamicTexture.getGlTextureId()))) {
+                    capture("tiles-texture-red"); textureBaseline = events.entityTextureUpdates();
+                    fillTexture(0xff40ff40); transition(Phase.TEXTURE_UPDATE);
+                }
+                break;
+            case TEXTURE_UPDATE:
+                if (settled(captured() && events.entityTextureUpdates() > textureBaseline && events.tileTextureCurrent(layout.tiles[0], dynamicTexture.getGlTextureId()))) {
+                    capture("tiles-texture-green"); log("TEXTURE_CPU_UPDATE_PASS");
+                    textureBaseline = events.entityTextureUpdates();
+                    java.awt.image.BufferedImage patch = new java.awt.image.BufferedImage(8, 8, java.awt.image.BufferedImage.TYPE_INT_ARGB);
+                    for (int x = 0; x < 8; x++) for (int y = 0; y < 8; y++) patch.setRGB(x, y, 0xff4040ff);
+                    TextureUtil.uploadTextureImageSub(dynamicTexture.getGlTextureId(), patch, 4, 4, false, false);
+                    transition(Phase.TEXTURE_PATCH);
+                }
+                break;
+            case TEXTURE_PATCH:
+                if (settled(captured() && events.entityTextureUpdates() > textureBaseline && events.tileTextureCurrent(layout.tiles[0], dynamicTexture.getGlTextureId()))) {
+                    capture("tiles-texture-blue-patch"); log("TEXTURE_IMAGE_PATCH_PASS");
+                    dynamicTexture.deleteGlTexture();
+                    TextureUtil.allocateTexture(dynamicTexture.getGlTextureId(), 16, 16);
+                    fillTexture(0xffffff40); transition(Phase.TEXTURE_REALLOCATED);
+                }
+                break;
+            case TEXTURE_REALLOCATED:
+                if (settled(captured() && events.tileTextureCurrent(layout.tiles[0], dynamicTexture.getGlTextureId()))) {
+                    capture("tiles-texture-reallocated-yellow"); log("TEXTURE_REALLOCATION_PASS");
+                    reloadBaseline = events.textureReloadCount(); events.reload(); transition(Phase.RELOAD);
                 }
                 break;
             case RELOAD:
@@ -155,6 +194,12 @@ final class FixtureTiles implements AutoCloseable {
         if (fastPresent) dispatcher.renderers.put(FastTile.class, originalFastRenderer); else dispatcher.renderers.remove(FastTile.class);
         installed = false;
     }
+    private void fillTexture(int color) {
+        int[] pixels = dynamicTexture.getTextureData();
+        for (int y = 0; y < 16; y++) for (int x = 0; x < 16; x++)
+            pixels[y * 16 + x] = ((x / 4 + y / 4) & 1) == 0 ? color : 0xffffffff;
+        dynamicTexture.updateDynamicTexture();
+    }
     private boolean blocksReady() {
         for (BlockPos pos : layout.tiles) if (clientWorld.getBlockState(pos).getBlock() != Blocks.CHEST
                 || !(clientWorld.getTileEntity(pos) instanceof TileEntityChest)
@@ -209,10 +254,12 @@ final class FixtureTiles implements AutoCloseable {
         return "tilePhase=" + phase + " normalParts=" + events.tileTrianglePartCount(layout.tiles[0])
                 + " fastLeftParts=" + events.tileTrianglePartCount(layout.tiles[1]) + " fastRightParts=" + events.tileTrianglePartCount(layout.tiles[2])
                 + " fastRanges=" + FastTileCaptureHooks.capturedRangeCount() + " rejectedRanges=" + FastTileCaptureHooks.rejectedRangeCount()
-                + " unsupportedBatches=" + FastTileCaptureHooks.unsupportedBatchCount() + " reloads=" + events.textureReloadCount();
+                + " unsupportedBatches=" + FastTileCaptureHooks.unsupportedBatchCount() + " reloads=" + events.textureReloadCount()
+                + " textureUpdates=" + events.entityTextureUpdates() + " dirtyTextures=" + events.dirtyEntityTextures();
     }
     @Override public void close() {
         if (closed) return; restoreRenderersAndTiles();
+        if (dynamicLocation != null) { mc.getTextureManager().deleteTexture(dynamicLocation); dynamicLocation = null; dynamicTexture = null; }
         if (phase != Phase.DONE && mc.world == clientWorld && mc.getIntegratedServer() == server && mc.player != null
                 && playerId.equals(mc.player.getUniqueID())) {
             holdPose(returnX, returnY, returnZ, returnYaw, returnPitch);
@@ -250,25 +297,30 @@ final class FixtureTiles implements AutoCloseable {
         @Override public boolean hasFastRenderer() { return true; }
     }
     private static final class NormalRenderer extends TileEntitySpecialRenderer<NormalTile> {
+        ResourceLocation texture = TextureMap.LOCATION_BLOCKS_TEXTURE;
         @Override public void render(NormalTile tile, double x, double y, double z, float partialTicks, int destroyStage, float alpha) {
-            bindTexture(TextureMap.LOCATION_BLOCKS_TEXTURE);
+            bindTexture(texture);
             BufferBuilder target = Tessellator.getInstance().getBuffer(); target.begin(GL11.GL_QUADS, DefaultVertexFormats.BLOCK);
-            emit(target, tile, x, y, z, partialTicks, 220, 55, 45); Tessellator.getInstance().draw();
+            boolean atlas = texture == TextureMap.LOCATION_BLOCKS_TEXTURE;
+            emit(target, tile, x, y, z, partialTicks, atlas ? 220 : 255, atlas ? 55 : 255, atlas ? 45 : 255, atlas);
+            Tessellator.getInstance().draw();
         }
     }
     private static final class FastRenderer extends FastTESR<FastTile> {
         @Override public void renderTileEntityFast(FastTile tile, double x, double y, double z, float partialTicks,
                                                   int destroyStage, float alpha, BufferBuilder target) {
-            emit(target, tile, x, y, z, partialTicks, 45, 155, 235);
+            emit(target, tile, x, y, z, partialTicks, 45, 155, 235, true);
         }
     }
     private static void emit(BufferBuilder target, TileEntity tile, double x, double y, double z,
-                             float partialTicks, int red, int green, int blue) {
+                             float partialTicks, int red, int green, int blue, boolean atlas) {
         TextureAtlasSprite sprite = Minecraft.getMinecraft().getTextureMapBlocks().getAtlasSprite("minecraft:blocks/quartz_block_side");
+        float minU = atlas ? sprite.getMinU() : 0, maxU = atlas ? sprite.getMaxU() : 1;
+        float minV = atlas ? sprite.getMinV() : 0, maxV = atlas ? sprite.getMaxV() : 1;
         double top = 2 + Math.sin((tile.getWorld().getTotalWorldTime() + partialTicks) * 0.12 + tile.getPos().getX()) * 0.35;
-        target.pos(x - 0.25, y, z + 0.5).color(red, green, blue, 255).tex(sprite.getMinU(), sprite.getMaxV()).lightmap(240, 240).endVertex();
-        target.pos(x + 1.25, y, z + 0.5).color(red, green, blue, 255).tex(sprite.getMaxU(), sprite.getMaxV()).lightmap(240, 240).endVertex();
-        target.pos(x + 1.25, y + top, z + 0.5).color(red, green, blue, 255).tex(sprite.getMaxU(), sprite.getMinV()).lightmap(240, 240).endVertex();
-        target.pos(x - 0.25, y + top, z + 0.5).color(red, green, blue, 255).tex(sprite.getMinU(), sprite.getMinV()).lightmap(240, 240).endVertex();
+        target.pos(x - 0.25, y, z + 0.5).color(red, green, blue, 255).tex(minU, maxV).lightmap(240, 240).endVertex();
+        target.pos(x + 1.25, y, z + 0.5).color(red, green, blue, 255).tex(maxU, maxV).lightmap(240, 240).endVertex();
+        target.pos(x + 1.25, y + top, z + 0.5).color(red, green, blue, 255).tex(maxU, minV).lightmap(240, 240).endVertex();
+        target.pos(x - 0.25, y + top, z + 0.5).color(red, green, blue, 255).tex(minU, minV).lightmap(240, 240).endVertex();
     }
 }
