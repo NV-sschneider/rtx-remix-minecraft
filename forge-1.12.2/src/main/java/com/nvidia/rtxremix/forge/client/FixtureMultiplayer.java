@@ -68,6 +68,7 @@ final class FixtureMultiplayer implements AutoCloseable {
 
     boolean tick() throws Exception {
         if (closed) throw new IllegalStateException("Multiplayer fixture is closed");
+        if (connecting != null) connecting.observeDisconnect(mc.currentScreen);
         if (events.failureMessage() != null || !events.isEnabled())
             throw new IllegalStateException("Multiplayer renderer failed: " + events.failureMessage());
         if (mc.getIntegratedServer() != null) throw new IllegalStateException("Unexpected integrated server during TCP fixture");
@@ -192,7 +193,8 @@ final class FixtureMultiplayer implements AutoCloseable {
     String status() {
         return "phase=" + phase + " session=" + session + " frames=" + events.renderedFrames()
                 + " resources=" + resources() + " peakResources=" + peakResources
-                + " capturedCow=" + events.entityCaptured(cowId) + " releaseTicks=" + releaseTicks;
+                + " capturedCow=" + events.entityCaptured(cowId) + " releaseTicks=" + releaseTicks
+                + " " + (connecting == null ? "connector=none" : connecting.status());
     }
     private void log(String event) { output.log("MULTIPLAYER_" + event, "fixture=" + identifier + " " + status()); }
     private void restoreSettings() {
