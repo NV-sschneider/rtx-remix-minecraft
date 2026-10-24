@@ -5,6 +5,8 @@
 package com.nvidia.rtxremix.forge.texture;
 
 import com.nvidia.rtxremix.TexturePatchInfo;
+import com.nvidia.rtxremix.TexturePatch;
+import com.nvidia.rtxremix.TextureFormat;
 import java.nio.IntBuffer;
 import org.junit.Test;
 import static org.junit.Assert.*;
@@ -131,6 +133,7 @@ public class AtlasAnimationsTest {
         long handle;
         boolean fail;
         @Override public void publish(TexturePatchInfo info) {
+            for (TexturePatch patch : info.entries[0].patches) assertEquals(TextureFormat.RGBA8_SRGB, patch.format);
             if (fail) throw new IllegalStateException("native failure");
             calls++;
             handle = info.entries[0].handle;

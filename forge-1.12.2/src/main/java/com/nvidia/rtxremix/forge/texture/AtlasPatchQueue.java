@@ -5,6 +5,7 @@
 package com.nvidia.rtxremix.forge.texture;
 
 import com.nvidia.rtxremix.TexturePatch;
+import com.nvidia.rtxremix.TextureFormat;
 import java.nio.ByteBuffer;
 import java.nio.IntBuffer;
 import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
@@ -199,6 +200,8 @@ final class AtlasPatchQueue {
             patch.width = width;
             patch.height = height;
             patch.rowPitch = width * 4;
+            // The albedo atlas is sRGB; the API's patch default is linear UNORM.
+            patch.format = TextureFormat.RGBA8_SRGB;
             patch.pixelData = ByteBuffer.allocateDirect(bytes);
             this.bytes = bytes;
         }

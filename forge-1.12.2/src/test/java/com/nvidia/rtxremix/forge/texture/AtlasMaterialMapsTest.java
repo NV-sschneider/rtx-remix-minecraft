@@ -7,6 +7,8 @@ package com.nvidia.rtxremix.forge.texture;
 import com.nvidia.rtxremix.MaterialInfo;
 import com.nvidia.rtxremix.MaterialInfoOpaqueEXT;
 import com.nvidia.rtxremix.TextureFromMemoryInfo;
+import com.nvidia.rtxremix.TextureFormat;
+import com.nvidia.rtxremix.TexturePatch;
 import com.nvidia.rtxremix.TexturePurpose;
 import java.io.FileNotFoundException;
 import java.io.IOException;
@@ -114,6 +116,12 @@ public class AtlasMaterialMapsTest {
                 calls[0]++;
                 assertEquals(5, info.entries.length);
                 assertEquals(42, info.entries[0].handle);
+                for (TexturePatch patch : info.entries[0].patches) assertEquals(TextureFormat.RGBA8_SRGB, patch.format);
+                for (int channel = 0; channel < 4; channel++) {
+                    assertEquals(channel + 1, info.entries[channel + 1].handle);
+                    for (TexturePatch patch : info.entries[channel + 1].patches)
+                        assertEquals((int) backend.formats.get(channel), patch.format);
+                }
                 assertEquals(0x80, info.entries[0].patches[0].pixelData.get(0) & 255);
                 assertEquals(127, info.entries[2].patches[0].pixelData.get(0) & 255);
                 assertEquals(127, info.entries[3].patches[0].pixelData.get(0) & 255);
@@ -147,6 +155,7 @@ public class AtlasMaterialMapsTest {
     private static final class RecordingBackend implements AtlasMaterialMaps.Backend {
         final List<byte[]> images = new ArrayList<byte[]>();
         final List<Integer> purposes = new ArrayList<Integer>();
+        final List<Integer> formats = new ArrayList<Integer>();
         final List<Long> destroyed = new ArrayList<Long>();
         int creates, failCreate;
         long failDestroy;
@@ -155,7 +164,7 @@ public class AtlasMaterialMapsTest {
             assertTrue(info.pixelData.isDirect());
             byte[] pixels = new byte[info.pixelData.remaining()];
             info.pixelData.duplicate().get(pixels);
-            images.add(pixels); purposes.add(info.purpose);
+            images.add(pixels); purposes.add(info.purpose); formats.add(info.format);
             return creates;
         }
         @Override public void destroy(long handle) {

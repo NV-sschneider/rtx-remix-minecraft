@@ -5,11 +5,62 @@
 package com.nvidia.rtxremix.forge.texture;
 
 import com.nvidia.rtxremix.TexturePatch;
+import com.nvidia.rtxremix.TextureFormat;
+import com.nvidia.rtxremix.TextureFromMemoryInfo;
+import java.io.InputStream;
 import java.nio.IntBuffer;
 import org.junit.Test;
+import org.objectweb.asm.ClassReader;
+import org.objectweb.asm.Opcodes;
+import org.objectweb.asm.tree.AbstractInsnNode;
+import org.objectweb.asm.tree.ClassNode;
+import org.objectweb.asm.tree.MethodInsnNode;
+import org.objectweb.asm.tree.MethodNode;
 import static org.junit.Assert.*;
 
 public class AtlasPatchQueueTest {
+    @Test public void initialAndReusedCoalescedPatchesKeepTheSrgbAtlasFormat() {
+        int creationFormat = TextureFromMemoryInfo.builder().build().format;
+        assertEquals(TextureFormat.RGBA8_SRGB, creationFormat);
+        AtlasPatchQueue queue = new AtlasPatchQueue(4, 1);
+        queue.capture(0, 0, 2, 1, pixels(2, 0xff112233));
+        TexturePatch first = queue.batch()[0];
+        assertEquals(creationFormat, first.format);
+        queue.acknowledge(1);
+        queue.capture(0, 0, 2, 1, pixels(2, 0xff445566));
+        queue.capture(1, 0, 2, 1, pixels(2, 0xff778899));
+        queue.capture(0, 0, 2, 1, pixels(2, 0xffaabbcc));
+        assertSame(first, queue.batch()[0]);
+        for (TexturePatch patch : queue.batch()) assertEquals(creationFormat, patch.format);
+        queue.acknowledge(2); queue.clear();
+        queue.capture(0, 0, 2, 1, pixels(2, 0xffddeeff));
+        assertNotSame(first, queue.batch()[0]);
+        assertEquals(creationFormat, queue.batch()[0].format);
+    }
+
+    @Test public void productionInitialAtlasExplicitlyUsesTheSameSrgbFormat() throws Exception {
+        // Read the real creation call without loading Minecraft's GL-owning renderer.
+        String path = "com/nvidia/rtxremix/forge/terrain/TerrainCapture.class";
+        ClassNode type = new ClassNode(Opcodes.ASM5);
+        try (InputStream input = getClass().getClassLoader().getResourceAsStream(path)) {
+            assertNotNull(input); new ClassReader(input).accept(type, ClassReader.SKIP_DEBUG);
+        }
+        int formats = 0;
+        for (MethodNode method : type.methods) if (method.name.equals("uploadAtlas")) {
+            for (AbstractInsnNode instruction : method.instructions.toArray()) {
+                if (!(instruction instanceof MethodInsnNode)) continue;
+                MethodInsnNode call = (MethodInsnNode) instruction;
+                if (!call.owner.equals("com/nvidia/rtxremix/TextureFromMemoryInfo$Builder") || !call.name.equals("format")) continue;
+                AbstractInsnNode value = instruction.getPrevious();
+                while (value != null && value.getOpcode() < 0) value = value.getPrevious();
+                assertNotNull(value);
+                assertEquals(Opcodes.ICONST_0 + TextureFormat.RGBA8_SRGB, value.getOpcode());
+                formats++;
+            }
+        }
+        assertEquals("Initial albedo upload must declare its format instead of inheriting a default", 1, formats);
+    }
+
     @Test public void copiesArgbToRgbaWithoutMovingSourceBufferOrFlippingRows() {
         AtlasPatchQueue queue = new AtlasPatchQueue(64, 32);
         IntBuffer input = IntBuffer.wrap(new int[] {0, 0x12345678, 0x90abcdef, 0xff010203, 0x04050607, 0});

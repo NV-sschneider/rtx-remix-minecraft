@@ -11,7 +11,7 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import javax.imageio.ImageIO;
 
-/** Renders an emissive triangle through the real runtime into a hidden test context. */
+/** Renders and updates a textured emissive triangle through the real runtime. */
 public final class GlInteropSmokeTest {
     private static native int createContext();
     private static native byte[] readImageAndVerifyState();
@@ -32,9 +32,13 @@ public final class GlInteropSmokeTest {
             interop = new LegacyGlInterop(api.dxvkGetInteropInfo());
             interop.validateContext();
             System.out.println("GPU: external timeline semaphores imported");
+            long texture = api.createTextureFromMemory(TextureFromMemoryInfo.builder().hash(0x12340003L)
+                    .pixelData(solidPixels(255, 0, 0)).size(2, 2)
+                    .format(TextureFormat.RGBA8_SRGB).purpose(TexturePurpose.COLOR).build());
             MaterialInfo materialInfo = MaterialInfo.builder().hash(0x12340001L)
-                    .emissiveIntensity(4).emissiveColorConstant(1, 0.05f, 0.01f)
-                    .opaqueExt(MaterialInfoOpaqueEXT.builder().albedoConstant(1, 0.05f, 0.01f).build()).build();
+                    .albedoTexture(texture).emissiveTexture(texture)
+                    .emissiveIntensity(4).emissiveColorConstant(1, 1, 1)
+                    .opaqueExt(MaterialInfoOpaqueEXT.builder().albedoConstant(1, 1, 1).build()).build();
             long material = api.createMaterial(materialInfo);
             MeshInfoSurfaceTriangles surface = new MeshInfoSurfaceTriangles();
             surface.vertexBuffer = ByteBuffer.allocateDirect(3 * 64).order(ByteOrder.LITTLE_ENDIAN);
@@ -101,10 +105,60 @@ public final class GlInteropSmokeTest {
             }
             ImageIO.write(image, "png", new File("gpu-smoke.png"));
             BridgeContractTest.check(colored > 100, "Expected a visible red emissive triangle; red pixels=" + colored);
+
+            TexturePatch patch = new TexturePatch();
+            patch.width = patch.height = 2;
+            patch.rowPitch = 2 * 4;
+            patch.format = TextureFormat.RGBA8_SRGB;
+            patch.pixelData = solidPixels(0, 255, 0);
+            TextureBatchEntry entry = new TextureBatchEntry();
+            entry.handle = texture;
+            entry.patches = new TexturePatch[] {patch};
+            TexturePatchInfo update = new TexturePatchInfo();
+            update.entries = new TextureBatchEntry[] {entry};
+            api.updateTextureFromMemory(update);
+            // Keep the texture handle, material, mesh and instance unchanged: a
+            // successful Java return alone does not prove the native patch applied.
+            for (int i = 0; i < 30; i++) {
+                api.setupCamera(camera);
+                api.submit(null);
+                long done = interop.copyToFramebuffer(api.dxvkGetInteropInfo(), framebuffer, 320, 240, true);
+                PresentInfo present = new PresentInfo();
+                present.hwndOverride = hwnd;
+                present.skipVulkanSwapchain = 1;
+                present.clientDoneSemaphore_ValueToWait = done;
+                api.present(present);
+            }
+            byte[] patched = readImageAndVerifyState();
+            int changedInterior = 0;
+            for (int y = 0; y < 240; y++) {
+                for (int x = 0; x < 320; x++) {
+                    int offset = (y * 320 + x) * 4;
+                    int r = patched[offset] & 255, g = patched[offset + 1] & 255, b = patched[offset + 2] & 255;
+                    image.setRGB(x, 239 - y, 0xFF000000 | (r << 16) | (g << 8) | b);
+                    // This fixed 32x32 square lies inside the triangle, away from
+                    // its antialiased edges. Compare the same pixels in both frames.
+                    if (x >= 144 && x < 176 && y >= 104 && y < 136) {
+                        int oldR = pixels[offset] & 255, oldG = pixels[offset + 1] & 255, oldB = pixels[offset + 2] & 255;
+                        // Tone mapping desaturates bright emission. Require clear
+                        // channel dominance plus a large change in signed contrast,
+                        // rather than a saturation ratio or merely a bright result.
+                        if (oldR > 30 && oldR - Math.max(oldG, oldB) >= 12
+                                && g > 30 && g - Math.max(r, b) >= 12
+                                && (g - r) - (oldG - oldR) >= 64) changedInterior++;
+                    }
+                }
+            }
+            ImageIO.write(image, "png", new File("gpu-smoke-texture-patched.png"));
+            BridgeContractTest.check(changedInterior >= 768,
+                    "Expected the retained sRGB texture patch to turn the same triangle pixels from red to green; changed interior pixels="
+                            + changedInterior + "/1024");
             api.sceneInstanceRemove(instance);
             api.destroyMesh(mesh);
             api.destroyMaterial(material);
-            System.out.println("PASS: GPU path tracing, shared color import, split ownership, idle acquire, timeline sync, bidirectional framebuffer copies, and GL state restoration; red pixels=" + colored);
+            api.destroyTexture(texture);
+            System.out.println("PASS: GPU path tracing, shared color import, split ownership, idle acquire, timeline sync, bidirectional framebuffer copies, GL state restoration, and retained sRGB texture patch; red pixels="
+                    + colored + ", red-to-green interior pixels=" + changedInterior + "/1024");
         } catch (Throwable failure) {
             failure.printStackTrace();
             throw failure;
@@ -121,5 +175,12 @@ public final class GlInteropSmokeTest {
                 }
             }
         }
+    }
+
+    private static ByteBuffer solidPixels(int red, int green, int blue) {
+        ByteBuffer pixels = ByteBuffer.allocateDirect(2 * 2 * 4).order(ByteOrder.LITTLE_ENDIAN);
+        for (int i = 0; i < 4; i++) pixels.put((byte) red).put((byte) green).put((byte) blue).put((byte) 255);
+        pixels.flip();
+        return pixels;
     }
 }

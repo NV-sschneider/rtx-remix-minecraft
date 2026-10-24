@@ -12,6 +12,7 @@ import com.nvidia.rtxremix.MeshInfoSurfaceTriangles;
 import com.nvidia.rtxremix.RemixAPI;
 import com.nvidia.rtxremix.RemixBridge;
 import com.nvidia.rtxremix.TextureFromMemoryInfo;
+import com.nvidia.rtxremix.TextureFormat;
 import com.nvidia.rtxremix.Float3D;
 import com.nvidia.rtxremix.forge.light.BlockLightScene;
 import com.nvidia.rtxremix.forge.light.SectionLights;
@@ -529,7 +530,8 @@ public final class TerrainCapture implements AutoCloseable {
             for (int name : packNames) GL11.glPixelStorei(name, name == GL11.GL_PACK_ALIGNMENT ? 1 : 0);
             GL11.glGetTexImage(GL11.GL_TEXTURE_2D, 0, GL11.GL_RGBA, GL11.GL_UNSIGNED_BYTE, pixels);
             atlas = api.createTextureFromMemory(TextureFromMemoryInfo.builder()
-                    .hash(HASHES.incrementAndGet()).pixelData(pixels).size(width, height).build());
+                    .hash(HASHES.incrementAndGet()).pixelData(pixels).size(width, height)
+                    .format(TextureFormat.RGBA8_SRGB).build());
             materialMaps = new AtlasMaterialMaps(api);
             materialMaps.initialize(mc, pixels, width, height);
             animations = new AtlasAnimations(api, mc.getTextureMapBlocks(), atlas, width, height);
