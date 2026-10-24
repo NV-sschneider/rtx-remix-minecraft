@@ -80,18 +80,30 @@ native adapter for OpenGL external memory and timeline semaphores missing from
 LWJGL 2's Java bindings. It obtains entry points with `wglGetProcAddress`; the
 original `com.nvidia.rtxremix` JNI ABI remains unchanged.
 
-Start Remix with `forceNoVkSwapchain=true` and `interopImage=true`, then create
-`LegacyGlInterop` from `dxvkGetInteropInfo()`. After each `submit`, call
-`copyToFramebuffer` with the latest interop information and Minecraft's FBO.
-Call `present` with a nonzero `hwndOverride`, `skipVulkanSwapchain=1` and the
-returned client-completion timeline value. Minecraft can then draw its hand
-and HUD and use its normal `Display.update` to present. The offscreen GPU test
-verifies this mode against the pinned runtime.
+Start Remix with `interopImage=true` and its Vulkan swapchain enabled, then create
+`LegacyGlInterop` from `dxvkGetInteropInfo()`. After each world `submit`, call
+`acquireToFramebuffer` with the latest interop information and Minecraft's FBO.
+It waits and copies native color while retaining shared-image ownership. After
+Minecraft draws its HUD and screens, `finishFromFramebuffer` copies their final
+color back and signals the client-completion timeline. Call `present` with that
+value, the current nonzero `hwndOverride`, and `skipVulkanSwapchain=0`. With both
+copies using `flipY=true`, leave `interopFlipY=0`. Remix then composites its menu.
+The presentation hook replaces OpenGL's swap while preserving LWJGL's resize
+bookkeeping and input polling. It remains active during worldless and disabled
+frames after initialization: submit and use `acquire` without a native-to-GL copy
+to preserve the vanilla framebuffer before finishing and presenting it.
+
+`releaseAcquired` releases an aborted frame without copying and is idempotent.
+`copyToFramebuffer` retains the earlier immediate-release path for offscreen
+tests that use `forceNoVkSwapchain=true` and `skipVulkanSwapchain=1`. It cannot
+include the native menu, which is composited after the interop read during
+presentation. The GPU test covers both transfer directions and ownership guards;
+native menu pixels must be verified from the actual game window.
 
 The adapter imports resized images automatically, synchronizes before replacing
 them, and restores framebuffer bindings, texture binding, scissor and sRGB state.
-It currently copies color only; depth and native Remix overlays require their
-own implementation and validation. The Forge smoke fixture verified camera and
+It currently copies color only; depth requires separate implementation and validation.
+The Forge smoke fixture verified camera and
 color alignment for its small terrain scene. Keep the API and adapter alive
 across rendering toggles: recreating only the adapter would reset its timeline
 counter against the same runtime semaphore. Close the adapter while its original

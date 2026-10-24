@@ -12,9 +12,9 @@ import org.lwjgl.opengl.GL21;
 import org.lwjgl.opengl.GL30;
 
 /**
- * Preserves the native final color while Minecraft draws its ordinary UI, then restores it at
- * framebuffer presentation. The snapshot is GL-owned: it never accesses the shared image after signaling
- * the native client-done semaphore, and is valid only for the captured frame and menu session.
+ * Preserves the native world color while Minecraft draws its ordinary UI, then restores it before
+ * the final GL-to-Remix copy when a native menu is open. Remix composites its menu during Present.
+ * The snapshot is GL-owned and valid only for the captured frame and menu session.
  */
 public final class OverlayFrame implements AutoCloseable {
     interface Gl {

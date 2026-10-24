@@ -98,6 +98,7 @@ struct InteropState {
     GLuint memory = 0, texture = 0, framebuffer = 0;
     UInt64 imageHandle = 0, allocationSize = 0, clientValue = 0;
     int width = 0, height = 0, format = -1;
+    bool acquired = false;
 
     void requireOwner() const {
         if (wglGetCurrentContext() != ownerContext || GetCurrentThreadId() != ownerThread) {
@@ -158,9 +159,10 @@ struct InteropState {
         height = h;
         format = imageFormat;
     }
-    UInt64 copy(UInt64 handle, UInt64 size, int w, int h, int imageFormat,
-                UInt64 runtimeValue, GLuint target, int targetW, int targetH, bool flipY) {
+    void acquire(UInt64 handle, UInt64 size, int w, int h, int imageFormat,
+                 UInt64 runtimeValue, GLuint target, int targetW, int targetH, bool flipY, bool copyColor) {
         requireOwner();
+        if (acquired) throw std::runtime_error("Previous OpenGL interop frame is still acquired");
         // Attribute only new GL errors to this operation; vanilla may leave stale flags.
         while (glGetError() != GL_NO_ERROR) {}
         SavedGlState saved(gl);
@@ -168,6 +170,8 @@ struct InteropState {
         gl.semaphoreValue(runtimeDone, TIMELINE_VALUE, &runtimeValue);
         gl.waitSemaphore(runtimeDone, 0, nullptr, 1, &texture, &LAYOUT_GENERAL);
         checkGl("waiting for Remix color");
+        acquired = true;
+        if (!copyColor) return;
         gl.bindFramebuffer(READ_FRAMEBUFFER, framebuffer);
         gl.bindFramebuffer(DRAW_FRAMEBUFFER, target);
         glDisable(GL_SCISSOR_TEST);
@@ -175,18 +179,42 @@ struct InteropState {
         gl.blitFramebuffer(0, flipY ? h : 0, w, flipY ? 0 : h,
                            0, 0, targetW, targetH, GL_COLOR_BUFFER_BIT, GL_NEAREST);
         const GLenum blitError = glGetError();
-        // Release image ownership even if a framebuffer configuration rejects the blit.
+        if (blitError != GL_NO_ERROR) {
+            release();
+            throw std::runtime_error("OpenGL native-to-client color blit failed");
+        }
+    }
+    UInt64 release() {
+        requireOwner();
+        if (!acquired) return clientValue;
         ++clientValue;
         gl.semaphoreValue(clientDone, TIMELINE_VALUE, &clientValue);
         gl.signalSemaphore(clientDone, 0, nullptr, 1, &texture, &LAYOUT_GENERAL);
         glFlush();
+        acquired = false;
         checkGl("signaling GL completion");
+        return clientValue;
+    }
+    UInt64 finish(GLuint source, int sourceW, int sourceH, bool flipY) {
+        requireOwner();
+        if (!acquired) throw std::runtime_error("No acquired OpenGL interop frame");
+        while (glGetError() != GL_NO_ERROR) {}
+        SavedGlState saved(gl);
+        gl.bindFramebuffer(READ_FRAMEBUFFER, source);
+        gl.bindFramebuffer(DRAW_FRAMEBUFFER, framebuffer);
+        glDisable(GL_SCISSOR_TEST);
+        glDisable(FRAMEBUFFER_SRGB);
+        gl.blitFramebuffer(0, flipY ? sourceH : 0, sourceW, flipY ? 0 : sourceH,
+                           0, 0, width, height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        const GLenum blitError = glGetError();
+        // Never leave Vulkan waiting after a rejected framebuffer copy.
+        UInt64 value = release();
         if (blitError != GL_NO_ERROR) {
             char message[128];
-            sprintf_s(message, "OpenGL color blit failed: 0x%04x", blitError);
+            sprintf_s(message, "OpenGL client-to-native color blit failed: 0x%04x", blitError);
             throw std::runtime_error(message);
         }
-        return clientValue;
+        return value;
     }
 };
 
@@ -199,6 +227,14 @@ void throwJava(JNIEnv* env, const char* message) {
 extern "C" JNIEXPORT jlong JNICALL
 Java_com_nvidia_rtxremix_forge_interop_LegacyGlInterop_currentWindowHandle(JNIEnv*, jclass) {
     return reinterpret_cast<jlong>(WindowFromDC(wglGetCurrentDC()));
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_nvidia_rtxremix_forge_interop_LegacyGlInterop_validateContext(JNIEnv* env, jclass, jlong state) {
+    try {
+        if (!state) throw std::runtime_error("OpenGL interop is closed");
+        reinterpret_cast<InteropState*>(state)->requireOwner();
+    } catch (const std::exception& error) { throwJava(env, error.what()); }
 }
 
 extern "C" JNIEXPORT jlong JNICALL
@@ -216,18 +252,30 @@ Java_com_nvidia_rtxremix_forge_interop_LegacyGlInterop_create(JNIEnv* env, jclas
     }
 }
 
-extern "C" JNIEXPORT jlong JNICALL
-Java_com_nvidia_rtxremix_forge_interop_LegacyGlInterop_copy(JNIEnv* env, jclass, jlong handle,
+extern "C" JNIEXPORT void JNICALL
+Java_com_nvidia_rtxremix_forge_interop_LegacyGlInterop_acquire(JNIEnv* env, jclass, jlong handle,
     jlong imageHandle, jlong size, jint width, jint height, jint format,
-    jlong runtimeValue, jint target, jint targetWidth, jint targetHeight, jboolean flipY) {
+    jlong runtimeValue, jint target, jint targetWidth, jint targetHeight, jboolean flipY, jboolean copyColor) {
     try {
         auto* state = reinterpret_cast<InteropState*>(handle);
-        return state->copy(imageHandle, size, width, height, format, runtimeValue,
-                           target, targetWidth, targetHeight, flipY != JNI_FALSE);
+        state->acquire(imageHandle, size, width, height, format, runtimeValue,
+                       target, targetWidth, targetHeight, flipY != JNI_FALSE, copyColor != JNI_FALSE);
     } catch (const std::exception& error) {
         throwJava(env, error.what());
-        return 0;
     }
+}
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_nvidia_rtxremix_forge_interop_LegacyGlInterop_finish(JNIEnv* env, jclass, jlong handle,
+    jint source, jint width, jint height, jboolean flipY) {
+    try { return reinterpret_cast<InteropState*>(handle)->finish(source, width, height, flipY != JNI_FALSE); }
+    catch (const std::exception& error) { throwJava(env, error.what()); return 0; }
+}
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_nvidia_rtxremix_forge_interop_LegacyGlInterop_release(JNIEnv* env, jclass, jlong handle) {
+    try { return reinterpret_cast<InteropState*>(handle)->release(); }
+    catch (const std::exception& error) { throwJava(env, error.what()); return 0; }
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -235,6 +283,7 @@ Java_com_nvidia_rtxremix_forge_interop_LegacyGlInterop_destroy(JNIEnv* env, jcla
     try {
         auto* state = reinterpret_cast<InteropState*>(handle);
         state->requireOwner();
+        state->release();
         glFinish();
         delete state;
     } catch (const std::exception& error) {

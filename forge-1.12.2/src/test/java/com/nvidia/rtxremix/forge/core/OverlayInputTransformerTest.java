@@ -48,6 +48,9 @@ public class OverlayInputTransformerTest {
         assertEquals(1, calls(method(minecraft, "runTickMouse", "()V"), HOOKS, "nextMouseEvent"));
         assertEquals(1, calls(method(minecraft, "processKeyBinds", "()V"), HOOKS, "capturing"));
         assertEquals(1, calls(method(minecraft, "setIngameFocus", "()V"), HOOKS, "capturing"));
+        assertEquals(1, calls(method(minecraft, "updateDisplay", "()V"), "com/nvidia/rtxremix/forge/overlay/PresentationHooks", "updateDisplay"));
+        assertEquals(0, calls(method(minecraft, "updateDisplay", "()V"), "org/lwjgl/opengl/Display", "update"));
+        assertEquals(1, calls(method(minecraft, "updateDisplay", "()V"), MC, "checkWindowResize"));
         assertEquals(2, calls(method(minecraft, "shutdownMinecraftApplet", "()V"),
                 "com/nvidia/rtxremix/forge/client/RendererLifecycle", "beforeDisplayDestroy"));
         for (String type : new String[] {MC, SCREEN, MOUSE, FORGE}) {
@@ -82,6 +85,9 @@ public class OverlayInputTransformerTest {
             ClassNode patched = read(transform(target[0], write(node))); verify(patched);
             assertEquals(1, calls(method(patched, target[2], "()V"), HOOKS, target[3]));
         }
+        ClassNode display = read(bytes(MC)); method(display, "updateDisplay", "()V").name = "func_175601_h";
+        assertEquals(1, calls(method(read(transform(MC, write(display))), "func_175601_h", "()V"),
+                "com/nvidia/rtxremix/forge/overlay/PresentationHooks", "updateDisplay"));
         ClassNode screen = read(bytes(SCREEN));
         String[][] fields = {{"eventButton", "field_146287_f"}, {"touchValue", "field_146298_h"},
                 {"lastMouseEvent", "field_146288_g"}, {"selectedButton", "field_146290_a"}};

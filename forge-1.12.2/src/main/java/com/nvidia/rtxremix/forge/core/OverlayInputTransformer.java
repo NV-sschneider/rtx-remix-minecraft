@@ -42,6 +42,7 @@ public final class OverlayInputTransformer implements IClassTransformer {
                 if (named(method.name, "runGameLoop", "func_71411_J")) {
                     changed |= head(method, "beginFrame"); changed |= beforePresent(method);
                 }
+                if (named(method.name, "updateDisplay", "func_175601_h")) changed |= display(method);
                 if (named(method.name, "runTickKeyboard", "func_184118_az")) changed |= events(method, "Keyboard", "nextKeyboardEvent");
                 if (named(method.name, "runTickMouse", "func_184124_aB")) changed |= events(method, "Mouse", "nextMouseEvent");
                 if (named(method.name, "processKeyBinds", "func_184117_aA") || named(method.name, "setIngameFocus", "func_71381_h")) changed |= guard(method, false);
@@ -80,6 +81,21 @@ public final class OverlayInputTransformer implements IClassTransformer {
             }
         }
         if (sites != 1) throw new IllegalStateException("Expected one main framebuffer presentation, found " + sites);
+        return true;
+    }
+
+    private static boolean display(MethodNode method) {
+        String owner = "com/nvidia/rtxremix/forge/overlay/PresentationHooks";
+        int sites = 0;
+        for (AbstractInsnNode instruction : method.instructions.toArray()) if (instruction instanceof MethodInsnNode) {
+            MethodInsnNode call = (MethodInsnNode) instruction;
+            if (owner.equals(call.owner) && "updateDisplay".equals(call.name)) return false;
+            if (call.getOpcode() == Opcodes.INVOKESTATIC && "org/lwjgl/opengl/Display".equals(call.owner)
+                    && "update".equals(call.name) && "()V".equals(call.desc)) {
+                method.instructions.set(call, new MethodInsnNode(Opcodes.INVOKESTATIC, owner, "updateDisplay", "()V", false)); sites++;
+            }
+        }
+        if (sites != 1) throw new IllegalStateException("Expected one Display.update call, found " + sites);
         return true;
     }
 

@@ -30,6 +30,7 @@ public final class GlInteropSmokeTest {
             api.startup(StartupInfo.builder().hwnd(hwnd).forceNoVkSwapchain(true).interopImage(true).build());
             System.out.println("GPU: runtime startup with app-owned swapchain succeeded");
             interop = new LegacyGlInterop(api.dxvkGetInteropInfo());
+            interop.validateContext();
             System.out.println("GPU: external timeline semaphores imported");
             MaterialInfo materialInfo = MaterialInfo.builder().hash(0x12340001L)
                     .emissiveIntensity(4).emissiveColorConstant(1, 0.05f, 0.01f)
@@ -57,7 +58,28 @@ public final class GlInteropSmokeTest {
                 api.setupCamera(camera);
                 api.submit(null);
                 InteropInfo info = api.dxvkGetInteropInfo();
-                long done = interop.copyToFramebuffer(info, framebuffer, 320, 240, true);
+                long done;
+                if (i < 10) {
+                    done = interop.copyToFramebuffer(info, framebuffer, 320, 240, true);
+                } else if (i == 10) {
+                    try { interop.acquireToFramebuffer(info, -1, 320, 240, true); throw new AssertionError("Invalid framebuffer was accepted"); }
+                    catch (IllegalStateException expected) { }
+                    BridgeContractTest.check(!interop.hasAcquiredFrame(), "Failed initial blit must release ownership");
+                    done = interop.releaseAcquired();
+                    readImageAndVerifyState();
+                } else {
+                    if (i == 29) interop.acquire(info);
+                    else interop.acquireToFramebuffer(info, framebuffer, 320, 240, true);
+                    BridgeContractTest.check(interop.hasAcquiredFrame(), "Split interop must retain ownership through client UI");
+                    try { interop.acquire(info); throw new AssertionError("Double acquire was allowed"); }
+                    catch (IllegalStateException expected) { }
+                    readImageAndVerifyState();
+                    done = interop.finishFromFramebuffer(framebuffer, 320, 240, true);
+                    BridgeContractTest.check(!interop.hasAcquiredFrame(), "Final client copy must release shared ownership");
+                    BridgeContractTest.check(done == interop.releaseAcquired(), "Already released frame must not advance its semaphore");
+                    try { interop.finishFromFramebuffer(framebuffer, 320, 240, true); throw new AssertionError("Post-release image write was allowed"); }
+                    catch (IllegalStateException expected) { }
+                }
                 PresentInfo present = new PresentInfo();
                 present.hwndOverride = hwnd;
                 present.skipVulkanSwapchain = 1;
@@ -82,7 +104,7 @@ public final class GlInteropSmokeTest {
             api.sceneInstanceRemove(instance);
             api.destroyMesh(mesh);
             api.destroyMaterial(material);
-            System.out.println("PASS: GPU path tracing, shared color import, timeline sync, framebuffer blit, and GL state restoration; red pixels=" + colored);
+            System.out.println("PASS: GPU path tracing, shared color import, split ownership, idle acquire, timeline sync, bidirectional framebuffer copies, and GL state restoration; red pixels=" + colored);
         } catch (Throwable failure) {
             failure.printStackTrace();
             throw failure;
