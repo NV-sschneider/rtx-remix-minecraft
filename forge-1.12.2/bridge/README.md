@@ -13,10 +13,12 @@ uses Java 21 for its mod and native build; the Forge adapter is compiled with
 the Java 8 JDK's JNI declarations.
 
 The Forge native build defines `REMIX_PIN_RUNTIME_DLL` to keep a successfully
-initialized runtime DLL resident until process exit. `Shutdown` still releases
-its GPU resources. This avoids the pinned runtime's loader-lock teardown
-deadlock in the legacy client. The standard Fabric native build does not define
-this option, so its module-loading behavior is unchanged.
+initialized runtime DLL resident until process exit. The client still releases
+its owned resources and calls `Shutdown`; the runtime's device-accounting warning
+at process exit remains unresolved and also occurs in the Fabric regression.
+Keeping the DLL loaded avoids the pinned
+runtime's loader-lock teardown deadlock in the legacy client. The standard Fabric
+native build does not define this option, so its module-loading behavior is unchanged.
 
 ## Build and verification
 
@@ -111,9 +113,10 @@ GL context is current, then destroy the game window, then shut down the runtime.
 
 ## License and provenance
 
-The copied Java and JNI sources retain NVIDIA's Apache-2.0 notices; the full
-license is in `LICENSE`, and attribution is in `NOTICE`. Modified files identify
-their compatibility adaptations. The copied `native/include/remix_c.h` retains
-its NVIDIA MIT license text. Runtime binaries carry additional licenses and
-must be distributed with the original runtime notices; this source module
-does not bundle the runtime, Minecraft, Java, or Forge.
+The shared Java and JNI sources under repository-root `rtxremix-java/` and this
+directory's Forge adapter retain NVIDIA's Apache-2.0 notices; the full license is
+in `LICENSE`, and attribution is in `NOTICE`. The shared
+`rtxremix-java/native/include/remix_c.h` retains its NVIDIA MIT license text.
+Runtime binaries carry additional licenses and must be distributed with the
+original runtime notices; this source module does not bundle the runtime,
+Minecraft, Java, or Forge.

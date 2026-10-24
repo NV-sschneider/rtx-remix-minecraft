@@ -3,8 +3,9 @@
 Play Minecraft Java Edition 1.21.1 with real-time path tracing on a GeForce RTX
 GPU, powered by NVIDIA RTX Remix.
 
-An experimental [Forge 1.12.2 terrain prototype](forge-1.12.2/README.md) has a
-separate Java 8 build. It is incomplete and has not been validated with RLCraft.
+An experimental [Forge 1.12.2 port](forge-1.12.2/README.md) has a separate Java 8
+build. Its guide records the tested Forge/RLCraft snapshots and remaining
+compatibility and validation limits; it is not a complete RLCraft release.
 
 ## What To Expect
 
