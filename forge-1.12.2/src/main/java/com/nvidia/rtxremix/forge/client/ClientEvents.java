@@ -16,6 +16,7 @@ import com.nvidia.rtxremix.forge.overlay.OverlayHooks;
 import com.nvidia.rtxremix.forge.overlay.OverlayInputGate;
 import com.nvidia.rtxremix.forge.overlay.PresentationHooks;
 import com.nvidia.rtxremix.forge.frame.WorldFallbackHooks;
+import com.nvidia.rtxremix.forge.hud.MobHudHooks;
 import com.nvidia.rtxremix.forge.terrain.VanillaTerrainDraws;
 import java.util.UUID;
 import net.minecraft.client.Minecraft;
@@ -109,11 +110,13 @@ public final class ClientEvents {
             ItemCaptureHooks.beginFrame(enabled && mc.world != null);
             EffectCaptureHooks.beginFrame(enabled && mc.world != null);
             CloudCaptureHooks.beginFrame(enabled && mc.world != null);
+            MobHudHooks.beginFrame(enabled && mc.world != null && Display.isVisible());
         } else {
             try { renderer.finishTerrainFrame(false); }
             catch (RuntimeException | LinkageError ex) { renderingFailed(ex); }
             submission.clear();
             discardCaptures();
+            MobHudHooks.discard();
         }
     }
 
@@ -172,6 +175,7 @@ public final class ClientEvents {
             if (renderer.finishTerrainFrame(true) && afterTerrainRecovery != null && mc.world == recoveryFixtureWorld) {
                 afterTerrainRecovery.run();
             }
+            MobHudHooks.composite();
         } catch (RuntimeException | LinkageError ex) { renderingFailed(ex); }
     }
 
@@ -218,6 +222,9 @@ public final class ClientEvents {
 
     int fixtureReadConfig(String name, byte[] value) { return renderer.readConfig(name, value); }
     void fixtureWriteConfig(String name, String value) { renderer.writeConfig(name, value); }
+    void setShadowVisibility(float value) throws java.io.IOException { renderer.setShadowVisibility(value); }
+    void resetShadowVisibility() throws java.io.IOException { renderer.resetShadowVisibility(); }
+    String shadowVisibilityStatus() { return renderer.shadowVisibilityStatus(); }
 
     void fixtureFailNextReplacedFrame() { requireSmokeWorld(); failureFixtureWorld = mc.world; }
     void fixtureCancelTerrainFailure() { failureFixtureWorld = null; }

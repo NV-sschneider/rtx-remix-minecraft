@@ -11,6 +11,7 @@ import com.nvidia.rtxremix.forge.entity.EntityCaptureHooks;
 import com.nvidia.rtxremix.forge.entity.EntityScene;
 import com.nvidia.rtxremix.forge.entity.FastTileCaptureHooks;
 import com.nvidia.rtxremix.forge.entity.FirstPersonCapture;
+import com.nvidia.rtxremix.forge.hud.MobHudHooks;
 import com.nvidia.rtxremix.forge.item.CapturedItem;
 import com.nvidia.rtxremix.forge.item.ItemCaptureHooks;
 import com.nvidia.rtxremix.forge.item.ItemScene;
@@ -35,6 +36,7 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.WorldClient;
 
 import java.io.File;
+import java.io.IOException;
 import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
@@ -85,6 +87,8 @@ final class PrototypeRenderer {
     private boolean windowClosing;
     private boolean initialized;
     private boolean nativeFramePending;
+    private VisibilitySettings visibility;
+    private long visibilityRevision = -1;
     private final PresentInfo present = new PresentInfo();
 
     PrototypeRenderer(Minecraft mc) {
@@ -151,6 +155,7 @@ final class PrototypeRenderer {
         if (windowClosing) { return; }
         if (api == null) { initialize(); }
         if (!initialized) { throw new IllegalStateException("Native initialization failed; restart Minecraft before retrying."); }
+        applyVisibility();
         followWindow();
         if (world != mc.world) {
             lastGoodFrame.invalidate();
@@ -210,6 +215,8 @@ final class PrototypeRenderer {
                 .combineGuiInFinalColor(true).build());
         interop = new LegacyGlInterop(api.dxvkGetInteropInfo());
         initialized = true;
+        try { visibilitySettings(); }
+        catch (IOException error) { RemixForgeMod.LOG.warn("Cannot read shadow visibility preferences", error); }
         frames = 0;
         RemixForgeMod.LOG.info("RTX Remix Forge: native renderer initialized (API {}.{}.{}, HWND {}).",
                 RemixAPI.VERSION_MAJOR, RemixAPI.VERSION_MINOR, RemixAPI.VERSION_PATCH, Long.toHexString(hwnd));
@@ -282,6 +289,22 @@ final class PrototypeRenderer {
     boolean tileTextureCurrent(net.minecraft.util.math.BlockPos pos, int glId) { return entities != null && entities.tileTextureCurrent(pos, glId); }
     boolean menuAvailable() { return initialized && api != null && world != null && !windowClosing; }
     void writeConfig(String name, String value) { api.setConfigVariable(name, value); }
+    private VisibilitySettings visibilitySettings() throws IOException {
+        if (visibility == null) visibility = new VisibilitySettings(mc.gameDir.toPath().resolve("config").resolve(VisibilitySettings.FILE_NAME));
+        return visibility;
+    }
+    void setShadowVisibility(float value) throws IOException { visibilitySettings().setShadows(value); }
+    void resetShadowVisibility() throws IOException { visibilitySettings().reset(); }
+    String shadowVisibilityStatus() {
+        try { return visibilitySettings().description(); }
+        catch (IOException error) { return "Cannot read shadow visibility preferences: " + error.getMessage(); }
+    }
+    private void applyVisibility() {
+        if (visibility != null && visibilityRevision != visibility.revision()) {
+            visibility.apply(this::writeConfig);
+            visibilityRevision = visibility.revision();
+        }
+    }
     int readConfig(String name, byte[] value) { return api.getConfigVariableResolved(name, value); }
     void finishOverlay() { overlayFrame.restore(mc.getFramebuffer().framebufferObject, mc.displayWidth, mc.displayHeight); }
     boolean ownsSwapchain() { return initialized && !windowClosing; }
@@ -442,6 +465,9 @@ final class PrototypeRenderer {
     /** Toggle/world changes retain the runtime and its monotonically increasing GL timeline. */
     void releaseWorld() {
         invalidateTerrainFallback();
+        Throwable failure = null;
+        try { MobHudHooks.close(); }
+        catch (RuntimeException | LinkageError ex) { failure = ex; }
         OverlayHooks.releaseSession();
         preparedWorld = null;
         preparedCamera = null;
@@ -450,9 +476,13 @@ final class PrototypeRenderer {
         ItemCaptureHooks.discard();
         EffectCaptureHooks.discard();
         CloudCaptureHooks.discard();
-        try { releaseScene(); } finally {
-            try { overlayFrame.close(); } finally { lastGoodFrame.close(); }
-        }
+        try { releaseScene(); }
+        catch (RuntimeException | LinkageError ex) { failure = append(failure, ex); }
+        try { overlayFrame.close(); }
+        catch (RuntimeException | LinkageError ex) { failure = append(failure, ex); }
+        try { lastGoodFrame.close(); }
+        catch (RuntimeException | LinkageError ex) { failure = append(failure, ex); }
+        rethrow(failure);
     }
 
     /** A delayed unload must never release a newer world session. */

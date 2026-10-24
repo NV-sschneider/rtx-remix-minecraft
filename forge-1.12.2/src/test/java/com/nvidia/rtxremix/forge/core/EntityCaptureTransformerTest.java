@@ -485,7 +485,8 @@ public class EntityCaptureTransformerTest {
             "com.nvidia.rtxremix.forge.core.TextureRevisionTransformer",
             "com.nvidia.rtxremix.forge.core.BetterFoliageCaptureTransformer",
             "com.nvidia.rtxremix.forge.core.TerrainDrawTransformer",
-            "com.nvidia.rtxremix.forge.core.WorldFallbackTransformer"
+            "com.nvidia.rtxremix.forge.core.WorldFallbackTransformer",
+            "com.nvidia.rtxremix.forge.core.MobHudTransformer"
         }, new RemixCorePlugin().getASMTransformerClass());
     }
 
