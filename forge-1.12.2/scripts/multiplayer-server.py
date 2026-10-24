@@ -200,19 +200,176 @@ def signed_long(value):
     return value if value < 1 << 63 else value - (1 << 64)
 
 
+def environment_commands():
+    return ["gamerule doDaylightCycle false", "gamerule doWeatherCycle false",
+            "gamerule doMobSpawning false", "gamerule doFireTick false", "gamerule spawnRadius 0",
+            "gamerule sendCommandFeedback true", "gamerule logAdminCommands true",
+            "time set 6000", "weather clear", "setworldspawn 0 65 -8"]
+
+
 def setup_commands(identifier):
     entity = fixture_uuid(identifier)
     most, least = signed_long(entity.int >> 64), signed_long(entity.int & ((1 << 64) - 1))
     return [
-        "gamerule doDaylightCycle false", "gamerule doWeatherCycle false",
-        "gamerule doMobSpawning false", "gamerule doFireTick false", "gamerule spawnRadius 0",
-        "time set 6000", "weather clear",
         "fill -16 64 -16 16 64 20 minecraft:stonebrick",
-        "setblock 3 65 3 minecraft:torch", "setworldspawn 0 65 -8",
-        'summon minecraft:cow 0.5 65 4.5 {NoAI:1b,Invulnerable:1b,PersistenceRequired:1b,'
+        "setblock 3 65 3 minecraft:torch",
+        'summon minecraft:cow 0.5 65 4.5 {Health:10.0f,NoAI:1b,Invulnerable:1b,PersistenceRequired:1b,'
         f'UUIDMost:{most}L,UUIDLeast:{least}L,CustomName:"mrtx-smoke-{identifier}"}}',
-        f"say MRTXS_READY_{identifier}",
     ]
+
+
+def console_message(line):
+    match = re.search(r"\[Server thread/INFO\] \[[^\]]*(?:DedicatedServer|MinecraftServer)\]: (.*)$", line.rstrip())
+    return match[1] if match else None
+
+
+def joined_player(line):
+    match = re.search(r"\[Server thread/INFO\] \[[^\]]*PlayerList\]: "
+                      r"([A-Za-z0-9_]{1,16})\[/127\.0\.0\.1:\d+\] logged in with entity id ", line)
+    return match[1] if match else None
+
+
+class FixtureSetup:
+    """Fenced server-console protocol; readiness requires observed command results."""
+
+    CHUNKS = tuple((x, 0, z) for x in (-16, 0, 16) for z in (-16, 0, 16))
+    BLOCKS = ((-16, 64, -16, "stonebrick"), (-16, 64, 20, "stonebrick"),
+              (16, 64, -16, "stonebrick"), (16, 64, 20, "stonebrick"),
+              (0, 64, 0, "stonebrick"), (3, 65, 3, "torch"))
+    MAX_ATTEMPTS = 10
+    TIMEOUT = 90
+    ACK_TIMEOUT = 10
+
+    def __init__(self, identifier):
+        self.identifier = identifier
+        self.entity = fixture_uuid(identifier)
+        self.accepting = self.ready = False
+        self.phase = "boot"
+        self.joins = self.attempt = self.retirement_checks = self.sequence = 0
+        self.player = None
+        self.deadline = self.next_probe = self.ack_deadline = 0
+        self.token = None
+        self.inside = False
+        self.expected = set()
+        self.observed = set()
+        self.last_missing = []
+
+    def accept(self):
+        if self.accepting:
+            return []
+        self.accepting = True
+        self.phase = "accepting"
+        return environment_commands()
+
+    def join(self, name, now):
+        if not self.accepting or not re.fullmatch(r"[A-Za-z0-9_]{1,16}", name):
+            raise RuntimeError("Fixture login requires an authenticated player on the accepting server")
+        self.joins += 1
+        self.player = name
+        self.attempt = 0
+        self.retirement_checks = 0
+        self.ready = False
+        self.deadline = now + self.TIMEOUT
+        return self._batch("teleport", [f"gamemode creative {name}", f"tp {name} 0.5 65 -8.5 0 8"],
+                           {f"Teleported {name} to "}, now)
+
+    @staticmethod
+    def block_proof(x, y, z):
+        return f"Successfully found the block at {x}, {y}, {z}"
+
+    def _batch(self, phase, commands, expected, now):
+        self.phase = phase
+        self.sequence += 1
+        self.token = f"MRTXS_{self.identifier}_{self.joins}_{self.attempt}_{self.sequence}_{phase}"
+        self.inside = False
+        self.expected, self.observed = set(expected), set()
+        self.ack_deadline = now + self.ACK_TIMEOUT
+        return [f"say {self.token}_BEGIN", *commands, f"say {self.token}_END"]
+
+    def _delay(self, now):
+        self.phase = "wait-chunks"
+        self.token = None
+        self.next_probe = now + 2
+        return []
+
+    def tick(self, now):
+        if not self.joins or self.ready:
+            return []
+        if now >= self.deadline:
+            raise RuntimeError(f"Fixture setup timed out in {self.phase}; missing={self.last_missing}")
+        if self.token and now >= self.ack_deadline:
+            raise RuntimeError(f"Fixture console acknowledgment timed out in {self.phase}")
+        if self.phase == "wait-retire" and now >= self.next_probe:
+            if self.retirement_checks >= self.MAX_ATTEMPTS:
+                raise RuntimeError("Owned fixture cow did not retire after 10 checks")
+            self.retirement_checks += 1
+            return self._batch("retire-cow", [f"testfor {self.entity}"],
+                               {f"Entity '{self.entity}' cannot be found"}, now)
+        if self.phase != "wait-chunks" or now < self.next_probe:
+            return []
+        if self.attempt >= self.MAX_ATTEMPTS:
+            raise RuntimeError(f"Fixture setup failed after {self.attempt} attempts; missing={self.last_missing}")
+        self.attempt += 1
+        commands = [f"testforblock {x} {y} {z} minecraft:bedrock" for x, y, z in self.CHUNKS]
+        return self._batch("chunks", commands, {self.block_proof(*pos) for pos in self.CHUNKS}, now)
+
+    def observe(self, line, now):
+        message = console_message(line)
+        if not self.token or message is None:
+            return []
+        if message == f"[Server] {self.token}_BEGIN":
+            self.inside = True
+            return []
+        if not self.inside:
+            return []
+        if message != f"[Server] {self.token}_END":
+            for proof in self.expected:
+                if message == proof or (proof.startswith("Teleported ") and message.startswith(proof)):
+                    self.observed.add(proof)
+            return []
+        self.last_missing = sorted(self.expected - self.observed)
+        if self.last_missing:
+            if self.phase == "teleport":
+                raise RuntimeError("Player teleport failed before fixture setup")
+            if self.phase == "retire-cow":
+                return self._wait_retirement(now)
+            return self._delay(now)
+        if self.phase == "teleport":
+            return self._delay(now)
+        if self.phase == "chunks":
+            # Living entities remain addressable during their 20-tick death animation.
+            # A wall-clock delay cannot prove retirement on a slow server.
+            self.retirement_checks = 0
+            return self._batch("remove-cow", [f"kill {self.entity}"], set(), now)
+        if self.phase == "remove-cow":
+            return self._wait_retirement(now)
+        if self.phase == "retire-cow":
+            # Creative players can fall before the elevated platform exists. Restore
+            # the camera pose after construction, then verify the complete scene.
+            commands = setup_commands(self.identifier) + [f"tp {self.player} 0.5 65 -8.5 0 8"]
+            return self._batch("place", commands,
+                               {"Object successfully summoned", f"Teleported {self.player} to "}, now)
+        if self.phase == "place":
+            commands = [f"testforblock {x} {y} {z} minecraft:{block}" for x, y, z, block in self.BLOCKS]
+            most = signed_long(self.entity.int >> 64)
+            least = signed_long(self.entity.int & ((1 << 64) - 1))
+            commands.append(f'testfor {self.entity} {{UUIDMost:{most}L,UUIDLeast:{least}L,'
+                            f'Health:10.0f,NoAI:1b,Invulnerable:1b,PersistenceRequired:1b,CustomName:"mrtx-smoke-{self.identifier}"}}')
+            expected = {self.block_proof(x, y, z) for x, y, z, _ in self.BLOCKS}
+            expected.add(f"Found mrtx-smoke-{self.identifier}")
+            return self._batch("verify", commands, expected, now)
+        if self.phase == "verify":
+            self.ready = True
+            self.phase = "ready"
+            self.token = None
+            return []
+        raise RuntimeError("Unexpected fixture console phase")
+
+    def _wait_retirement(self, now):
+        self.phase = "wait-retire"
+        self.token = None
+        self.next_probe = now + 1
+        return []
 
 
 def properties(identifier, port, pack="forge", base=""):
@@ -225,7 +382,9 @@ def properties(identifier, port, pack="forge", base=""):
         "server-ip=127.0.0.1", f"server-port={port}", "online-mode=true",
         "enable-rcon=false", "enable-query=false", "max-players=1", "view-distance=6",
         "gamemode=1", "force-gamemode=true", "difficulty=0", "spawn-protection=0",
-        "spawn-animals=false", "spawn-monsters=false", "spawn-npcs=false", "pvp=false",
+        # WorldServer kills existing animals each tick when spawn-animals is false,
+        # including commanded cows. The environment gamerule prevents natural spawning.
+        "spawn-animals=true", "spawn-monsters=false", "spawn-npcs=false", "pvp=false",
         "allow-flight=true", "allow-nether=false", "generate-structures=false", "level-type=FLAT",
         "generator-settings=3;minecraft:bedrock,2*minecraft:dirt,minecraft:grass;1;",
         "level-seed=7348932", "level-name=rlcraft-remix-smoke-multiplayer-" + identifier,
@@ -275,8 +434,9 @@ def run(args):
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         probe.bind(("127.0.0.1", args.port))
     process = None
-    ready = False
-    lines = queue.Queue(maxsize=64)
+    fixture = FixtureSetup(args.fixture_id)
+    lines = queue.Queue(maxsize=256)
+    overflow = threading.Event()
     deadline = time.monotonic() + args.seconds
     log_path = run_dir / "server-console.log"
     try:
@@ -293,39 +453,69 @@ def run(args):
                 for line in process.stdout:
                     log.write(line)
                     log.flush()
-                    if "Done (" in line or f"[Server] MRTXS_READY_{args.fixture_id}" in line or "logged in with entity id" in line:
-                        lines.put(line)
-                lines.put(None)
+                    if not overflow.is_set() and (console_message(line) is not None or joined_player(line)):
+                        try:
+                            lines.put_nowait(line)
+                        except queue.Full:
+                            overflow.set()  # Drain stdout regardless, so shutdown cannot deadlock on a full queue.
+                try:
+                    lines.put_nowait(None)
+                except queue.Full:
+                    overflow.set()
 
         reader = threading.Thread(target=read_lines, name="forge-smoke-console", daemon=True)
         reader.start()
 
         def send(commands):
+            if not commands:
+                return
             if process.poll() is not None:
                 raise RuntimeError("Owned Forge server exited before console command")
             process.stdin.write("\n".join(commands) + "\n")
             process.stdin.flush()
 
+        def publish_readiness():
+            data = {"fixtureId": args.fixture_id, "port": args.port, "pid": process.pid,
+                    "cowUuid": str(fixture.entity), "onlineMode": True, "pack": args.pack,
+                    "status": "fixture-ready" if fixture.ready else "accepting",
+                    "fixtureReady": fixture.ready, "joins": fixture.joins}
+            temporary = run_dir / "ready.json.tmp"
+            temporary.write_text(json.dumps(data, indent=2) + "\n", encoding="ascii")
+            temporary.replace(run_dir / "ready.json")
+            verified = run_dir / "fixture-ready.json"
+            if fixture.ready:
+                verified.write_text(json.dumps(data, indent=2) + "\n", encoding="ascii")
+            else:
+                verified.unlink(missing_ok=True)
+
         print(f"STARTED pid={process.pid} fixture={args.fixture_id} port={args.port} pack={args.pack} heapMiB={heap}", flush=True)
         while time.monotonic() < deadline and not (run_dir / "stop.request").exists():
+            if overflow.is_set():
+                raise RuntimeError("Server console event queue overflowed; readiness cannot be verified")
+            send(fixture.tick(time.monotonic()))
             try:
                 line = lines.get(timeout=0.25)
             except queue.Empty:
                 continue
             if line is None:
                 raise RuntimeError(f"Owned Forge server exited; inspect {log_path}")
-            if 'Done (' in line and 'For help' in line:
-                send(setup_commands(args.fixture_id))
-            if f"[Server] MRTXS_READY_{args.fixture_id}" in line:
-                ready = True
-                data = {"fixtureId": args.fixture_id, "port": args.port, "pid": process.pid,
-                        "cowUuid": str(fixture_uuid(args.fixture_id)), "onlineMode": True, "pack": args.pack}
-                (run_dir / "ready.json").write_text(json.dumps(data, indent=2) + "\n", encoding="ascii")
-                print(f"READY fixture={args.fixture_id} port={args.port} onlineMode=true", flush=True)
-            if "logged in with entity id" in line:
-                send(["gamemode creative @a", "tp @a 0.5 65 -8.5 0 8"])
-        if not ready:
-            raise RuntimeError(f"Server did not become ready; inspect {log_path}")
+            message = console_message(line)
+            if message and message.startswith('Done (') and 'For help' in message and not fixture.accepting:
+                send(fixture.accept())
+                publish_readiness()
+                print(f"ACCEPTING fixture={args.fixture_id} port={args.port} onlineMode=true fixtureReady=false", flush=True)
+            name = joined_player(line)
+            if name:
+                send(fixture.join(name, time.monotonic()))
+                publish_readiness()
+                print(f"FIXTURE_SETUP fixture={args.fixture_id} join={fixture.joins} phase=teleport", flush=True)
+            previously_ready = fixture.ready
+            send(fixture.observe(line, time.monotonic()))
+            if fixture.ready and not previously_ready:
+                publish_readiness()
+                print(f"FIXTURE_READY fixture={args.fixture_id} join={fixture.joins} attempt={fixture.attempt} verified=true", flush=True)
+        if not fixture.accepting:
+            raise RuntimeError(f"Server did not become accepting; inspect {log_path}")
     finally:
         if process is not None and process.poll() is None:
             try:
@@ -338,7 +528,8 @@ def run(args):
             except subprocess.TimeoutExpired:
                 process.kill()  # Only the child created and owned by this invocation.
                 process.wait(timeout=10)
-        (run_dir / "stopped.json").write_text(json.dumps({"ready": ready,
+        (run_dir / "stopped.json").write_text(json.dumps({"accepting": fixture.accepting, "fixtureReady": fixture.ready,
+            "joins": fixture.joins,
             "exitCode": None if process is None else process.returncode}) + "\n", encoding="ascii")
         print(f"STOPPED fixture={args.fixture_id}", flush=True)
 

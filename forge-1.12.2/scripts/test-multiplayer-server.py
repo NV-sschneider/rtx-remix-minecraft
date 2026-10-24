@@ -22,7 +22,8 @@ class MultiplayerServerTest(unittest.TestCase):
         for identifier in ("../escape", "x\nsay injected", "x\"}", "", "a" * 49, "x/y", "x\\y", "x:25565"):
             with self.subTest(identifier=identifier), self.assertRaises(ValueError):
                 server.setup_commands(identifier)
-        self.assertEqual(len(server.setup_commands("20261024-test-1")), 12)
+        self.assertTrue(server.setup_commands("20261024-test-1")[0].startswith("fill "))
+        self.assertFalse(any("READY" in command for command in server.setup_commands("20261024-test-1")))
 
     def test_server_always_authenticates_and_only_binds_loopback(self):
         properties = dict(line.split("=", 1) for line in server.properties("test-1", 25575).splitlines())
@@ -47,6 +48,22 @@ class MultiplayerServerTest(unittest.TestCase):
         self.assertEqual(values["allow-flight"], "true")
         self.assertEqual(values["custom-key"], "kept")
         self.assertEqual(values["level-type"], "FLAT")
+
+    def test_owned_cow_survives_entity_ticks_while_natural_spawning_remains_disabled(self):
+        # Pinned WorldServer.updateEntityWithOptionalForce kills EntityAnimal when
+        # getCanSpawnAnimals is false; doMobSpawning gates the spawner separately.
+        for pack in ("forge", "rlcraft-2.9.3"):
+            with self.subTest(pack=pack):
+                values = dict(line.split("=", 1) for line in server.properties(
+                    "test", 25575, pack, "spawn-animals=false\n").splitlines())
+                self.assertEqual(values["spawn-animals"], "true")
+                self.assertEqual(values["spawn-monsters"], "false")
+                fixture = server.FixtureSetup("test")
+                self.assertIn("gamerule doMobSpawning false", fixture.accept())
+                self.assertTrue(any(command.startswith("summon minecraft:cow ")
+                                    for command in server.setup_commands("test")))
+                self.assertFalse(any(command == "gamerule doMobSpawning true"
+                                     for command in server.setup_commands("test")))
 
     def test_archive_rejects_windows_paths_traversal_aliases_and_links_before_copy(self):
         for name in ("../outside", "C:/outside", "/outside", "config\\outside", "config/NUL.txt", "config/end.", "config/./x"):
@@ -120,6 +137,170 @@ class MultiplayerServerTest(unittest.TestCase):
                     server.run(args)
                 process.assert_not_called()
             self.assertFalse((root / "runs").exists())
+
+    @staticmethod
+    def console(message):
+        return "[01:04:29] [Server thread/INFO] [minecraft/DedicatedServer]: " + message
+
+    def acknowledge(self, fixture, now, proofs=None):
+        token = fixture.token
+        fixture.observe(self.console(f"[Server] {token}_BEGIN"), now)
+        for proof in fixture.expected if proofs is None else proofs:
+            message = proof + "0.50, 65.00, -8.50" if proof.startswith("Teleported ") else proof
+            fixture.observe(self.console(message), now)
+        return fixture.observe(self.console(f"[Server] {token}_END"), now)
+
+    def loaded_fixture(self):
+        fixture = server.FixtureSetup("test-1")
+        commands = fixture.accept()
+        self.assertFalse(any(command.startswith(("fill ", "summon ")) for command in commands))
+        self.assertTrue(fixture.accepting)
+        self.assertFalse(fixture.ready)
+        commands = fixture.join("Player_1", 0)
+        self.assertIn("tp Player_1 0.5 65 -8.5 0 8", commands)
+        self.acknowledge(fixture, 0)
+        self.assertEqual(fixture.tick(1.9), [])
+        commands = fixture.tick(2)
+        self.assertEqual(sum(command.startswith("testforblock ") for command in commands), 9)
+        commands = self.acknowledge(fixture, 2)
+        self.assertEqual(commands[1:-1], ["kill " + str(fixture.entity)])
+        self.assertFalse(any(command.startswith("summon ") for command in commands))
+        self.acknowledge(fixture, 2)
+        self.assertEqual(fixture.tick(2.9), [])
+        commands = fixture.tick(3)
+        self.assertEqual(commands[1:-1], ["testfor " + str(fixture.entity)])
+        commands = self.acknowledge(fixture, 3)
+        self.assertEqual(sum(command.startswith("summon ") for command in commands), 1)
+        self.assertLess(next(i for i, cmd in enumerate(commands) if cmd.startswith("fill ")),
+                        commands.index("tp Player_1 0.5 65 -8.5 0 8"))
+        self.assertFalse(fixture.ready)
+        return fixture
+
+    def test_scene_is_created_only_after_login_chunks_and_entity_retirement_then_verified(self):
+        fixture = self.loaded_fixture()
+        commands = self.acknowledge(fixture, 3)
+        self.assertTrue(any(command.startswith("testfor " + str(fixture.entity)) for command in commands))
+        self.assertTrue(any("Health:10.0f" in command for command in commands))
+        self.assertFalse(fixture.ready)
+        self.acknowledge(fixture, 3)
+        self.assertTrue(fixture.ready)
+        self.assertEqual(fixture.phase, "ready")
+        self.assertEqual(fixture.tick(1000), [])
+        self.assertEqual(fixture.accept(), [])
+        commands = fixture.join("Player_1", 10)
+        self.assertFalse(fixture.ready)
+        self.assertEqual(fixture.joins, 2)
+        self.assertFalse(any(command.startswith("summon ") for command in commands))
+
+    def test_slow_death_animation_requires_exact_absence_with_unique_bounded_probes(self):
+        fixture = server.FixtureSetup("test-1")
+        fixture.accept()
+        fixture.join("Player", 0)
+        self.acknowledge(fixture, 0)
+        fixture.tick(2)
+        self.acknowledge(fixture, 2)
+        self.acknowledge(fixture, 2)
+        previous_token = None
+        for check in range(1, fixture.MAX_ATTEMPTS + 1):
+            commands = fixture.tick(2 + check)
+            self.assertEqual(commands[1:-1], ["testfor " + str(fixture.entity)])
+            self.assertNotEqual(fixture.token, previous_token)
+            previous_token = fixture.token
+            # The dead entity can still satisfy the old UUID and custom name query.
+            self.assertEqual(self.acknowledge(fixture, 2 + check, {"Found mrtx-smoke-test-1"}), [])
+            self.assertFalse(fixture.ready)
+            self.assertEqual(fixture.phase, "wait-retire")
+        with self.assertRaisesRegex(RuntimeError, "did not retire after 10 checks"):
+            fixture.tick(13)
+
+    def test_retirement_rejects_wrong_uuid_and_stale_fence_then_places_after_exact_absence(self):
+        fixture = server.FixtureSetup("test-1")
+        fixture.accept()
+        fixture.join("Player", 0)
+        self.acknowledge(fixture, 0)
+        fixture.tick(2)
+        self.acknowledge(fixture, 2)
+        self.acknowledge(fixture, 2)
+        fixture.tick(3)
+        old_token = fixture.token
+        self.acknowledge(fixture, 3, {"Entity '00000000-0000-0000-0000-000000000000' cannot be found"})
+        self.assertEqual(fixture.phase, "wait-retire")
+        fixture.tick(4)
+        fixture.observe(self.console(f"[Server] {old_token}_BEGIN"), 4)
+        fixture.observe(self.console(f"Entity '{fixture.entity}' cannot be found"), 4)
+        fixture.observe(self.console(f"[Server] {old_token}_END"), 4)
+        self.assertFalse(fixture.observed)
+        commands = self.acknowledge(fixture, 4)
+        self.assertEqual(sum(command.startswith("summon ") for command in commands), 1)
+        self.assertTrue(any("Health:10.0f" in command for command in commands))
+        self.assertEqual(fixture.phase, "place")
+
+    def test_failed_summon_cannot_reuse_an_old_cow_proof(self):
+        fixture = self.loaded_fixture()
+        self.acknowledge(fixture, 3, {f"Teleported {fixture.player} to "})
+        self.assertEqual(fixture.phase, "wait-chunks")
+        self.assertFalse(fixture.ready)
+        self.assertEqual(fixture.last_missing, ["Object successfully summoned"])
+
+    def test_failed_fill_or_summon_cannot_become_ready_via_sentinel_or_partial_proofs(self):
+        fixture = self.loaded_fixture()
+        fixture.observe(self.console("Cannot place blocks outside of the world"), 3)
+        self.acknowledge(fixture, 3)
+        fixture.observe(self.console("[Server] MRTXS_READY_test-1"), 3)
+        self.assertFalse(fixture.ready)
+        self.acknowledge(fixture, 3, {"Found mrtx-smoke-test-1"})
+        self.assertFalse(fixture.ready)
+        self.assertEqual(fixture.phase, "wait-chunks")
+        self.assertIn("Successfully found the block at 0, 64, 0", fixture.last_missing)
+        self.assertEqual(fixture.tick(4.9), [])
+        self.assertTrue(fixture.tick(5))
+        self.assertEqual(fixture.attempt, 2)
+
+    def test_unloaded_chunks_retry_without_placing_anything_and_are_bounded(self):
+        fixture = server.FixtureSetup("test-1")
+        fixture.accept()
+        fixture.join("Player", 0)
+        self.acknowledge(fixture, 0)
+        for attempt in range(1, fixture.MAX_ATTEMPTS + 1):
+            commands = fixture.tick(attempt * 2)
+            self.assertFalse(any(command.startswith(("fill ", "summon ")) for command in commands))
+            self.assertEqual(self.acknowledge(fixture, attempt * 2, set()), [])
+        with self.assertRaisesRegex(RuntimeError, "after 10 attempts"):
+            fixture.tick(22)
+
+    def test_teleport_requires_proof_and_command_fences_have_a_deadline(self):
+        fixture = server.FixtureSetup("test-1")
+        fixture.accept()
+        fixture.join("Player", 0)
+        with self.assertRaisesRegex(RuntimeError, "teleport failed"):
+            self.acknowledge(fixture, 0, set())
+        fixture.join("Player", 1)
+        with self.assertRaisesRegex(RuntimeError, "acknowledgment timed out"):
+            fixture.tick(11)
+        with self.assertRaisesRegex(RuntimeError, "setup timed out"):
+            fixture.tick(100)
+
+    def test_success_outside_current_fence_or_from_player_chat_is_not_proof(self):
+        fixture = self.loaded_fixture()
+        self.acknowledge(fixture, 3)
+        token = fixture.token
+        for proof in fixture.expected:
+            fixture.observe(self.console(proof), 3)  # Before BEGIN.
+        fixture.observe(self.console(f"[Server] {token}_BEGIN"), 3)
+        for proof in fixture.expected:
+            fixture.observe("[Server thread/INFO] [minecraft/DedicatedServer]: <Player> " + proof, 3)
+        fixture.observe(self.console(f"[Server] {token}_END"), 3)
+        self.assertFalse(fixture.ready)
+        self.assertEqual(len(fixture.last_missing), 7)
+
+    def test_login_parser_accepts_only_the_server_loopback_playerlist_event(self):
+        prefix = "[01:00:00] [Server thread/INFO] [minecraft/PlayerList]: "
+        self.assertEqual(server.joined_player(prefix + "Player_1[/127.0.0.1:4123] logged in with entity id 9 at (0, 64, 0)"), "Player_1")
+        for body in ("Player_1[/10.0.0.2:4123] logged in with entity id 9",
+                     "bad/name[/127.0.0.1:4123] logged in with entity id 9"):
+            self.assertIsNone(server.joined_player(prefix + body))
+        self.assertIsNone(server.joined_player(prefix.replace("PlayerList", "DedicatedServer") +
+                                              "Player_1[/127.0.0.1:4123] logged in with entity id 9"))
 
 
 if __name__ == "__main__":
