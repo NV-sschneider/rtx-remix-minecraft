@@ -5,18 +5,38 @@
 def sdk = file('../remix-runtime/win64')
 def nativeBridge = file('bridge/build/native/win64/remixbridge.dll')
 def inventory = file("$buildDir/packaging/forge-runtime.sha256")
+def exclusionPolicy = file('config/runtime-payload-excludes.txt')
+def exclusions = exclusionPolicy.readLines('UTF-8').findAll {
+    !it.trim().empty && !it.trim().startsWith('#')
+}.collect { java.util.regex.Pattern.compile(it) }
+def selectedPayload = null
 def payload = {
-    def files = new TreeMap<String, File>()
+    if (selectedPayload != null) return selectedPayload
+    def files = new TreeMap<String, File>(String.CASE_INSENSITIVE_ORDER)
     fileTree(sdk).files.each { f ->
         def relative = sdk.toPath().relativize(f.toPath()).toString().replace('\\', '/')
-        if (!relative.startsWith('.') && !f.name.endsWith('.pdb') &&
-                f.name != 'NvRemixBridge.exe' && f.name != 'remixbridge.dll') {
-            files["remix-sdk/$relative".toString()] = f
+        if (!exclusions.any { it.matcher(relative).find() }) {
+            def member = "remix-sdk/$relative".toString()
+            if (files.containsKey(member)) throw new GradleException("Duplicate runtime member: $relative")
+            if (files.size() >= 8190 || f.length() > 2L * 1024 * 1024 * 1024) {
+                throw new GradleException('The runtime inventory exceeds the extraction limits')
+            }
+            def path = f.toPath()
+            while (path != sdk.toPath()) {
+                def attributes = java.nio.file.Files.readAttributes(path, java.nio.file.attribute.BasicFileAttributes,
+                        java.nio.file.LinkOption.NOFOLLOW_LINKS)
+                if (attributes.isSymbolicLink() || attributes.isOther()) {
+                    throw new GradleException("Linked runtime member is unsupported: $relative")
+                }
+                path = path.parent
+            }
+            files[member] = f
         }
     }
+    if (!files.containsKey('remix-sdk/d3d9.dll')) throw new GradleException('The runtime source is missing d3d9.dll')
     files['remix-sdk/remixbridge.dll'] = nativeBridge
     files['rtx.conf'] = file('config/rtx.conf')
-    files
+    selectedPayload = files
 }
 
 task compilePackageBridge(type: Exec) {
@@ -36,6 +56,7 @@ task runtimeInventory {
     inputs.dir sdk
     inputs.file file('config/rtx.conf')
     inputs.file nativeBridge
+    inputs.file exclusionPolicy
     outputs.file inventory
     doLast {
         if (!new File(sdk, 'd3d9.dll').isFile()) {
@@ -46,9 +67,6 @@ task runtimeInventory {
         inventory.parentFile.mkdirs()
         inventory.withWriter('UTF-8') { writer ->
             payload().each { name, source ->
-                if (name ==~ /(?i).*(python[^\/]*\.dll|\.(pyd|pyc))$/ || name.contains('/python/')) {
-                    throw new GradleException("Python runtime payload is not permitted: $name")
-                }
                 digest.reset()
                 source.withInputStream { stream ->
                     int count
@@ -74,7 +92,7 @@ task packageForge(type: Zip) {
     from(inventory) { into 'native' }
     from(sdk) {
         into 'native/remix-sdk'
-        exclude '**/*.pdb', '**/NvRemixBridge.exe', '**/remixbridge.dll', '**/.*'
+        include { details -> details.directory || payload()["remix-sdk/${details.relativePath.pathString}".toString()] == details.file }
     }
     from(nativeBridge) { into 'native/remix-sdk' }
     from('config/rtx.conf') { into 'native' }

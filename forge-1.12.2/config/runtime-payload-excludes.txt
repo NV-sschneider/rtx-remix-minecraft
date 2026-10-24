@@ -1,0 +1,7 @@
+# Shared by packaging.gradle and scripts/runtime-payload.ps1; patterns use forward-slash relative paths.
+(?i)(^|/)\.[^/]*(/|$)
+(?i)\.pdb$
+(?i)(^|/)(NvRemixBridge\.exe|remixbridge\.dll)$
+(?i)(^|/)[^/]*python[^/]*\.(dll|exe)$
+(?i)\.(py|pyd|pyc|pyo)$
+(?i)(^|/)(python\d*(\.\d+)?|__pycache__)(/|$)
