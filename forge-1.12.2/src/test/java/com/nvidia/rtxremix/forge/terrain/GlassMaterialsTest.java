@@ -10,11 +10,13 @@ import org.junit.Test;
 import static org.junit.Assert.*;
 
 public class GlassMaterialsTest {
-    @Test public void onlyFullVanillaGlassReceivesVolumeMaterials() {
+    @Test public void onlyVanillaGlassBlocksAndClosedPanesReceiveVolumeMaterials() {
         assertEquals(GlassMaterials.Kind.CLEAR, GlassMaterials.kind(new ResourceLocation("minecraft:glass")));
         assertEquals(GlassMaterials.Kind.STAINED, GlassMaterials.kind(new ResourceLocation("minecraft:stained_glass")));
-        for (String name : new String[] {"minecraft:glass_pane", "minecraft:stained_glass_pane",
-                "minecraft:ice", "minecraft:slime", "mod:glass", "mod:stained_glass"}) {
+        assertEquals(GlassMaterials.Kind.CLEAR, GlassMaterials.kind(new ResourceLocation("minecraft:glass_pane")));
+        assertEquals(GlassMaterials.Kind.STAINED, GlassMaterials.kind(new ResourceLocation("minecraft:stained_glass_pane")));
+        for (String name : new String[] {"minecraft:ice", "minecraft:slime", "mod:glass", "mod:stained_glass",
+                "mod:glass_pane", "mod:stained_glass_pane"}) {
             assertNull(name, GlassMaterials.kind(new ResourceLocation(name)));
         }
         assertNull(GlassMaterials.kind(null));
