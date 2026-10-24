@@ -229,6 +229,20 @@ def joined_player(line):
     return match[1] if match else None
 
 
+def left_player(line):
+    # NetHandlerPlayServer.onDisconnect logs the authenticated profile name before
+    # PlayerList removes it. The server's translated departure is a second signal.
+    # Anchor the logger and whole event so player chat cannot spoof either shape.
+    prefix = r"\[\d{2}:\d{2}:\d{2}\] \[Server thread/INFO\] \[minecraft/"
+    match = re.fullmatch(prefix + r"NetHandlerPlayServer\]: ([A-Za-z0-9_]{1,16}) lost connection: [^\r\n]*",
+                         line.rstrip("\r\n"))
+    if match:
+        return match[1]
+    match = re.fullmatch(prefix + r"(?:DedicatedServer|MinecraftServer)\]: ([A-Za-z0-9_]{1,16}) left the game",
+                         line.rstrip("\r\n"))
+    return match[1] if match else None
+
+
 class FixtureSetup:
     """Fenced server-console protocol; readiness requires observed command results."""
 
@@ -273,6 +287,23 @@ class FixtureSetup:
         return self._batch("teleport", [f"gamemode creative {name}", f"tp {name} 0.5 65 -8.5 0 8"],
                            {f"Teleported {name} to "}, now)
 
+    def leave(self, name):
+        if self.player is None or self.player != name:
+            return False
+        self.player = None
+        self.ready = False
+        self.phase = "accepting"
+        self.attempt = self.retirement_checks = 0
+        self.deadline = self.next_probe = self.ack_deadline = 0
+        self.token = None
+        self.inside = False
+        self.expected.clear()
+        self.observed.clear()
+        self.last_missing = []
+        # Keep the monotonically increasing join and fence generations. Already
+        # submitted console commands cannot be recalled, but their replies expire.
+        return True
+
     @staticmethod
     def block_proof(x, y, z):
         return f"Successfully found the block at {x}, {y}, {z}"
@@ -293,7 +324,7 @@ class FixtureSetup:
         return []
 
     def tick(self, now):
-        if not self.joins or self.ready:
+        if self.player is None or self.ready:
             return []
         if now >= self.deadline:
             raise RuntimeError(f"Fixture setup timed out in {self.phase}; missing={self.last_missing}")
@@ -314,6 +345,10 @@ class FixtureSetup:
         return self._batch("chunks", commands, {self.block_proof(*pos) for pos in self.CHUNKS}, now)
 
     def observe(self, line, now):
+        departed = left_player(line)
+        if departed:
+            self.leave(departed)
+            return []
         message = console_message(line)
         if not self.token or message is None:
             return []
@@ -453,7 +488,7 @@ def run(args):
                 for line in process.stdout:
                     log.write(line)
                     log.flush()
-                    if not overflow.is_set() and (console_message(line) is not None or joined_player(line)):
+                    if not overflow.is_set() and (console_message(line) is not None or joined_player(line) or left_player(line)):
                         try:
                             lines.put_nowait(line)
                         except queue.Full:
@@ -492,10 +527,12 @@ def run(args):
         while time.monotonic() < deadline and not (run_dir / "stop.request").exists():
             if overflow.is_set():
                 raise RuntimeError("Server console event queue overflowed; readiness cannot be verified")
-            send(fixture.tick(time.monotonic()))
             try:
                 line = lines.get(timeout=0.25)
             except queue.Empty:
+                # Drain queued lifecycle events before scheduling probes or checking
+                # setup deadlines; an already logged logout cancels that session.
+                send(fixture.tick(time.monotonic()))
                 continue
             if line is None:
                 raise RuntimeError(f"Owned Forge server exited; inspect {log_path}")
@@ -510,8 +547,12 @@ def run(args):
                 publish_readiness()
                 print(f"FIXTURE_SETUP fixture={args.fixture_id} join={fixture.joins} phase=teleport", flush=True)
             previously_ready = fixture.ready
+            previous_player = fixture.player
             send(fixture.observe(line, time.monotonic()))
-            if fixture.ready and not previously_ready:
+            if previous_player is not None and fixture.player is None:
+                publish_readiness()
+                print(f"FIXTURE_WAITING fixture={args.fixture_id} join={fixture.joins} reason=player-disconnected", flush=True)
+            elif fixture.ready and not previously_ready:
                 publish_readiness()
                 print(f"FIXTURE_READY fixture={args.fixture_id} join={fixture.joins} attempt={fixture.attempt} verified=true", flush=True)
         if not fixture.accepting:

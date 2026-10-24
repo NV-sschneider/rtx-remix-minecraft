@@ -302,6 +302,76 @@ class MultiplayerServerTest(unittest.TestCase):
         self.assertIsNone(server.joined_player(prefix.replace("PlayerList", "DedicatedServer") +
                                               "Player_1[/127.0.0.1:4123] logged in with entity id 9"))
 
+    def test_logout_parser_requires_the_exact_authenticated_server_event(self):
+        prefix = "[01:48:46] [Server thread/INFO] [minecraft/"
+        for logger, body in (("NetHandlerPlayServer", "Player_1 lost connection: Disconnected"),
+                             ("DedicatedServer", "Player_1 left the game"),
+                             ("MinecraftServer", "Player_1 left the game")):
+            with self.subTest(logger=logger):
+                self.assertEqual(server.left_player(prefix + logger + "]: " + body + "\r\n"), "Player_1")
+        for logger, body in (("NetHandlerLoginServer", "Player_1 lost connection: Disconnected"),
+                             ("PlayerList", "Player_1 left the game"),
+                             ("DedicatedServer", "<Player_2> Player_1 left the game"),
+                             ("DedicatedServer", "[Server] Player_1 left the game"),
+                             ("DedicatedServer", "Player_1 left the game extra"),
+                             ("NetHandlerPlayServer", "bad/name lost connection: Disconnected")):
+            with self.subTest(logger=logger, body=body):
+                self.assertIsNone(server.left_player(prefix + logger + "]: " + body))
+        forged = prefix + "DedicatedServer]: <Player_2> " + prefix + "NetHandlerPlayServer]: Player_1 lost connection: Disconnected"
+        self.assertIsNone(server.left_player(forged))
+        self.assertIsNone(server.left_player((prefix + "NetHandlerPlayServer]: Player_1 lost connection: Disconnected")
+                                            .replace("Server thread", "Netty Server IO #1")))
+
+    def test_logout_cancels_inflight_fences_and_all_deadlines_until_a_fresh_join(self):
+        fixture = self.loaded_fixture()
+        self.acknowledge(fixture, 3)  # Verification is in flight when the client exits.
+        old_token, old_proofs = fixture.token, set(fixture.expected)
+        fixture.observe(self.console(f"[Server] {old_token}_BEGIN"), 3)
+        departure = "[01:48:46] [Server thread/INFO] [minecraft/NetHandlerPlayServer]: Player_1 lost connection: Disconnected"
+        self.assertEqual(fixture.observe(departure, 4), [])
+        self.assertEqual(fixture.phase, "accepting"); self.assertIsNone(fixture.player)
+        self.assertFalse(fixture.ready); self.assertFalse(fixture.inside); self.assertIsNone(fixture.token)
+        self.assertFalse(fixture.expected); self.assertFalse(fixture.observed)
+        self.assertEqual((fixture.deadline, fixture.next_probe, fixture.ack_deadline), (0, 0, 0))
+        for proof in old_proofs:
+            self.assertEqual(fixture.observe(self.console(proof), 1000), [])
+        self.assertEqual(fixture.observe(self.console(f"[Server] {old_token}_END"), 1000), [])
+        self.assertEqual(fixture.tick(1000), []); self.assertFalse(fixture.ready)
+        commands = fixture.join("Player_1", 1001)
+        self.assertEqual(fixture.joins, 2); self.assertEqual(fixture.deadline, 1091)
+        self.assertEqual(fixture.attempt, 0); self.assertNotEqual(fixture.token, old_token)
+        self.assertFalse(any(command.startswith(("fill ", "summon ", "kill ")) for command in commands))
+        fixture.observe(self.console(f"[Server] {old_token}_BEGIN"), 1001)
+        for proof in old_proofs:
+            fixture.observe(self.console(proof), 1001)
+        fixture.observe(self.console(f"[Server] {old_token}_END"), 1001)
+        self.assertFalse(fixture.observed); self.assertFalse(fixture.ready)
+        self.acknowledge(fixture, 1001)
+        self.assertEqual(fixture.phase, "wait-chunks")
+        self.assertTrue(fixture.tick(1003))
+
+    def test_logout_only_cancels_the_owned_player_and_revokes_previously_ready_state(self):
+        fixture = self.loaded_fixture()
+        self.acknowledge(fixture, 3); self.acknowledge(fixture, 3)
+        self.assertTrue(fixture.ready)
+        self.assertFalse(fixture.leave("SomeoneElse")); self.assertTrue(fixture.ready)
+        fixture.observe(self.console("SomeoneElse left the game"), 4)
+        self.assertTrue(fixture.ready)
+        fixture.observe(self.console("Player_1 left the game"), 4)
+        self.assertFalse(fixture.ready); self.assertEqual(fixture.tick(1000), [])
+        self.assertFalse(fixture.leave("Player_1")); self.assertEqual(fixture.joins, 1)
+
+    def test_logout_cancels_scheduled_chunk_and_retirement_retries(self):
+        for phase in ("wait-chunks", "wait-retire"):
+            with self.subTest(phase=phase):
+                fixture = server.FixtureSetup("test-1"); fixture.accept(); fixture.join("Player_1", 0)
+                self.acknowledge(fixture, 0)
+                if phase == "wait-retire":
+                    fixture.tick(2); self.acknowledge(fixture, 2); self.acknowledge(fixture, 2)
+                self.assertEqual(fixture.phase, phase)
+                self.assertTrue(fixture.leave("Player_1"))
+                self.assertEqual(fixture.tick(1000), []); self.assertFalse(fixture.ready)
+
 
 if __name__ == "__main__":
     unittest.main()
