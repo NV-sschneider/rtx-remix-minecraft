@@ -12,8 +12,11 @@ final class BlockMeshDecoder {
     static final int METADATA_STRIDE = 7;
     private final float[] positions = new float[12], uv = new float[8];
     private final int[] colors = new int[4];
+    private boolean complete;
+    boolean complete() { return complete; }
 
     void append(ByteBuffer source, int vertices, float[] metadata, MeshPacking target) {
+        complete = true;
         if (vertices < 0 || vertices > MAX_VERTICES || (vertices & 3) != 0
                 || (long) vertices * 28 > source.limit() || metadata.length < vertices / 4 * METADATA_STRIDE)
             throw new IllegalArgumentException("Invalid bounded block capture");
@@ -37,7 +40,7 @@ final class BlockMeshDecoder {
                     float bx = positions[6] - positions[0], by = positions[7] - positions[1], bz = positions[8] - positions[2];
                     nx = ay * bz - az * by; ny = az * bx - ax * bz; nz = ax * by - ay * bx;
                     float length = (float) Math.sqrt(nx * nx + ny * ny + nz * nz);
-                    if (length < 0.000001f) continue;
+                    if (length < 0.000001f) { complete = false; continue; }
                     nx /= length; ny /= length; nz /= length;
                 }
                 target.quad(positions, uv, colors, finite(nx), finite(ny), finite(nz), minU, minV, maxU, maxV);

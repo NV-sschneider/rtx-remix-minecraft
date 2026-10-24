@@ -107,6 +107,7 @@ final class BetterFoliageCapture {
 
     long captureCount() { return captures; }
     long geometryHash() { return buffer.geometryHash(); }
+    boolean complete() { return buffer.complete(); }
 
     private static CaptureFailure failed(Throwable failure) {
         if (failure instanceof Error) throw (Error) failure;

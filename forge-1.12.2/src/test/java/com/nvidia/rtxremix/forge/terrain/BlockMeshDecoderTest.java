@@ -52,6 +52,16 @@ public class BlockMeshDecoderTest {
         catch (IllegalArgumentException expected) { assertEquals(0, target.vertexCount()); }
     }
 
+    @Test public void skippedDegenerateGeometryRevokesReplacementEligibilityUntilNextBlock() {
+        BlockMeshDecoder decoder = new BlockMeshDecoder(); MeshPacking target = new MeshPacking();
+        ByteBuffer collapsed = input(4);
+        for (int v = 0; v < 4; v++) for (int axis = 0; axis < 3; axis++) collapsed.putFloat(v * 28 + axis * 4, 0);
+        decoder.append(collapsed, 4, METADATA, target);
+        assertEquals(0, target.vertexCount()); assertFalse(decoder.complete());
+        decoder.append(input(4), 4, METADATA, target);
+        assertEquals(4, target.vertexCount()); assertTrue(decoder.complete());
+    }
+
     private static ByteBuffer input(int count) {
         ByteBuffer data = MeshPacking.direct(count * 28);
         for (int i = 0; i < count; i++) {

@@ -82,4 +82,5 @@ final class BlockCaptureBuffer extends BufferBuilder implements BlockQuadSink {
         reset(); setTranslation(0, 0, 0); foliageVertices = 0;
     }
     long geometryHash() { return hash; }
+    boolean complete() { return decoder.complete(); }
 }

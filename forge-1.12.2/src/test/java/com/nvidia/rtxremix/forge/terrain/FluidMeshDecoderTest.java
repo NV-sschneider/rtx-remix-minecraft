@@ -58,8 +58,18 @@ public class FluidMeshDecoderTest {
         quad(input, TOP, UV, REVERSE);
         input.flip();
         MeshPacking target = new MeshPacking();
-        new FluidMeshDecoder().append(input, 8, STRIDE, UV_OFFSET, 0xffffff, BOUNDS, target);
+        FluidMeshDecoder decoder = new FluidMeshDecoder();
+        decoder.append(input, 8, STRIDE, UV_OFFSET, 0xffffff, BOUNDS, target);
         assertEquals(4, target.vertexCount());
+        assertTrue(decoder.complete());
+    }
+
+    @Test public void omittedDegenerateFluidQuadDoesNotAuthorizeReplacingItsSolidDraw() {
+        ByteBuffer input = MeshPacking.direct(4 * STRIDE);
+        quad(input, new float[12], UV, FORWARD); input.flip();
+        FluidMeshDecoder decoder = new FluidMeshDecoder(); MeshPacking target = new MeshPacking();
+        decoder.append(input, 4, STRIDE, UV_OFFSET, 0xffffff, BOUNDS, target);
+        assertEquals(0, target.vertexCount()); assertFalse(decoder.complete());
     }
 
     @Test public void keepsAnOverlayUsingDifferentTextureCoordinates() {

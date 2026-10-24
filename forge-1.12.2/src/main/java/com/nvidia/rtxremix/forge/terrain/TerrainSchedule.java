@@ -34,9 +34,16 @@ final class TerrainSchedule {
         boolean queued;
         boolean building;
         boolean failed;
+        boolean completeSolidCoverage;
+        Object publishedSource;
         Object asset;
         Section(Column column, int y) { this.column = column; this.y = y; }
         boolean ready() { return publication != 0 && publishedRevision == revision && column.resident; }
+        boolean solidReplacementReady(Object currentSource) {
+            return completeSolidCoverage && currentSource != null && currentSource == publishedSource
+                    && currentSource == column.source && !failed && !queued && !building && ready();
+        }
+        void revokeReplacement() { completeSolidCoverage = false; publishedSource = null; }
     }
 
     private int x, y, z, radius = -1;
@@ -129,6 +136,7 @@ final class TerrainSchedule {
     void invalidate(Section section) {
         if (section.column.source == null || !section.column.resident) return;
         clearFailure(section);
+        section.revokeReplacement();
         section.revision++;
         if (!section.queued && !section.building) {
             section.queued = true;
@@ -159,12 +167,18 @@ final class TerrainSchedule {
         }
     }
     void publish(Section section, long revision) {
+        publish(section, revision, null, false);
+    }
+    void publish(Section section, long revision, Object source, boolean completeSolidCoverage) {
         clearFailure(section);
         section.building = false;
         section.publishedRevision = revision;
         section.publication = ++publication;
+        section.publishedSource = source;
+        section.completeSolidCoverage = completeSolidCoverage;
     }
     void fail(Section section) {
+        section.revokeReplacement();
         section.building = false;
         if (section.queued) dirty.remove(section);
         section.queued = false;

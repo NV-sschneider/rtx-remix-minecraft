@@ -14,10 +14,13 @@ final class FluidMeshDecoder {
     private final int[] colors = new int[4];
     private final float[] previousPositions = new float[12];
     private final float[] previousUv = new float[8];
+    private boolean complete;
+    boolean complete() { return complete; }
 
     /** Bounds are minU,minV,maxU,maxV for the still, flowing, and optional overlay sprites. */
     void append(ByteBuffer source, int vertices, int stride, int uvOffset, int tint,
                 float[][] bounds, MeshPacking target) {
+        complete = true;
         if (vertices < 0 || vertices > MAX_VERTICES || (vertices & 3) != 0
                 || stride < 12 || uvOffset < 12 || uvOffset + 8 > stride
                 || (long) vertices * stride > source.limit()) {
@@ -42,7 +45,8 @@ final class FluidMeshDecoder {
                 nz += (positions[a] - positions[b]) * (positions[a + 1] + positions[b + 1]);
             }
             float length = (float) Math.sqrt(nx * nx + ny * ny + nz * nz);
-            if (length < 0.000001f) continue;
+            if (!Float.isFinite(length)) throw new IllegalArgumentException("Non-finite fluid normal");
+            if (length < 0.000001f) { complete = false; continue; }
             nx /= length; ny /= length; nz /= length;
             if (previous && nx * previousX + ny * previousY + nz * previousZ < -0.999f && sameQuad()) continue;
             float[] sprite = findBounds(bounds);

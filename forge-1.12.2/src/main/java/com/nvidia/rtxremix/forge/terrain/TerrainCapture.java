@@ -172,6 +172,7 @@ public final class TerrainCapture implements AutoCloseable {
                 reconcile(section.column);
                 if (section.column.source == null) { schedule.discard(section); continue; }
                 active = new Build(section, (Chunk) section.column.source);
+                active.completeSolidCoverage = baked.standardPipeline();
                 ExtendedBlockStorage storage = active.chunk.getBlockStorageArray()[section.y];
                 if (storage == null || storage.isEmpty()) {
                     publishBuild();
@@ -259,6 +260,13 @@ public final class TerrainCapture implements AutoCloseable {
         TerrainSchedule.Section section = section(x, y, z);
         return section != null && section.ready();
     }
+    /** A replacement gate, stricter than readiness: omissions never authorize cancelling a vanilla draw. */
+    public boolean isSectionSolidReplacementReady(int x, int y, int z) {
+        checkThread();
+        if (closed || mc.world != world || texturesDirty || allDirty) return false;
+        TerrainSchedule.Section section = section(x, y, z);
+        return section != null && section.solidReplacementReady(world.getChunkProvider().getLoadedChunk(x, z));
+    }
     public long getSectionRevision(int x, int y, int z) {
         TerrainSchedule.Section section = section(x, y, z);
         return section == null ? 0 : section.publication;
@@ -283,6 +291,7 @@ public final class TerrainCapture implements AutoCloseable {
                 schedule.clearFailure(section);
                 section.revision++;
                 section.publication = 0;
+                section.revokeReplacement();
             }
         }
         // Face culling and extended states can inspect diagonal neighbouring columns.
@@ -340,8 +349,12 @@ public final class TerrainCapture implements AutoCloseable {
                     }
                 }
                 EnumBlockRenderType type = state.getRenderType();
-                if (type != EnumBlockRenderType.MODEL && type != EnumBlockRenderType.LIQUID) continue;
+                if (type != EnumBlockRenderType.MODEL && type != EnumBlockRenderType.LIQUID) {
+                    if (type != EnumBlockRenderType.INVISIBLE) build.completeSolidCoverage = false;
+                    continue;
+                }
                 if (type == EnumBlockRenderType.LIQUID && !FluidCapture.supported(state)) {
+                    build.completeSolidCoverage = false;
                     if (!warnedUnsupportedFluid) {
                         warnedUnsupportedFluid = true;
                         LOGGER.warn("Unsupported LIQUID renderer for {}; only BlockLiquid water/lava is captured; further warnings are suppressed",
@@ -355,6 +368,7 @@ public final class TerrainCapture implements AutoCloseable {
                         int layer = state.getMaterial() == Material.LAVA ? LAVA : WATER;
                         if (builders[layer] == null) builders[layer] = new MeshPacking();
                         fluids.capture(state, world, blockPosition, section.column.x, section.y, section.column.z, builders[layer]);
+                        build.completeSolidCoverage &= fluids.complete();
                     } else {
                         emitBlock(builders, state, blockPosition, x, y, z);
                     }
@@ -368,6 +382,7 @@ public final class TerrainCapture implements AutoCloseable {
                 } catch (BetterFoliageCapture.CaptureFailure error) {
                     discardBuild(); throw error;
                 } catch (RuntimeException error) {
+                    build.completeSolidCoverage = false;
                     for (int i = 0; i < builders.length; i++) if (builders[i] != null) builders[i].truncate(checkpoints[i]);
                     if (!warnedUnsupportedModel) {
                         warnedUnsupportedModel = true;
@@ -457,7 +472,7 @@ public final class TerrainCapture implements AutoCloseable {
             }
         }
         lights.publish(section.column.x, section.y, section.column.z, build.lights);
-        schedule.publish(section, build.revision);
+        schedule.publish(section, build.revision, build.chunk, build.completeSolidCoverage);
         publishedSections++;
         active = null;
         resetBuilders();
@@ -474,6 +489,7 @@ public final class TerrainCapture implements AutoCloseable {
     private void resetBuilders() { for (MeshPacking packed : builders) if (packed != null) packed.reset(); }
 
     private void emitBlock(MeshPacking[] layers, IBlockState raw, BlockPos pos, int x, int y, int z) {
+        baked.beginBlock();
         IBlockState actual = raw.getActualState(world, pos);
         GlassMaterials.Kind glass = GlassMaterials.kind(actual.getBlock().getRegistryName());
         int originX = pos.getX() - x, originY = pos.getY() - y, originZ = pos.getZ() - z;
@@ -486,9 +502,11 @@ public final class TerrainCapture implements AutoCloseable {
             if (foliage == null) baked.emit(raw, world, pos, originX, originY, originZ, layers[layerIndex]);
             else {
                 active.foliageVertices += foliage.capture(raw, world, pos, layer, originX, originY, originZ, layers[layerIndex]);
+                active.completeSolidCoverage &= foliage.complete();
                 active.geometryHash = (active.geometryHash ^ foliage.geometryHash()) * 0x100000001b3L;
             }
         }
+        active.completeSolidCoverage &= baked.complete();
     }
     private void uploadAtlas() {
         int oldActive = GL11.glGetInteger(GL13.GL_ACTIVE_TEXTURE);
@@ -703,6 +721,7 @@ public final class TerrainCapture implements AutoCloseable {
         int vertex;
         long foliageVertices;
         long geometryHash = 0xcbf29ce484222325L;
+        boolean completeSolidCoverage;
         Build(TerrainSchedule.Section section, Chunk chunk) {
             this.section = section;
             this.chunk = chunk;

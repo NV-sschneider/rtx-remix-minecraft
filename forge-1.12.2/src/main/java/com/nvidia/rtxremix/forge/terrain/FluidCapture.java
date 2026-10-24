@@ -42,6 +42,7 @@ final class FluidCapture {
         return state.getBlock() instanceof BlockLiquid
                 && (state.getMaterial() == Material.WATER || state.getMaterial() == Material.LAVA);
     }
+    boolean complete() { return decoder.complete(); }
 
     void capture(IBlockState state, IBlockAccess world, BlockPos pos,
                  int sectionX, int sectionY, int sectionZ, MeshPacking target) {

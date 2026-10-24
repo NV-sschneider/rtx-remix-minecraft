@@ -17,6 +17,37 @@ public class TerrainScheduleTest {
         @Override public void remove(TerrainSchedule.Column column) { removed.add(column); }
     };
 
+    @Test public void readyPublicationDoesNotProveSemanticSolidCoverage() {
+        TerrainSchedule schedule = new TerrainSchedule(); schedule.move(0, 0, 0, 0, retirement);
+        TerrainSchedule.Column column = schedule.column(0, 0); Object source = column.source = new Object();
+        TerrainSchedule.Section section = column.sections[0];
+        schedule.invalidate(section); schedule.next();
+        schedule.publish(section, section.revision, source, false);
+        assertTrue(section.ready()); assertFalse(section.solidReplacementReady(source));
+        schedule.invalidate(section); schedule.next();
+        schedule.publish(section, section.revision, source, true);
+        assertTrue(section.solidReplacementReady(source));
+        assertFalse(section.solidReplacementReady(null));
+        assertFalse(section.solidReplacementReady(new Object()));
+        // A chunk can be replaced before the discovery queue reconciles its column.
+        Object replacement = new Object(); assertFalse(section.solidReplacementReady(replacement));
+        column.source = replacement; assertFalse(section.solidReplacementReady(replacement));
+        assertFalse(section.solidReplacementReady(source));
+    }
+
+    @Test public void invalidationFailureAndDepartureImmediatelyRevokeSolidReplacement() {
+        TerrainSchedule schedule = new TerrainSchedule(); schedule.move(0, 0, 0, 0, retirement);
+        TerrainSchedule.Column column = schedule.column(0, 0); Object source = column.source = new Object();
+        TerrainSchedule.Section section = column.sections[0];
+        schedule.invalidate(section); schedule.next(); schedule.publish(section, section.revision, source, true);
+        assertTrue(section.solidReplacementReady(source));
+        schedule.invalidate(section); assertFalse(section.solidReplacementReady(source)); assertNull(section.publishedSource);
+        schedule.next(); schedule.fail(section); assertFalse(section.solidReplacementReady(source));
+        schedule.invalidate(section); schedule.next(); schedule.publish(section, section.revision, source, true);
+        assertTrue(section.solidReplacementReady(source));
+        schedule.move(2, 0, 0, 0, retirement); assertFalse(section.solidReplacementReady(source));
+    }
+
     @Test public void discoversEveryColumnAtMaximumVanillaDistanceWithoutDuplicates() {
         TerrainSchedule schedule = new TerrainSchedule();
         schedule.move(-18, 4, -31, 32, retirement);
