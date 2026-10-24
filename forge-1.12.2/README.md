@@ -10,6 +10,33 @@ Gradle 4.9 build and a temporary, isolated Java 8 bridge snapshot under
 `forge-1.12.2/bridge/`; it does not change the shared `rtxremix-java/` facade or
 the Fabric build.
 
+## Build an installable package
+
+With a Java 8 JDK, Visual Studio C++ tools, and the pinned Windows x64 runtime
+staged in `remix-runtime/win64`, run from the repository root:
+
+```powershell
+.\forge-1.12.2\scripts\build.ps1 -Tasks packageForge
+```
+
+The distributable JAR is written to `forge-1.12.2/build/distributions/`. It includes
+the Java mod, its LWJGL 2 JNI bridge, the runtime DLLs and USD plugins, and the runtime
+license texts. Install this JAR in the `mods` folder of an existing Forge 1.12.2
+instance; it does not bundle Minecraft, Forge, or RLCraft. The ordinary `build/libs`
+JAR is for development and still requires the staged runtime.
+
+The first `/mrtx on` extracts the package before loading any native library. A
+SHA-256 inventory verifies the staged files before they replace the live SDK.
+A changed payload or missing SDK dependency replaces the mod-owned `remix-sdk`
+directory and `rtx.conf`; a matching installation keeps existing configuration
+and restores a missing `rtx.conf` separately. Keep authored Remix work under
+`rtx-remix`, which this extractor leaves untouched. An explicit
+`-Drlcraftremix.runtime=<directory>` uses that development SDK without extraction.
+Windows x64 is the currently supported Forge package target.
+
+The repository build workflow also compiles and runs the Forge tests separately
+on Java 8. Rendering and native packaging are verified locally on a supported GPU.
+
 ## Run the installed prototype
 
 From the repository root in PowerShell, using the configured portable Prism

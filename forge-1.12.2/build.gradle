@@ -46,3 +46,5 @@ jar {
 }
 jar.finalizedBy('reobfJar')
 
+apply from: 'packaging.gradle'
+
