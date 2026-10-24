@@ -5,8 +5,10 @@
 package com.nvidia.rtxremix.forge.entity;
 
 import com.nvidia.rtxremix.InstanceInfoBlendEXT;
+import com.nvidia.rtxremix.CameraInfoParameterizedEXT;
 import com.nvidia.rtxremix.InstanceCategoryBit;
 import com.nvidia.rtxremix.MeshInfo;
+import com.nvidia.rtxremix.forge.texture.AtlasUpdatesFixture;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -34,12 +36,87 @@ public class EntitySceneTest {
         assertEquals(12, api.createdBlends.get(0).alphaTestReferenceValue);
         int meshCreates = api.meshCreates;
         scene.sync(parts); assertEquals(1, api.createdBlends.size());
-        // Represents a completed CPU revision which invalidated the texture's all-opaque proof.
+        // Represents a completed CPU revision which introduced fractional alpha.
         api.uploaded.get(0).opaquePixels = false;
+        api.uploaded.get(0).binaryPixels = false;
         scene.sync(parts);
         assertEquals(1, api.createdBlends.get(1).alphaBlendEnabled);
         assertEquals(meshCreates, api.meshCreates); assertEquals(1, api.uploaded.size());
         assertEquals(2, api.instanceUpdates); scene.close(); api.assertEmpty();
+    }
+
+    @Test public void binaryCutoutsPreserveEveryAlphaComparatorAndThreshold() {
+        int[] references = {0, 1, 127, 255};
+        boolean[][] rejectsZero = {
+                {true, true, true, true}, // Never
+                {true, false, false, false}, // Less
+                {false, true, true, true}, // Equal
+                {false, false, false, false}, // Less or equal
+                {true, true, true, true}, // Greater
+                {true, false, false, false}, // Not equal
+                {false, true, true, true}, // Greater or equal
+                {false, false, false, false} // Always, including a disabled alpha test
+        };
+        for (int compare = 0; compare < rejectsZero.length; compare++) {
+            for (int threshold = 0; threshold < references.length; threshold++) {
+                Fake api = new Fake(); api.binaryTexture = true;
+                try (EntityScene scene = new EntityScene(api)) {
+                    List<CapturedEntityPart> parts = parts(1); CapturedEntityPart part = parts.get(0);
+                    part.alphaBlend = true; part.alphaCompare = compare; part.alphaReference = references[threshold];
+                    scene.sync(parts);
+                    InstanceInfoBlendEXT blend = api.createdBlends.get(0);
+                    assertEquals("Comparator " + compare + ", reference " + part.alphaReference,
+                            rejectsZero[compare][threshold] ? 0 : 1, blend.alphaBlendEnabled);
+                    assertEquals(compare, blend.alphaTestCompareOp);
+                    assertEquals(part.alphaReference, blend.alphaTestReferenceValue & 255);
+                    assertEquals(compare == 7 ? 0 : 1, blend.alphaTestEnabled);
+                }
+                api.assertEmpty();
+            }
+        }
+    }
+
+    @Test public void binaryProofRevocationUpdatesTheRetainedInstanceWithoutRebuildingGeometry() {
+        Fake api = new Fake(); api.binaryTexture = true;
+        try (EntityScene scene = new EntityScene(api)) {
+            List<CapturedEntityPart> parts = parts(1); CapturedEntityPart part = parts.get(0);
+            part.alphaBlend = true; part.alphaCompare = 4; part.alphaReference = 25;
+            scene.sync(parts); assertEquals(0, api.createdBlends.get(0).alphaBlendEnabled);
+            int meshCreates = api.meshCreates;
+            scene.sync(parts); assertEquals(1, api.createdBlends.size());
+            api.uploaded.get(0).binaryPixels = false;
+            scene.sync(parts);
+            assertEquals(1, api.createdBlends.get(1).alphaBlendEnabled);
+            assertEquals(4, api.createdBlends.get(1).alphaTestCompareOp);
+            assertEquals(25, api.createdBlends.get(1).alphaTestReferenceValue & 255);
+            assertEquals(meshCreates, api.meshCreates); assertEquals(1, api.uploaded.size());
+            assertEquals(2, api.instanceUpdates);
+        }
+        api.assertEmpty();
+    }
+
+    @Test public void binaryCutoutsKeepVertexFadesTintFadesAndEmissiveBlending() {
+        for (int alpha : new int[] {0, 1, 127, 254}) for (boolean vertexFade : new boolean[] {false, true}) {
+            Fake api = new Fake(); api.binaryTexture = true;
+            try (EntityScene scene = new EntityScene(api)) {
+                List<CapturedEntityPart> parts = parts(1); CapturedEntityPart part = parts.get(0);
+                part.alphaBlend = true; part.alphaCompare = 4; part.alphaReference = 25;
+                int faded = alpha << 24 | 0xffffff;
+                if (vertexFade) part.triangles.info(0, 3, 1, 2).surfaces[0].vertexBuffer.putInt(32, faded);
+                else part.argb = faded;
+                scene.sync(parts); assertEquals(1, api.createdBlends.get(0).alphaBlendEnabled);
+            }
+            api.assertEmpty();
+        }
+        for (int surface : new int[] {EntitySurface.EYES, EntitySurface.GLINT, EntitySurface.ADDITIVE_ALPHA}) {
+            Fake api = new Fake(); api.binaryTexture = true;
+            try (EntityScene scene = new EntityScene(api)) {
+                List<CapturedEntityPart> parts = parts(1); CapturedEntityPart part = parts.get(0);
+                part.alphaBlend = true; part.alphaCompare = 4; part.alphaReference = 25; part.surface = surface;
+                scene.sync(parts); assertEquals(1, api.createdBlends.get(0).alphaBlendEnabled);
+            }
+            api.assertEmpty();
+        }
     }
 
     @Test public void fractionalVertexOrTintAlphaAndEveryEmissiveSurfaceKeepBlending() {
@@ -61,7 +138,7 @@ public class EntitySceneTest {
 
     @Test public void unknownTextureOpacityKeepsTheOriginalOrdinaryBlend() {
         Fake api = new Fake(); EntityScene scene = new EntityScene(api); List<CapturedEntityPart> parts = parts(1);
-        parts.get(0).alphaBlend = true; scene.sync(parts);
+        parts.get(0).alphaBlend = true; parts.get(0).alphaCompare = 4; parts.get(0).alphaReference = 25; scene.sync(parts);
         assertEquals(1, api.createdBlends.get(0).alphaBlendEnabled); scene.close(); api.assertEmpty();
     }
 
@@ -138,7 +215,7 @@ public class EntitySceneTest {
         hand.transform[3] = 0.1f;
         scene.sync(parts);
         assertEquals(2, scene.partCount());
-        assertEquals(1, api.meshCreates);
+        assertEquals("camera-local pose geometry is separate from the shadow body", 2, api.meshCreates);
         assertEquals(1, scene.categoryCount(body.categoryFlags));
         assertEquals(1, scene.categoryCount(hand.categoryFlags));
         assertTrue(api.categories.containsValue(body.categoryFlags));
@@ -151,6 +228,50 @@ public class EntitySceneTest {
         assertEquals(1, scene.partCount());
         assertTrue(api.instances.containsKey(bodyInstance));
         assertEquals(0, scene.categoryCount(InstanceCategoryBit.VIEW_MODEL));
+        scene.close(); api.assertEmpty();
+    }
+    @Test public void handPoseMeshesStayBoundedAndCameraTravelOnlyUpdatesTheRetainedAnchor() {
+        Fake api = new Fake(); EntityScene scene = new EntityScene(api);
+        List<CapturedEntityPart> parts = parts(1); CapturedEntityPart hand = parts.get(0);
+        hand.categoryFlags = InstanceCategoryBit.VIEW_MODEL;
+        CameraInfoParameterizedEXT camera = CameraInfoParameterizedEXT.builder()
+                .position(15000, 64, -15000).forward(0, 0, -1).right(1, 0, 0).up(0, 1, 0).build();
+        FirstPersonCapture.prepareCamera(camera);
+        scene.sync(parts);
+        long instance = api.instances.keySet().iterator().next();
+        int resources = scene.resourceCount();
+        for (int frame = 1; frame <= 200; frame++) {
+            hand.transform[3] = frame * 0.000004f;
+            scene.sync(parts);
+            assertEquals(1, api.meshes.size()); assertEquals(1, api.instances.size());
+            assertEquals(resources, scene.resourceCount());
+            assertEquals(15000, api.positions.get(instance), 0);
+            assertEquals(hand.transform[3], api.meshFirstX.get(api.instances.get(instance)), 0);
+        }
+        int uploads = api.meshCreates, updates = api.instanceUpdates;
+        scene.sync(parts); assertEquals(uploads, api.meshCreates); assertEquals(updates, api.instanceUpdates);
+        camera.position.x = -15000; FirstPersonCapture.prepareCamera(camera); scene.sync(parts);
+        assertEquals("world travel must not produce new posed geometry", uploads, api.meshCreates);
+        assertEquals(updates + 1, api.instanceUpdates); assertEquals(-15000, api.positions.get(instance), 0);
+        scene.close(); api.assertEmpty();
+    }
+    @Test public void moreAnimatedHandPartsThanOneUploadAllowanceAllMakeProgress() {
+        Fake api = new Fake(); EntityScene scene = new EntityScene(api);
+        List<CapturedEntityPart> parts = parts(9);
+        FirstPersonCapture.prepareCamera(CameraInfoParameterizedEXT.builder()
+                .forward(0, 0, -1).right(1, 0, 0).up(0, 1, 0).build());
+        for (CapturedEntityPart part : parts) part.categoryFlags = InstanceCategoryBit.VIEW_MODEL;
+        for (int frame = 1; frame <= 24; frame++) {
+            for (int i = 0; i < parts.size(); i++) parts.get(i).transform[3] = i + frame * 0.00001f;
+            scene.sync(parts);
+            assertTrue(api.meshes.size() <= 9);
+            if (frame < 2) continue;
+            assertEquals(9, scene.partCount());
+            for (long mesh : api.instances.values()) {
+                float position = api.meshFirstX.get(mesh);
+                assertTrue("hand parts beyond the first eight must not freeze", position >= (int) position + (frame - 1) * 0.00001f);
+            }
+        }
         scene.close(); api.assertEmpty();
     }
     @Test public void nonlivingOwnersRetainIdentityPoseAndRetireWhenAbsent() throws Exception {
@@ -172,6 +293,33 @@ public class EntitySceneTest {
         assertFalse(scene.contains(projectile.getUniqueID()));
         assertEquals(0, scene.resourceCount());
         scene.close(); api.assertEmpty();
+    }
+
+    @Test public void animatedAtlasBacklogDoesNotRetireAFallingOwnerOrResetItsPoseHistory() throws Exception {
+        Fake api = new Fake();
+        try (AtlasUpdatesFixture updates = new AtlasUpdatesFixture(); EntityScene scene = new EntityScene(api)) {
+            List<CapturedEntityPart> parts = parts(1);
+            Entity tree = (Entity) ReflectionFactory.getReflectionFactory()
+                    .newConstructorForSerialization(TestProjectile.class, Object.class.getDeclaredConstructor()).newInstance();
+            parts.get(0).owner = tree; scene.sync(parts);
+            EntityTextures.Asset atlas = api.uploaded.get(0);
+            atlas.revision = updates.bind(atlas.textureId, atlas.texture);
+            long instance = api.instances.keySet().iterator().next();
+            for (int frame = 1; frame <= 5; frame++) {
+                updates.animate(atlas.textureId); updates.flush();
+                assertEquals(1, updates.dirtyCount());
+                parts.get(0).transform[3] = frame;
+                scene.sync(parts);
+                assertEquals(1, scene.trianglePartCount(tree.getUniqueID()));
+                assertEquals(frame, scene.transformUpdates(tree.getUniqueID()));
+                assertTrue(api.instances.containsKey(instance));
+            }
+            assertEquals(1, api.meshCreates); assertEquals(1, api.uploaded.size());
+            parts.clear(); scene.sync(parts);
+            assertFalse(scene.contains(tree.getUniqueID()));
+            assertEquals(0, scene.resourceCount()); updates.release(atlas.revision);
+        }
+        api.assertEmpty();
     }
 
     private static final class TestProjectile extends Entity {
@@ -269,22 +417,26 @@ public class EntitySceneTest {
     private static final class Fake implements EntityScene.Backend {
         final Map<Long, Long> meshes = new HashMap<>(), instances = new HashMap<>(), materials = new HashMap<>();
         final Map<Long, Float> positions = new HashMap<>();
+        final Map<Long, Float> meshFirstX = new HashMap<>();
         final Map<Long, Integer> categories = new HashMap<>();
         final Set<Long> textures = new HashSet<>(), blends = new HashSet<>();
         final List<EntityTextures.Asset> uploaded = new ArrayList<>();
         final List<InstanceInfoBlendEXT> createdBlends = new ArrayList<>();
         final Set<EntityTextures.Asset> dirty = new HashSet<>(), deleted = new HashSet<>(), released = new HashSet<>();
-        boolean observerClosed, opaqueTexture;
+        boolean observerClosed, opaqueTexture, binaryTexture;
         long next = 1, failMesh, failBlend;
         int meshCreates, instanceUpdates;
         boolean failMaterialCreation;
         public long createMesh(MeshInfo mesh) {
-            long handle = next++; meshes.put(handle, mesh.surfaces[0].material); meshCreates++; return handle;
+            long handle = next++; meshes.put(handle, mesh.surfaces[0].material);
+            meshFirstX.put(handle, mesh.surfaces[0].vertexBuffer.getFloat(mesh.surfaces[0].vertexBuffer.position()));
+            meshCreates++; return handle;
         }
         public void destroyMesh(long handle) {
             assertFalse(instances.containsValue(handle));
             if (handle == failMesh) { failMesh = 0; throw new IllegalStateException("mesh release"); }
             assertNotNull(meshes.remove(handle));
+            meshFirstX.remove(handle);
         }
         public long createInstance(long mesh, float[] transform, int category, long blend) {
             long handle = next++; updateInstance(handle, mesh, transform, category, blend); return handle;
@@ -303,6 +455,7 @@ public class EntitySceneTest {
         public boolean uploadTexture(EntityTextures.Asset asset, long budget, long hash) {
             uploaded.add(asset);
             asset.opaquePixels = opaqueTexture;
+            asset.binaryPixels = opaqueTexture || binaryTexture;
             asset.texture = next++; asset.bytes = 4; textures.add(asset.texture);
             if (failMaterialCreation) throw new IllegalStateException("material creation");
             asset.material = next++; materials.put(asset.material, asset.texture); return true;
@@ -314,7 +467,9 @@ public class EntitySceneTest {
             assertFalse(meshes.containsValue(handle)); assertNotNull(materials.remove(handle));
         }
         public void destroyTexture(long handle) { assertFalse(materials.containsValue(handle)); assertTrue(textures.remove(handle)); }
-        public boolean textureCurrent(EntityTextures.Asset asset) { return !dirty.contains(asset) && !deleted.contains(asset); }
+        public boolean textureCurrent(EntityTextures.Asset asset) {
+            return !dirty.contains(asset) && !deleted.contains(asset) && EntityScene.Backend.super.textureCurrent(asset);
+        }
         public boolean textureDeleted(EntityTextures.Asset asset) { return deleted.contains(asset); }
         public void releaseTextureObservation(EntityTextures.Asset asset) { released.add(asset); }
         public void closeTextureObservations() { observerClosed = true; }

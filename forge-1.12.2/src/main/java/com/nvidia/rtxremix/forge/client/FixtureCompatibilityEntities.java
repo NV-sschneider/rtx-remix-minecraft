@@ -16,7 +16,8 @@ import net.minecraft.world.WorldServer;
 /** Public mod interfaces used by the opt-in RLCraft fixture; no mod is a compile dependency. */
 final class FixtureCompatibilityEntities {
     static final String[] NAMES = {
-        "iceandfire:firedragon", "iceandfire:icedragon", "lycanitesmobs:makaalpha", "lycanitesmobs:rahovart"
+        "iceandfire:firedragon", "iceandfire:icedragon", "lycanitesmobs:makaalpha", "lycanitesmobs:rahovart",
+        "lycanitesmobs:arisaur", "lycanitesmobs:arisaur"
     };
     private FixtureCompatibilityEntities() { }
 
@@ -46,6 +47,8 @@ final class FixtureCompatibilityEntities {
             invoke(entity, "setVariant", int.class, 0);
             invoke(entity, "setSizeScale", double.class, 1.0);
             if (index == 3) invoke(entity, "setArenaCenter", BlockPos.class, new BlockPos(x, y, z));
+            if (index >= 4) invoke(entity, "setGrowingAge", int.class, 0);
+            if (index == 5) entity.setCustomNameTag("Flowersaur");
         }
         entity.setHealth(entity.getMaxHealth());
         return entity;
@@ -61,6 +64,11 @@ final class FixtureCompatibilityEntities {
     static boolean speaking(Entity entity) throws Exception {
         return entity != null && invoke(entity, "getAnimation") == entity.getClass().getField("ANIMATION_SPEAK").get(null)
                 && ((Number) invoke(entity, "getAnimationTick")).intValue() > 0;
+    }
+
+    static boolean arisaurTexture(Entity entity, boolean flowersaur) throws Exception {
+        Object texture = invoke(entity, "getTexture");
+        return texture != null && texture.toString().endsWith(flowersaur ? "/arisaur_flowersaur.png" : "/arisaur.png");
     }
 
     static void move(Entity entity, int index, double x, double y, double z) throws Exception {

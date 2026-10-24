@@ -20,7 +20,7 @@ import net.minecraft.util.math.BlockPos;
 import net.minecraft.world.EnumDifficulty;
 import net.minecraft.world.WorldServer;
 
-/** Actual installed dragons, an animated custom mob, and a boss in the dedicated smoke save. */
+/** Actual installed dragons, animated custom mobs, alpha cutouts, and a boss in the dedicated smoke save. */
 final class FixtureCompatibility implements AutoCloseable {
     private enum Phase { ARRIVE, VISIBLE, ANIMATE_ACTION, ANIMATE, MOVE_ACTION, MOVED, OFFSCREEN,
         VISIBLE_AGAIN, RELOAD, REMOVE_ACTION, REMOVED, RETURN, DONE }
@@ -38,7 +38,8 @@ final class FixtureCompatibility implements AutoCloseable {
     private final EnumDifficulty originalClientDifficulty;
     private final double returnX, returnY, returnZ;
     private final float returnYaw, returnPitch;
-    private final long[] transforms = new long[4];
+    private final long[] transforms = new long[FixtureCompatibilityEntities.NAMES.length];
+    private final boolean[] movedNative = new boolean[FixtureCompatibilityEntities.NAMES.length];
     private final boolean[] spoke = new boolean[2];
     private Phase phase = Phase.ARRIVE;
     private Future<?> action;
@@ -121,7 +122,7 @@ final class FixtureCompatibility implements AutoCloseable {
                 break;
             case VISIBLE:
                 if (settled(captured() && normal(true), 45)) {
-                    capture("compatibility-dragons-maka-rahovart"); log("VISIBLE_PASS"); baseline();
+                    capture("compatibility-dragons-maka-rahovart-arisaurs"); log("VISIBLE_PASS"); baseline();
                     action = server.callFromMainThread(() -> {
                         requireWorld();
                         for (int i = 0; i < 2; i++) FixtureCompatibilityEntities.animate(ownedEntity(i));
@@ -193,11 +194,17 @@ final class FixtureCompatibility implements AutoCloseable {
     private void observeAnimation() throws Exception {
         for (int i = 0; i < 2; i++) if (FixtureCompatibilityEntities.speaking(clientEntity(layout.ids[i]))) spoke[i] = true;
     }
-    private void baseline() { for (int i = 0; i < transforms.length; i++) transforms[i] = events.entityTransformUpdates(layout.ids[i]); }
-    private boolean captured() {
+    private void baseline() {
+        for (int i = 0; i < transforms.length; i++) {
+            transforms[i] = events.entityTransformUpdates(layout.ids[i]); movedNative[i] = false;
+        }
+    }
+    private boolean captured() throws Exception {
         for (int i = 0; i < layout.ids.length; i++) {
-            if (layout.ids[i] == null || clientEntity(layout.ids[i]) == null || !events.entityCaptured(layout.ids[i])) return false;
+            Entity entity = layout.ids[i] == null ? null : clientEntity(layout.ids[i]);
+            if (entity == null || !events.entityCaptured(layout.ids[i])) return false;
             if (i >= 2 && events.trianglePartCount(layout.ids[i]) == 0) return false;
+            if (i >= 4 && !FixtureCompatibilityEntities.arisaurTexture(entity, i == 5)) return false;
         }
         return true;
     }
@@ -207,17 +214,24 @@ final class FixtureCompatibility implements AutoCloseable {
     }
     private boolean offscreenReady() {
         // Ice and Fire dragons opt out of frustum culling. Installed RLMixins bounds
-        // Rahovart's render box, so both Lycanites models must survive supplementary capture.
+        // Rahovart's render box, so every Lycanites model must survive supplementary capture.
         for (int i = 0; i < layout.ids.length; i++)
             if (EntityCaptureHooks.normallyRendered(layout.ids[i]) != (i < 2)) return false;
-        return EntityCaptureHooks.offscreenEntityCount() >= 2;
+        return EntityCaptureHooks.offscreenEntityCount() >= layout.ids.length - 2;
     }
     private boolean moved() {
+        boolean ready = true;
         for (int i = 0; i < layout.ids.length; i++) {
             Entity entity = clientEntity(layout.ids[i]);
-            if (entity == null || entity.posX < layout.entityX(i) + 1.5 || events.entityTransformUpdates(layout.ids[i]) <= transforms[i]) return false;
+            long updates = events.entityTransformUpdates(layout.ids[i]);
+            // A material/part replacement can recreate the scene owner and reset its counter.
+            // Require a subsequent real update, then retain that evidence independently for each mob.
+            if (updates < transforms[i]) transforms[i] = updates;
+            boolean atTarget = entity != null && entity.posX >= layout.entityX(i) + 1.5;
+            if (atTarget && updates > transforms[i]) movedNative[i] = true;
+            ready &= atTarget && movedNative[i];
         }
-        return true;
+        return ready;
     }
     private boolean retired() {
         for (UUID id : layout.ids) if (events.entityCaptured(id) || clientEntity(id) != null) return false;
@@ -269,7 +283,8 @@ final class FixtureCompatibility implements AutoCloseable {
     private void restoreClient() {
         mc.gameSettings.thirdPersonView = originalView; mc.gameSettings.hideGUI = originalHud;
         clientWorld.getWorldInfo().setDifficulty(originalClientDifficulty);
-        if (mc.player != null && playerId.equals(mc.player.getUniqueID())) mc.player.capabilities.isFlying = originalFlying;
+        if (mc.world == clientWorld && mc.getIntegratedServer() == server
+                && mc.player != null && playerId.equals(mc.player.getUniqueID())) mc.player.capabilities.isFlying = originalFlying;
     }
     private boolean complete() throws Exception { if (!action.isDone()) return false; action.get(); return true; }
     private boolean settled(boolean ready, int frames) {
@@ -284,6 +299,7 @@ final class FixtureCompatibility implements AutoCloseable {
         for (int i = 0; i < layout.ids.length; i++) {
             UUID id = layout.ids[i];
             result.append(' ').append(FixtureCompatibilityEntities.NAMES[i]).append("={captured=").append(id != null && events.entityCaptured(id))
+                    .append(",flowersaur=").append(i == 5)
                     .append(",normal=").append(id != null && EntityCaptureHooks.normallyRendered(id))
                     .append(",triangles=").append(id == null ? 0 : events.trianglePartCount(id))
                     .append(",updates=").append(id == null ? 0 : events.entityTransformUpdates(id)).append('}');
@@ -296,10 +312,10 @@ final class FixtureCompatibility implements AutoCloseable {
 
     static final class Layout {
         final int x, y, z;
-        final UUID[] ids = new UUID[4];
-        final Entity[] entities = new Entity[4];
+        final UUID[] ids = new UUID[FixtureCompatibilityEntities.NAMES.length];
+        final Entity[] entities = new Entity[FixtureCompatibilityEntities.NAMES.length];
         Layout(int x, int y, int z) { this.x = x; this.y = y; this.z = z; }
-        double entityX(int i) { return x + (i == 0 ? -14.5 : i == 1 ? 14.5 : 0.5); }
-        double entityZ(int i) { return z + (i < 2 ? -8.5 : i == 2 ? 6.5 : -13.5); }
+        double entityX(int i) { return x + (i == 0 ? -14.5 : i == 1 ? 14.5 : i == 4 ? -7.5 : i == 5 ? 7.5 : 0.5); }
+        double entityZ(int i) { return z + (i < 2 ? -8.5 : i == 2 ? 6.5 : i == 3 ? -13.5 : 10.5); }
     }
 }

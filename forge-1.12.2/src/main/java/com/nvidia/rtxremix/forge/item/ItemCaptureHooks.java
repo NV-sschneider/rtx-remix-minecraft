@@ -7,6 +7,7 @@ package com.nvidia.rtxremix.forge.item;
 import com.nvidia.rtxremix.InstanceCategoryBit;
 import com.nvidia.rtxremix.forge.entity.EntityCaptureHooks;
 import com.nvidia.rtxremix.forge.entity.EntityGlintHooks;
+import com.nvidia.rtxremix.forge.entity.FirstPersonCapture;
 import java.lang.reflect.Field;
 import java.nio.FloatBuffer;
 import java.util.ArrayList;
@@ -46,6 +47,7 @@ public final class ItemCaptureHooks {
     private static final ItemGeometry GEOMETRY = new ItemGeometry();
     private static final FloatBuffer BUFFER = BufferUtils.createFloatBuffer(16);
     private static final Matrix4f VIEW = new Matrix4f(), INVERSE = new Matrix4f(), MODEL = new Matrix4f(), WORLD = new Matrix4f();
+    private static final float[] LIGHT_TRANSFORM = new float[12];
     private static boolean armed;
     private static Throwable failure;
     private static EntityItem owner;
@@ -160,8 +162,15 @@ public final class ItemCaptureHooks {
             active.fingerprint = GEOMETRY.fingerprint(active.firstVertex, active.vertexCount);
             PARTS.add(active);
             if (active.owner instanceof EntityLivingBase) {
-                try { HeldItemLights.record((EntityLivingBase) active.owner, (ItemStack) active.stack,
-                        active.categoryFlags, active.occurrence, active.transform); }
+                try {
+                    float[] lightTransform = active.transform;
+                    if ((active.categoryFlags & InstanceCategoryBit.VIEW_MODEL) != 0) {
+                        FirstPersonCapture.worldTransform(active.transform, LIGHT_TRANSFORM);
+                        lightTransform = LIGHT_TRANSFORM;
+                    }
+                    HeldItemLights.record((EntityLivingBase) active.owner, (ItemStack) active.stack,
+                            active.categoryFlags, active.occurrence, lightTransform);
+                }
                 catch (RuntimeException | LinkageError error) { fail(error); return; }
             }
         }

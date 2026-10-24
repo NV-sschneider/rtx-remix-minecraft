@@ -12,6 +12,7 @@ import com.nvidia.rtxremix.forge.texture.TextureUpdates;
 import java.nio.ByteBuffer;
 import net.minecraft.client.renderer.GlStateManager;
 import net.minecraft.client.renderer.OpenGlHelper;
+import net.minecraft.client.renderer.texture.TextureMap;
 import org.lwjgl.opengl.GL11;
 import org.lwjgl.opengl.GL13;
 import org.lwjgl.opengl.GL14;
@@ -47,6 +48,7 @@ final class EntityTextures {
             for (int name : PACK_NAMES) GL11.glPixelStorei(name, name == GL11.GL_PACK_ALIGNMENT ? 1 : 0);
             GL11.glGetTexImage(GL11.GL_TEXTURE_2D, 0, GL11.GL_RGBA, GL11.GL_UNSIGNED_BYTE, pixels);
             asset.opaquePixels = opaquePixels(pixels);
+            asset.binaryPixels = asset.opaquePixels || binaryPixels(pixels);
             asset.texture = api.createTextureFromMemory(TextureFromMemoryInfo.builder().hash(hash)
                     .pixelData(pixels).size(width, height).build());
             asset.bytes = bytes;
@@ -54,7 +56,9 @@ final class EntityTextures {
             asset.wrapV = wrapMode(GL11.glGetTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_WRAP_T));
             asset.material = api.createMaterial(material(asset, hash + 1, false));
             if (updates == null) updates = new TextureUpdates(api);
-            asset.revision = updates.subscribe(asset.textureId, asset.texture, width, height, asset.opaquePixels);
+            asset.revision = asset.identity instanceof TextureMap
+                    ? updates.subscribeAtlas(asset.textureId, asset.texture, width, height, asset.opaquePixels, asset.binaryPixels)
+                    : updates.subscribe(asset.textureId, asset.texture, width, height, asset.opaquePixels, asset.binaryPixels);
             return true;
         } finally {
             GL15.glBindBuffer(GL21.GL_PIXEL_PACK_BUFFER, oldPackBuffer);
@@ -74,11 +78,21 @@ final class EntityTextures {
         return material;
     }
 
-    /** Absolute reads leave the upload buffer untouched; even one transparent texel keeps blending. */
+    /** Absolute reads leave the upload buffer untouched; every texel must have full opacity. */
     static boolean opaquePixels(ByteBuffer rgba) {
         if (rgba.remaining() == 0 || rgba.remaining() % 4 != 0) return false;
         for (int offset = rgba.position() + 3; offset < rgba.limit(); offset += 4) {
             if ((rgba.get(offset) & 255) != 255) return false;
+        }
+        return true;
+    }
+
+    /** A binary image can use alpha testing without blending only while its zero-alpha texels are rejected. */
+    static boolean binaryPixels(ByteBuffer rgba) {
+        if (rgba.remaining() == 0 || rgba.remaining() % 4 != 0) return false;
+        for (int offset = rgba.position() + 3; offset < rgba.limit(); offset += 4) {
+            int alpha = rgba.get(offset) & 255;
+            if (alpha != 0 && alpha != 255) return false;
         }
         return true;
     }
@@ -105,11 +119,12 @@ final class EntityTextures {
         long emissiveMaterial;
         byte wrapU, wrapV;
         long bytes;
-        boolean opaquePixels;
+        boolean opaquePixels, binaryPixels;
         long requested;
         TextureUpdates.Binding revision;
         int references;
         boolean opaque() { return revision == null ? opaquePixels : revision.opaque(); }
+        boolean binary() { return revision == null ? binaryPixels : revision.binary(); }
         Asset(Object identity, int textureId, long texture, long material, long bytes) {
             this.identity = identity;
             this.textureId = textureId;

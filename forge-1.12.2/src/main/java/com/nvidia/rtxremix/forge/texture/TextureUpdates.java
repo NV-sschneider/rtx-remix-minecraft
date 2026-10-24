@@ -30,17 +30,24 @@ public final class TextureUpdates implements AutoCloseable {
         final TexturePatch[][] arrays = new TexturePatch[MAX_BATCH_PATCHES + 1][];
         final Long2ObjectOpenHashMap<Slot> rectangles = new Long2ObjectOpenHashMap<Slot>(4);
         final LostTextureRegions lost;
+        final boolean independentPatches;
         int pending;
-        boolean deleted, released, opaque;
-        Binding(int glId, long texture, int width, int height, boolean opaque) {
+        boolean deleted, released, opaque, binary, requireComplete;
+        Binding(int glId, long texture, int width, int height, boolean opaque, boolean binary, boolean independentPatches) {
             this.glId = glId; this.width = width; this.height = height; entry.handle = texture;
             this.opaque = opaque;
+            this.binary = binary;
+            this.independentPatches = independentPatches;
             lost = new LostTextureRegions(width, height);
         }
-        public boolean current() { return lost.empty() && !deleted && !released && pending == 0; }
+        public boolean current() {
+            return lost.empty() && !deleted && !released && (pending == 0 || independentPatches && !requireComplete);
+        }
         public boolean deleted() { return deleted || released; }
         /** Strict all-alpha-255 proof; partial repairs never promote a previously unknown image. */
         public boolean opaque() { return opaque && current(); }
+        /** Alpha proof covers the initial image and every captured patch, including pending atlas pixels. */
+        public boolean binary() { return binary && current(); }
     }
 
     private final Thread thread = Thread.currentThread();
@@ -68,12 +75,28 @@ public final class TextureUpdates implements AutoCloseable {
         return subscribe(glId, texture, width, height, false);
     }
 
-    /** The caller may seed opacity only from the complete initial level-zero snapshot. */
     public Binding subscribe(int glId, long texture, int width, int height, boolean opaque) {
+        return subscribe(glId, texture, width, height, opaque, opaque);
+    }
+
+    /** The caller may seed alpha proofs only from the complete initial level-zero snapshot. */
+    public Binding subscribe(int glId, long texture, int width, int height, boolean opaque, boolean binary) {
+        return subscribe(glId, texture, width, height, opaque, binary, false);
+    }
+
+    /**
+     * Sprite animations may show their last published pixels while other atlas rectangles drain.
+     * Lost pixels, deletion and full-image replacement still require complete publication.
+     */
+    public Binding subscribeAtlas(int glId, long texture, int width, int height, boolean opaque, boolean binary) {
+        return subscribe(glId, texture, width, height, opaque, binary, true);
+    }
+
+    private Binding subscribe(int glId, long texture, int width, int height, boolean opaque, boolean binary, boolean independentPatches) {
         checkThread();
         if (closed || glId <= 0 || texture == 0 || width <= 0 || height <= 0 || width > 65535 || height > 65535) throw new IllegalArgumentException("Invalid texture observer binding");
         for (int i = 0; i < bindings.length; i++) if (bindings[i] == null) {
-            Binding value = new Binding(glId, texture, width, height, opaque); bindings[i] = value; return value;
+            Binding value = new Binding(glId, texture, width, height, opaque, binary, independentPatches); bindings[i] = value; return value;
         }
         throw new IllegalStateException("Scene texture observer capacity exceeded");
     }
@@ -83,7 +106,7 @@ public final class TextureUpdates implements AutoCloseable {
         for (int i = 0; i < bindings.length; i++) if (bindings[i] == value) bindings[i] = null;
     }
 
-    /** Applies bounded patches before scene submission. A texture stays hidden until all its pending pixels arrive. */
+    /** Applies bounded patches; coherent images and atlas repairs stay hidden until their pending pixels arrive. */
     public void flush() {
         checkThread(); if (closed) return;
         capturedBytes = 0;
@@ -119,7 +142,10 @@ public final class TextureUpdates implements AutoCloseable {
         update.entries = arrays[groups];
         try {
             publisher.publish(update);
-            for (int i = 0; i < count; i++) { ready[i].queued = false; ready[i].owner.pending--; }
+            for (int i = 0; i < count; i++) {
+                Slot slot = ready[i]; slot.queued = false;
+                if (--slot.owner.pending == 0 && slot.owner.lost.empty()) slot.owner.requireComplete = false;
+            }
             uploads++; publishedPatches += count;
         } finally {
             for (int i = 0; i < count; i++) ready[i] = null;
@@ -129,6 +155,7 @@ public final class TextureUpdates implements AutoCloseable {
 
     void begin(int id, int x, int y, int width, int height) {
         Binding owner = find(id);
+        if (owner != null && x == 0 && y == 0 && width == owner.width && height == owner.height) owner.requireComplete = true;
         if (depth < scopes.length) {
             scopes[depth] = owner; scopeX[depth] = x; scopeY[depth] = y; scopeW[depth] = width; scopeH[depth] = height;
         }
@@ -145,6 +172,7 @@ public final class TextureUpdates implements AutoCloseable {
         if (depth == 0 || depth > scopes.length || level != 0) return;
         Binding owner = scopes[depth - 1];
         if (owner == null || owner.deleted || owner.released) return;
+        if (x == 0 && y == 0 && width == owner.width && height == owner.height) owner.requireComplete = true;
         long pixels = (long) width * height;
         if (target != 3553 || format != 32993 || type != 33639) {
             lose(owner, x, y, width, height, firstReason == null ? "pixel-format:" + target + "/" + format + "/" + type : "pixel-format"); return;
@@ -193,6 +221,7 @@ public final class TextureUpdates implements AutoCloseable {
         for (int i = 0; i < width * height; i++) {
             int color = source.get(start + i);
             if ((color >>> 24) != 255) owner.opaque = false;
+            if ((color >>> 24) != 0 && (color >>> 24) != 255) owner.binary = false;
             rgba.put((byte) (color >>> 16)).put((byte) (color >>> 8)).put((byte) color).put((byte) (color >>> 24));
         }
         rgba.flip();
@@ -228,7 +257,9 @@ public final class TextureUpdates implements AutoCloseable {
         }
     }
     private void lose(Binding owner, int x, int y, int width, int height, String reason) {
+        owner.requireComplete = true;
         owner.opaque = false;
+        owner.binary = false;
         if (firstReason == null) {
             firstReason = reason; failedId = owner.glId; failedX = x; failedY = y; failedW = width; failedH = height;
             failedPending = owner.pending; failedRetained = retained; failedCaptured = capturedBytes;
@@ -253,7 +284,7 @@ public final class TextureUpdates implements AutoCloseable {
     public long patchCount() { return publishedPatches; }
     public long retainedBytes() { return retained; }
     public long droppedCount() { return dropped; }
-    public int dirtyCount() { int count = 0; for (Binding owner : bindings) if (owner != null && !owner.current()) count++; return count; }
+    public int dirtyCount() { int count = 0; for (Binding owner : bindings) if (owner != null && (owner.pending != 0 || !owner.current())) count++; return count; }
     @Override public void close() {
         checkThread(); if (closed) return;
         TextureRevisionHooks.detach(this);

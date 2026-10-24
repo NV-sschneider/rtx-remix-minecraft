@@ -7,9 +7,16 @@ package com.nvidia.rtxremix.forge.item;
 import com.nvidia.rtxremix.InstanceInfoBlendEXT;
 import com.nvidia.rtxremix.MaterialInfo;
 import com.nvidia.rtxremix.MaterialInfoOpaqueEXT;
+import com.nvidia.rtxremix.MeshInfo;
+import com.nvidia.rtxremix.HardcodedVertex;
 import com.nvidia.rtxremix.RemixAPI;
 import com.nvidia.rtxremix.RemixBridge;
 import com.nvidia.rtxremix.forge.entity.CaptureOwnerKey;
+import com.nvidia.rtxremix.forge.entity.FirstPersonCapture;
+import com.nvidia.rtxremix.forge.entity.ViewModelGeometry;
+import com.nvidia.rtxremix.forge.entity.ViewModelUploadBudget;
+import com.nvidia.rtxremix.forge.RemixForgeMod;
+import java.nio.ByteBuffer;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -23,17 +30,32 @@ public final class ItemScene implements AutoCloseable {
     private static final int MAX_MESHES = 256;
     private static final long MAX_MESH_BYTES = 32L * 1024 * 1024;
     private static final AtomicLong HASHES = new AtomicLong(0x524C4954454D0000L);
-    private final RemixAPI api;
+    interface Backend {
+        long createMesh(MeshInfo info);
+        void destroyMesh(long handle);
+        long createMaterial(MaterialInfo info);
+        void destroyMaterial(long handle);
+        long add(long mesh, float[] transform, int category, long blend);
+        void update(long instance, long mesh, float[] transform, int category, long blend);
+        void remove(long instance);
+        long blend(InstanceInfoBlendEXT info);
+        void freeBlend(long handle);
+    }
+    private final Backend api;
     private final Thread renderThread = Thread.currentThread();
     private final Map<CaptureOwnerKey, Owner> owners = new HashMap<>();
     private final CaptureOwnerKey ownerProbe = new CaptureOwnerKey();
     private final Map<MeshKey, Mesh> meshes = new HashMap<>();
     private final MeshKey probe = new MeshKey();
+    private final ViewModelGeometry viewGeometry = new ViewModelGeometry();
+    private final ViewModelUploadBudget viewBudget = new ViewModelUploadBudget();
     private long frame, atlas, material, meshBytes;
     private int count;
+    private int diagnosticUploads;
     private boolean closed;
 
-    public ItemScene(RemixAPI api) { this.api = api; }
+    public ItemScene(RemixAPI api) { this(backend(api)); }
+    ItemScene(Backend api) { this.api = api; }
 
     /** Caller must close this scene before releasing or replacing the borrowed atlas. */
     public void sync(List<CapturedItem> captured, long atlasTexture) {
@@ -54,10 +76,12 @@ public final class ItemScene implements AutoCloseable {
         }
         frame++;
         int limit = Math.min(ItemCaptureHooks.MAX_PARTS, captured.size());
+        int views = 0;
         // Mark requested assets first, so leaving items free capacity before new admission.
         for (int i = 0; i < limit; i++) {
             CapturedItem item = captured.get(i);
             if (!valid(item)) continue;
+            if (ViewModelGeometry.applies(item.categoryFlags)) views++;
             Owner owner = owners.get(ownerProbe.set(item.owner, item.categoryFlags));
             if (owner != null && owner.parts[item.occurrence] != null) owner.parts[item.occurrence].requested = frame;
             probe.set(item);
@@ -68,12 +92,23 @@ public final class ItemScene implements AutoCloseable {
         // Requested old instances may still use a mesh whose geometry changed this frame.
         // Keep those assets alive until all replacements are submitted below.
         retireMeshes(true);
+        int ordinal = viewBudget.beginFrame(views), first = 0;
         for (int i = 0; i < limit; i++) {
             CapturedItem item = captured.get(i);
+            if (valid(item) && ViewModelGeometry.applies(item.categoryFlags) && ordinal-- == 0) { first = i; break; }
+        }
+        for (int i = 0; i < limit; i++) {
+            CapturedItem item = captured.get((first + i) % limit);
             if (!valid(item)) continue;
             Mesh mesh = mesh(item);
-            if (mesh == null) continue;
             Owner owner = owners.get(ownerProbe.set(item.owner, item.categoryFlags));
+            if (mesh == null) {
+                Part previous = owner == null ? null : owner.parts[item.occurrence];
+                if (previous != null && ViewModelGeometry.applies(item.categoryFlags)) {
+                    submit(previous, owner, previous.mesh, item); previous.lastSeen = frame; previous.mesh.lastSeen = frame;
+                }
+                continue;
+            }
             if (owner == null) {
                 owner = new Owner(item.owner.getUniqueID());
                 owners.put(new CaptureOwnerKey().set(item.owner, item.categoryFlags), owner);
@@ -114,6 +149,7 @@ public final class ItemScene implements AutoCloseable {
         for (Owner owner : owners.values()) for (Part part : owner.parts) if (part != null) {
             if (part.instance != 0) resources++;
             if (part.blend != 0) resources++;
+            if (part.retiredBlend != 0) resources++;
         }
         return resources;
     }
@@ -132,29 +168,66 @@ public final class ItemScene implements AutoCloseable {
         if (existing != null) return existing;
         long bytes = ItemGeometry.bytes(item.vertexCount);
         if (meshes.size() >= MAX_MESHES || bytes > MAX_MESH_BYTES - meshBytes) return null;
-        long handle = api.createMesh(item.geometry.info(item.firstVertex, item.vertexCount, material, HASHES.incrementAndGet()));
+        boolean viewModel = ViewModelGeometry.applies(item.categoryFlags);
+        if (viewModel && !viewBudget.admit(bytes)) return null;
+        MeshInfo source = item.geometry.info(item.firstVertex, item.vertexCount, material, HASHES.incrementAndGet());
+        MeshInfo info = source;
+        if (viewModel) info = viewGeometry.prepare(info, probe.pose);
+        long handle = api.createMesh(info);
+        if (viewModel && Boolean.getBoolean("rlcraftremix.viewModelDiagnostics")) diagnose(item, source, info, handle);
         Mesh created = new Mesh(handle, bytes);
         MeshKey key = new MeshKey(); key.set(item);
         meshes.put(key, created);
         meshBytes += bytes;
         return created;
     }
+    private void diagnose(CapturedItem item, MeshInfo source, MeshInfo info, long mesh) {
+        if (++diagnosticUploads > 900 || diagnosticUploads != 1 && diagnosticUploads % 30 != 0) return;
+        float[] pose = probe.pose;
+        double determinant = pose[0] * (pose[5] * pose[10] - pose[6] * pose[9])
+                - pose[1] * (pose[4] * pose[10] - pose[6] * pose[8]) + pose[2] * (pose[4] * pose[9] - pose[5] * pose[8]);
+        float[] minimum = {Float.POSITIVE_INFINITY, Float.POSITIVE_INFINITY, Float.POSITIVE_INFINITY};
+        float[] maximum = {Float.NEGATIVE_INFINITY, Float.NEGATIVE_INFINITY, Float.NEGATIVE_INFINITY};
+        ByteBuffer vertices = info.surfaces[0].vertexBuffer;
+        int alphaMin = 255, alphaMax = 0;
+        for (int at = 0; at < info.surfaces[0].vertexCount; at++) {
+            int base = at * HardcodedVertex.STRIDE;
+            for (int axis = 0; axis < 3; axis++) {
+                float value = vertices.getFloat(base + axis * 4);
+                minimum[axis] = Math.min(minimum[axis], value); maximum[axis] = Math.max(maximum[axis], value);
+            }
+            int alpha = vertices.getInt(base + 32) >>> 24;
+            alphaMin = Math.min(alphaMin, alpha); alphaMax = Math.max(alphaMax, alpha);
+        }
+        RemixForgeMod.LOG.info("RLC_VIEW_MODEL upload={} frame={} mesh={} material={} vertices={} category={} blend={} alpha={}/{} vertexAlpha={}..{} flags={} determinant={} local={} baked={} anchor={} bounds={}..{} {}",
+                diagnosticUploads, frame, mesh, material, item.vertexCount, item.categoryFlags, item.alphaBlend,
+                item.alphaCompare, item.alphaReference, alphaMin, alphaMax, info.surfaces[0].flags, determinant,
+                Arrays.toString(item.transform), Arrays.toString(pose), Arrays.toString(FirstPersonCapture.anchorTransform()),
+                Arrays.toString(minimum), Arrays.toString(maximum), FirstPersonCapture.diagnoseProjection(source, item.transform));
+    }
     private void submit(Part part, Owner owner, Mesh mesh, CapturedItem item) {
         boolean first = part.instance == 0;
-        boolean moved = !Arrays.equals(part.transform, item.transform);
+        boolean viewModel = ViewModelGeometry.applies(item.categoryFlags);
+        float[] transform = viewModel ? FirstPersonCapture.anchorTransform() : item.transform;
+        boolean moved = !Arrays.equals(part.transform, transform) || viewModel && part.mesh != mesh;
         boolean changedBlend = first || part.alphaBlend != item.alphaBlend
                 || part.alphaCompare != item.alphaCompare || part.alphaReference != item.alphaReference;
+        if (part.retiredBlend != 0) { api.freeBlend(part.retiredBlend); part.retiredBlend = 0; }
         if (!first && !moved && !changedBlend && part.mesh == mesh) return;
-        long blend = changedBlend ? blend(item).allocNative(0) : part.blend;
+        long blend = changedBlend ? api.blend(blend(item)) : part.blend;
         try {
-            if (first) { part.instance = api.sceneInstanceAdd(mesh.handle, item.transform, item.categoryFlags, 1, blend); count++; }
-            else { api.sceneInstanceUpdate(part.instance, mesh.handle, item.transform, item.categoryFlags, 1, blend); if (moved) owner.updates++; }
+            if (first) { part.instance = api.add(mesh.handle, transform, item.categoryFlags, blend); count++; }
+            else { api.update(part.instance, mesh.handle, transform, item.categoryFlags, blend); if (moved) owner.updates++; }
         } catch (RuntimeException | LinkageError ex) {
-            if (changedBlend) RemixBridge.freeExt(blend);
+            if (changedBlend) {
+                part.retiredBlend = blend;
+                try { api.freeBlend(blend); part.retiredBlend = 0; }
+                catch (RuntimeException | LinkageError cleanup) { ex.addSuppressed(cleanup); }
+            }
             throw ex;
         }
         if (changedBlend) {
-            if (part.blend != 0) RemixBridge.freeExt(part.blend);
+            part.retiredBlend = part.blend;
             part.blend = blend;
             part.alphaBlend = item.alphaBlend;
             part.alphaCompare = item.alphaCompare; part.alphaReference = item.alphaReference;
@@ -164,7 +237,9 @@ public final class ItemScene implements AutoCloseable {
             mesh.references++;
             part.mesh = mesh;
         }
-        System.arraycopy(item.transform, 0, part.transform, 0, 12);
+        System.arraycopy(transform, 0, part.transform, 0, 12);
+        // The native instance already uses its new dependencies even if freeing old state fails.
+        if (part.retiredBlend != 0) { api.freeBlend(part.retiredBlend); part.retiredBlend = 0; }
     }
     static InstanceInfoBlendEXT blend(CapturedItem item) {
         InstanceInfoBlendEXT ext = item.alphaBlend
@@ -202,8 +277,9 @@ public final class ItemScene implements AutoCloseable {
         }
     }
     private void remove(Part part) {
-        if (part.instance != 0) { api.sceneInstanceRemove(part.instance); part.instance = 0; count--; }
-        if (part.blend != 0) { RemixBridge.freeExt(part.blend); part.blend = 0; }
+        if (part.instance != 0) { api.remove(part.instance); part.instance = 0; count--; }
+        if (part.blend != 0) { api.freeBlend(part.blend); part.blend = 0; }
+        if (part.retiredBlend != 0) { api.freeBlend(part.retiredBlend); part.retiredBlend = 0; }
         if (part.mesh != null) { part.mesh.references--; part.mesh = null; }
     }
 
@@ -232,6 +308,19 @@ public final class ItemScene implements AutoCloseable {
     private void checkThread() {
         if (Thread.currentThread() != renderThread) throw new IllegalStateException("Item scene must run on its Minecraft render thread");
     }
+    private static Backend backend(final RemixAPI remix) {
+        return new Backend() {
+            public long createMesh(MeshInfo info) { return remix.createMesh(info); }
+            public void destroyMesh(long handle) { remix.destroyMesh(handle); }
+            public long createMaterial(MaterialInfo info) { return remix.createMaterial(info); }
+            public void destroyMaterial(long handle) { remix.destroyMaterial(handle); }
+            public long add(long mesh, float[] transform, int category, long blend) { return remix.sceneInstanceAdd(mesh, transform, category, 1, blend); }
+            public void update(long instance, long mesh, float[] transform, int category, long blend) { remix.sceneInstanceUpdate(instance, mesh, transform, category, 1, blend); }
+            public void remove(long instance) { remix.sceneInstanceRemove(instance); }
+            public long blend(InstanceInfoBlendEXT info) { return info.allocNative(0); }
+            public void freeBlend(long handle) { RemixBridge.freeExt(handle); }
+        };
+    }
     private static final class Owner {
         final UUID id;
         final Part[] parts = new Part[ItemCaptureHooks.MAX_OWNER_PARTS];
@@ -241,7 +330,7 @@ public final class ItemScene implements AutoCloseable {
     private static final class Part {
         final float[] transform = new float[12];
         Mesh mesh;
-        long instance, blend, requested, lastSeen;
+        long instance, blend, retiredBlend, requested, lastSeen;
         int alphaCompare, alphaReference;
         boolean alphaBlend;
     }
@@ -251,18 +340,27 @@ public final class ItemScene implements AutoCloseable {
         long requested, lastSeen;
         Mesh(long handle, long bytes) { this.handle = handle; this.bytes = bytes; }
     }
-    private static final class MeshKey {
+    static final class MeshKey {
         Object model, stack;
         long fingerprint;
         int vertices;
-        void set(CapturedItem item) { model = item.model; stack = item.stack; fingerprint = item.fingerprint; vertices = item.vertexCount; }
+        boolean viewModel;
+        final float[] pose = new float[12];
+        void set(CapturedItem item) {
+            model = item.model; stack = item.stack; fingerprint = item.fingerprint; vertices = item.vertexCount;
+            viewModel = ViewModelGeometry.applies(item.categoryFlags);
+            if (viewModel) FirstPersonCapture.geometryPose(item.transform, pose);
+            else Arrays.fill(pose, 0);
+        }
         @Override public int hashCode() {
-            return 31 * (31 * System.identityHashCode(model) + System.identityHashCode(stack)) + (int) (fingerprint ^ fingerprint >>> 32) + vertices;
+            int result = 31 * (31 * System.identityHashCode(model) + System.identityHashCode(stack)) + (int) (fingerprint ^ fingerprint >>> 32) + vertices;
+            return 31 * (31 * result + (viewModel ? 1 : 0)) + Arrays.hashCode(pose);
         }
         @Override public boolean equals(Object value) {
             if (!(value instanceof MeshKey)) return false;
             MeshKey other = (MeshKey) value;
-            return model == other.model && stack == other.stack && fingerprint == other.fingerprint && vertices == other.vertices;
+            return model == other.model && stack == other.stack && fingerprint == other.fingerprint && vertices == other.vertices
+                    && viewModel == other.viewModel && Arrays.equals(pose, other.pose);
         }
     }
 }

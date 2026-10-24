@@ -22,7 +22,9 @@ final class TriangleUploadBudget {
         return 0;
     }
 
-    static boolean dynamic(CapturedEntityPart part) { return part.triangles != null || part.transformedTexture; }
+    static boolean dynamic(CapturedEntityPart part) {
+        return !ViewModelGeometry.applies(part.categoryFlags) && (part.triangles != null || part.transformedTexture);
+    }
 
     int beginFrame(int partCount) {
         uploads = 0;

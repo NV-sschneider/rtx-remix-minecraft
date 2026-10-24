@@ -7,12 +7,16 @@ package com.nvidia.rtxremix.forge.client;
 import com.nvidia.rtxremix.InstanceCategoryBit;
 import com.nvidia.rtxremix.forge.entity.EntityCaptureHooks;
 import com.nvidia.rtxremix.forge.entity.FirstPersonCapture;
+import java.awt.image.BufferedImage;
+import java.lang.reflect.Field;
 import java.util.Locale;
 import java.util.UUID;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.renderer.ItemRenderer;
 import net.minecraft.client.gui.GuiScreen;
+import net.minecraft.client.gui.ScaledResolution;
 import net.minecraft.client.gui.inventory.GuiInventory;
 import net.minecraft.client.settings.KeyBinding;
 import net.minecraft.entity.player.EntityPlayerMP;
@@ -25,13 +29,18 @@ import net.minecraft.server.integrated.IntegratedServer;
 import net.minecraft.util.EnumHand;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.world.WorldServer;
+import net.minecraftforge.fml.relauncher.ReflectionHelper;
 
 /** Owned-world checks for native hand/body categories and the vanilla equip/use animation path. */
 final class FixtureFirstPerson implements AutoCloseable {
-    private enum Phase { ARRIVE, EMPTY, EQUIP_SWORD, SWORD, SWING, EQUIP_BOW, BOW, DRAW_START, DRAW,
+    private enum Phase { ARRIVE, EMPTY, EQUIP_SWORD, SWORD, VANILLA_SWORD, SWING, EQUIP_BOW, BOW, DRAW_START, DRAW,
         WIDE_FOV, THIRD_PERSON, FIRST_PERSON, HIDDEN_HUD, HUD_RESTORED, INVENTORY, RELOAD,
         DAMAGE_EARLY, DAMAGE_LATE, DAMAGE_RELOAD, DAMAGE_CANCELLED, RETURN, DONE }
     private static final int BREAKER_ID = Integer.MIN_VALUE + 7112;
+    private static final Field EQUIPPED = ReflectionHelper.findField(ItemRenderer.class,
+            new String[] {"equippedProgressMainHand", "field_187469_f"});
+    private static final Field PREVIOUS_EQUIPPED = ReflectionHelper.findField(ItemRenderer.class,
+            new String[] {"prevEquippedProgressMainHand", "field_187470_g"});
     private final Minecraft mc;
     private final ClientEvents events;
     private final IntegratedServer server;
@@ -52,6 +61,10 @@ final class FixtureFirstPerson implements AutoCloseable {
     private long damageBaseline;
     private int lastSwingTick = Integer.MIN_VALUE;
     private GuiScreen ownedScreen;
+    private BufferedImage emptyImage;
+    private String swordFailure;
+    private int vanillaSwordTicks;
+    private final BlockPos.MutableBlockPos arenaProbe = new BlockPos.MutableBlockPos();
     private boolean cleanupQueued;
     // Accessed only by queued server tasks, including cleanup after an early failure.
     private ItemStack originalMain, originalOff;
@@ -82,7 +95,8 @@ final class FixtureFirstPerson implements AutoCloseable {
     }
 
     boolean tick() throws Exception {
-        if (mc.getIntegratedServer() != server || mc.world == null || mc.player == null || !events.isEnabled()
+        if (mc.getIntegratedServer() != server || mc.world == null || mc.player == null
+                || !events.isEnabled() && phase != Phase.VANILLA_SWORD
                 || events.failureMessage() != null) throw new IllegalStateException("First-person fixture renderer/world unavailable");
         if (EntityCaptureHooks.offscreenFailureCount() != failureBaseline)
             throw new IllegalStateException("First-person fixture supplementary renderer failed");
@@ -97,8 +111,9 @@ final class FixtureFirstPerson implements AutoCloseable {
                 if (complete()) transition(Phase.EMPTY);
                 break;
             case EMPTY:
-                if (settled(mc.player.getHeldItemMainhand().isEmpty() && hands() > 0 && viewItems() == 0 && shadow(), 30)) {
-                    capture("firstperson-empty"); log("EMPTY_HAND_PASS");
+                if (settled(arenaReady() && mc.player.getHeldItemMainhand().isEmpty()
+                        && hands() > 0 && viewItems() == 0 && shadow(), 30)) {
+                    emptyImage = output.image(); output.capture("firstperson-empty", emptyImage); log("EMPTY_HAND_PASS");
                     action = setItem(Items.DIAMOND_SWORD); transition(Phase.EQUIP_SWORD);
                 }
                 break;
@@ -106,9 +121,23 @@ final class FixtureFirstPerson implements AutoCloseable {
                 if (complete()) transition(Phase.SWORD);
                 break;
             case SWORD:
-                if (settled(holding(Items.DIAMOND_SWORD) && viewItems() > 0 && shadowItems() > 0 && shadow(), 30)) {
-                    capture("firstperson-sword"); log("EQUIP_PASS");
+                if (settled(arenaReady() && holding(Items.DIAMOND_SWORD) && equipped()
+                        && viewItems() > 0 && shadowItems() > 0 && shadow(), 30)) {
+                    if (!captureSword()) break;
+                    log("EQUIP_PASS");
                     motionBaseline = events.itemTransformUpdates(playerId); transition(Phase.SWING);
+                }
+                break;
+            case VANILLA_SWORD:
+                if (++vanillaSwordTicks >= 40) {
+                    IllegalStateException failure = new IllegalStateException(swordFailure);
+                    try { capture("firstperson-sword-vanilla-control"); }
+                    catch (Exception | LinkageError diagnostic) { failure.addSuppressed(diagnostic); }
+                    finally {
+                        try { events.setEnabled(true); }
+                        catch (RuntimeException | LinkageError restoration) { failure.addSuppressed(restoration); }
+                    }
+                    throw failure;
                 }
                 break;
             case SWING:
@@ -125,7 +154,7 @@ final class FixtureFirstPerson implements AutoCloseable {
                 if (complete()) transition(Phase.BOW);
                 break;
             case BOW:
-                if (settled(holding(Items.BOW) && viewItems() > 0 && shadowItems() > 0 && shadow(), 30)) {
+                if (settled(holding(Items.BOW) && equipped() && viewItems() > 0 && shadowItems() > 0 && shadow(), 30)) {
                     capture("firstperson-bow"); motionBaseline = events.itemTransformUpdates(playerId);
                     // Minecraft.processKeyBinds otherwise immediately calls
                     // onStoppedUsingItem, even after setActiveHand succeeded.
@@ -226,6 +255,7 @@ final class FixtureFirstPerson implements AutoCloseable {
     }
 
     static Layout build(WorldServer world, int x, int y, int z) {
+        if (Boolean.getBoolean("rlcraftremix.smoke.firstPersonFar")) x += 16384;
         for (int dx = -8; dx <= 8; dx++) for (int dz = 0; dz <= 18; dz++) {
             world.setBlockState(new BlockPos(x + dx, y, z + dz),
                     ((dx + dz) & 1) == 0 ? Blocks.QUARTZ_BLOCK.getDefaultState() : Blocks.STONE.getDefaultState(), 3);
@@ -238,11 +268,38 @@ final class FixtureFirstPerson implements AutoCloseable {
     }
 
     private boolean holding(Item item) { return mc.player.getHeldItemMainhand().getItem() == item; }
+    private float equipProgress(Field field) {
+        try { return field.getFloat(mc.entityRenderer.itemRenderer); }
+        catch (IllegalAccessException error) { throw new IllegalStateException("Cannot observe vanilla equip progress", error); }
+    }
+    private boolean equipped() {
+        // The newly captured item first appears while vanilla holds it below the viewport.
+        // Render-frame counts do not prove that its tick-driven equip animation has finished.
+        return equipProgress(EQUIPPED) >= 0.99f && equipProgress(PREVIOUS_EQUIPPED) >= 0.99f;
+    }
     private int hands() { return events.entityCategoryCount(InstanceCategoryBit.VIEW_MODEL); }
     private int viewItems() { return events.itemCategoryCount(InstanceCategoryBit.VIEW_MODEL); }
     private int shadowParts() { return events.entityCategoryCount(FirstPersonCapture.SHADOW_CATEGORY); }
     private int shadowItems() { return events.itemCategoryCount(FirstPersonCapture.SHADOW_CATEGORY); }
     private boolean shadow() { return shadowParts() > 0 && !EntityCaptureHooks.normallyRendered(playerId); }
+    private boolean arenaReady() {
+        if (events.terrainPendingSectionCount() != 0 || events.terrainRetirementCount() != 0) return false;
+        for (int dx = -8; dx <= 8; dx++) for (int dz = 0; dz <= 18; dz++) {
+            arenaProbe.setPos(layout.x + dx, layout.y, layout.z + dz);
+            if (mc.world.getBlockState(arenaProbe).getBlock() != (((dx + dz) & 1) == 0 ? Blocks.QUARTZ_BLOCK : Blocks.STONE))
+                return false;
+        }
+        for (int x = (layout.x - 8) >> 4; x <= (layout.x + 8) >> 4; x++)
+            for (int z = layout.z >> 4; z <= (layout.z + 18) >> 4; z++)
+                if (!events.terrainSectionReady(x, layout.y >> 4, z)) return false;
+        for (int dx = -6; dx <= 6; dx += 3) for (int dy = 1; dy <= 4; dy++) {
+            arenaProbe.setPos(layout.x + dx, layout.y + dy, layout.z + 1);
+            if (mc.world.getBlockState(arenaProbe).getBlock() != Blocks.QUARTZ_BLOCK
+                    || !events.terrainSectionReady(arenaProbe.getX() >> 4, arenaProbe.getY() >> 4, arenaProbe.getZ() >> 4))
+                return false;
+        }
+        return true;
+    }
     private Future<?> setItem(Item item) { return server.callFromMainThread(() -> { requireWorld(); equip(item); return null; }); }
     private void equip(Item item) {
         EntityPlayerMP player = player(); player.resetActiveHand(); player.inventory.currentItem = selectedSlot;
@@ -276,13 +333,33 @@ final class FixtureFirstPerson implements AutoCloseable {
     }
     private void transition(Phase next) { phase = next; since = progress = System.nanoTime(); frame = -1; log("PHASE"); }
     private void capture(String name) throws Exception { output.capture(name, output.image()); }
+    private boolean captureSword() throws Exception {
+        BufferedImage image = output.image(); output.capture("firstperson-sword", image);
+        FixtureFirstPersonImage.Result proof = FixtureFirstPersonImage.sword(emptyImage, image,
+                new ScaledResolution(mc).getScaleFactor());
+        output.log("FIRSTPERSON_SWORD_PIXELS", proof.describe() + " " + status());
+        if (!proof.visible()) {
+            swordFailure = "First-person diamond sword is not visibly present: " + proof.describe();
+            if (!Boolean.getBoolean("rlcraftremix.viewModelDiagnostics")) throw new IllegalStateException(swordFailure);
+            // A failed native image can be compared with the identical vanilla pose, without
+            // accepting an invisible blade or changing the fixture's pass condition.
+            transition(Phase.VANILLA_SWORD);
+            events.setEnabled(false);
+            return false;
+        }
+        emptyImage = null;
+        return true;
+    }
     private void log(String name) { output.log("FIRSTPERSON_" + name, status()); }
     String status() {
         return "phase=" + phase + " hands=" + hands() + " held=" + viewItems() + " shadow=" + shadowParts()
+                + " equipped=" + equipProgress(EQUIPPED) + "/" + equipProgress(PREVIOUS_EQUIPPED)
+                + " arena=" + layout.x + "," + layout.y + "," + layout.z
                 + " shadowHeld=" + shadowItems() + " normal=" + EntityCaptureHooks.normallyRendered(playerId)
                 + " active=" + mc.player.isHandActive() + " useTicks=" + mc.player.getItemInUseMaxCount()
                 + " useKey=" + mc.gameSettings.keyBindUseItem.isKeyDown()
                 + " damageQuads=" + events.damageQuads()
+                + " pendingSections=" + events.terrainPendingSectionCount() + " retirement=" + events.terrainRetirementCount()
                 + " itemUpdates=" + events.itemTransformUpdates(playerId) + " frames=" + events.renderedFrames();
     }
     private void restoreClient() {
@@ -310,8 +387,13 @@ final class FixtureFirstPerson implements AutoCloseable {
         });
     }
     @Override public void close() {
-        restoreClient();
-        if (!cleanupQueued) { cleanupQueued = true; restoreServer(); }
+        emptyImage = null;
+        try {
+            if (phase == Phase.VANILLA_SWORD && !events.isEnabled() && events.failureMessage() == null) events.setEnabled(true);
+        } finally {
+            restoreClient();
+            if (!cleanupQueued) { cleanupQueued = true; restoreServer(); }
+        }
     }
     static final class Layout {
         final int x, y, z;

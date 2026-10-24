@@ -10,6 +10,7 @@ import com.nvidia.rtxremix.forge.entity.CapturedEntityPart;
 import com.nvidia.rtxremix.forge.entity.EntityCaptureHooks;
 import com.nvidia.rtxremix.forge.entity.EntityScene;
 import com.nvidia.rtxremix.forge.entity.FastTileCaptureHooks;
+import com.nvidia.rtxremix.forge.entity.FirstPersonCapture;
 import com.nvidia.rtxremix.forge.item.CapturedItem;
 import com.nvidia.rtxremix.forge.item.ItemCaptureHooks;
 import com.nvidia.rtxremix.forge.item.ItemScene;
@@ -164,14 +165,15 @@ final class PrototypeRenderer {
             sky = new SkyScene(api);
             medium = new CameraMedium(api);
         }
-        terrain.update();
-        entities.sync(capturedParts);
-        items.sync(capturedItems, terrain.getAtlasTexture());
-        effects.sync(capturedEffects, terrain.getAtlasTexture());
         if (preparedWorld != mc.world || preparedCamera == null) {
             throw new IllegalStateException("No camera was prepared for this world frame");
         }
         CameraInfo captured = preparedCamera;
+        FirstPersonCapture.prepareCamera(captured.parameterizedExt);
+        terrain.update();
+        entities.sync(capturedParts);
+        items.sync(capturedItems, terrain.getAtlasTexture());
+        effects.sync(capturedEffects, terrain.getAtlasTexture());
         heldLights.sync(HeldItemLights.samples(), items::containsOccurrence, captured.parameterizedExt);
         api.setupCamera(captured);
         viewModelCamera.parameterizedExt = captured.parameterizedExt;

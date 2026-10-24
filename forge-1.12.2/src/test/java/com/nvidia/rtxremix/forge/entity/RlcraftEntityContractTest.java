@@ -9,6 +9,7 @@ import java.io.BufferedReader;
 import java.io.File;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.jar.JarFile;
 import javax.imageio.ImageIO;
@@ -27,6 +28,63 @@ import static org.junit.Assert.*;
 /** Audits optional installed artifacts without linking or copying their implementation. */
 public class RlcraftEntityContractTest {
     private static final String OBJ = "com/lycanitesmobs/client/obj/";
+
+    @Test public void installedArisaurCutoutsRemainDistinctFromFractionalFlowersaurAlpha() throws Exception {
+        String path = System.getProperty("rtxremix.rlcraftMods"); Assume.assumeNotNull(path);
+        try (JarFile jar = new JarFile(new File(path, "lycanitesmobs-1.12.2-2.0.8.9.jar"))) {
+            for (String suffix : new String[] {"", "_keppel", "_russet", "_flowersaur"}) {
+                try (InputStream stream = jar.getInputStream(jar.getJarEntry(
+                        "assets/lycanitesmobs/textures/entity/arisaur" + suffix + ".png"))) {
+                    BufferedImage image = ImageIO.read(stream); assertNotNull(image);
+                    int[] pixels = image.getRGB(0, 0, image.getWidth(), image.getHeight(), null, 0, image.getWidth());
+                    ByteBuffer rgba = EntityMesh.direct(pixels.length * 4);
+                    int transparent = 0, opaque = 0;
+                    for (int pixel : pixels) {
+                        int alpha = pixel >>> 24;
+                        if (alpha == 0) transparent++;
+                        if (alpha == 255) opaque++;
+                        rgba.put((byte) (pixel >>> 16)).put((byte) (pixel >>> 8)).put((byte) pixel).put((byte) alpha);
+                    }
+                    rgba.flip();
+                    assertTrue("Texture has transparent holes: " + suffix, transparent > 0);
+                    assertTrue("Texture has an opaque body: " + suffix, opaque > 0);
+                    assertFalse(EntityTextures.opaquePixels(rgba));
+                    assertEquals("Only the flowersaur variant needs fractional alpha blending",
+                            !suffix.equals("_flowersaur"), EntityTextures.binaryPixels(rgba));
+                }
+            }
+            ClassNode arisaur = read(jar, "com/lycanitesmobs/client/model/creature/ModelArisaur");
+            assertEquals("com/lycanitesmobs/client/model/template/ModelTemplateQuadruped", arisaur.superName);
+            assertEquals("com/lycanitesmobs/client/model/ModelCreatureObj",
+                    read(jar, arisaur.superName).superName);
+            boolean enablesBlend = false, sourceAlpha = false, inverseSourceAlpha = false;
+            for (MethodNode method : read(jar, "com/lycanitesmobs/client/model/ModelCreatureObj").methods) {
+                if (!method.name.equals("onRenderStart")) continue;
+                for (AbstractInsnNode node : method.instructions.toArray()) {
+                    if (node instanceof MethodInsnNode) {
+                        MethodInsnNode call = (MethodInsnNode) node;
+                        enablesBlend |= call.owner.equals("net/minecraft/client/renderer/GlStateManager") && call.name.equals("func_179147_l");
+                    } else if (node instanceof FieldInsnNode) {
+                        FieldInsnNode field = (FieldInsnNode) node;
+                        sourceAlpha |= field.name.equals("SRC_ALPHA"); inverseSourceAlpha |= field.name.equals("ONE_MINUS_SRC_ALPHA");
+                    }
+                }
+            }
+            assertTrue("The creature model enables ordinary blending for binary cutout textures", enablesBlend && sourceAlpha && inverseSourceAlpha);
+            boolean customName = false, flowersaurName = false, flowersaurTexture = false;
+            for (MethodNode method : read(jar, "com/lycanitesmobs/core/entity/creature/EntityArisaur").methods) {
+                if (!method.name.equals("getTexture")) continue;
+                for (AbstractInsnNode node : method.instructions.toArray()) {
+                    if (node instanceof MethodInsnNode) customName |= ((MethodInsnNode) node).name.equals("func_95999_t");
+                    if (node instanceof LdcInsnNode) {
+                        Object constant = ((LdcInsnNode) node).cst;
+                        flowersaurName |= "Flowersaur".equals(constant); flowersaurTexture |= "_flowersaur".equals(constant);
+                    }
+                }
+            }
+            assertTrue("The fixture name selects the real fractional-alpha skin", customName && flowersaurName && flowersaurTexture);
+        }
+    }
 
     @Test public void installedRahovartOpaqueBaseUsesTheModelsSharedAlphaBlendPath() throws Exception {
         String path = System.getProperty("rtxremix.rlcraftMods"); Assume.assumeNotNull(path);

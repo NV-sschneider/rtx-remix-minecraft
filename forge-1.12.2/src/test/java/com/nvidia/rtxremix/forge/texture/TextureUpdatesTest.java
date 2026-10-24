@@ -12,24 +12,113 @@ import org.junit.Test;
 import static org.junit.Assert.*;
 
 public class TextureUpdatesTest {
+    @Test public void independentAtlasSpritesRemainVisibleAcrossAContinuousBoundedBacklog() {
+        final int[] published = {0};
+        try (TextureUpdates updates = new TextureUpdates(batch -> {
+            int patches = 0, bytes = 0;
+            for (TextureBatchEntry entry : batch.entries) for (TexturePatch patch : entry.patches) {
+                patches++; bytes += patch.width * patch.height * 4;
+            }
+            assertTrue(patches <= TextureUpdates.MAX_BATCH_PATCHES);
+            assertTrue(bytes <= TextureUpdates.BYTES_PER_FRAME); published[0] += patches;
+        })) {
+            TextureUpdates.Binding atlas = updates.subscribeAtlas(1, 11, 128, 1, true, true);
+            TextureUpdates.Binding image = updates.subscribe(2, 22, 128, 1, true, true);
+            for (int frame = 0; frame < 5; frame++) {
+                updates.begin(1, 0, 0, 0, 0);
+                for (int x = 0; x <= TextureUpdates.MAX_BATCH_PATCHES; x++) {
+                    upload(updates, x, 0, 1, 1, IntBuffer.wrap(new int[] {0xff000000 | frame}));
+                }
+                updates.end(true);
+                updates.begin(2, 0, 0, 1, 1);
+                upload(updates, 0, 0, 1, 1, IntBuffer.wrap(new int[] {-1})); updates.end(true);
+                assertTrue(atlas.current()); assertTrue(atlas.opaque()); assertTrue(atlas.binary());
+                assertFalse(image.current()); assertFalse(image.opaque());
+                assertEquals(2, updates.dirtyCount());
+                updates.flush();
+                assertTrue(atlas.current()); assertTrue(atlas.pending > 0);
+            }
+            assertEquals(5 * TextureUpdates.MAX_BATCH_PATCHES, published[0]);
+            assertTrue(updates.retainedBytes() <= TextureUpdates.MAX_RETAINED_BYTES);
+            updates.begin(1, 0, 0, 1, 1);
+            upload(updates, 0, 0, 1, 1, IntBuffer.wrap(new int[] {0x80123456})); updates.end(true);
+            assertTrue(atlas.current()); assertFalse(atlas.opaque()); assertFalse(atlas.binary());
+            updates.deleted(1); assertFalse(atlas.current()); assertTrue(atlas.deleted());
+            updates.unsubscribe(atlas); updates.unsubscribe(image); assertEquals(0, updates.retainedBytes());
+        }
+    }
+
+    @Test public void atlasFullReplacementsAndLostPixelRepairsRequireSuccessfulCompletePublication() {
+        final boolean[] fail = {false};
+        try (TextureUpdates updates = new TextureUpdates(batch -> {
+            if (fail[0]) throw new IllegalStateException("native publication");
+        })) {
+            TextureUpdates.Binding atlas = updates.subscribeAtlas(1, 11, 1024, 2048, true, true);
+            updates.begin(1, 0, 0, 1024, 2048);
+            upload(updates, 0, 0, 1024, 2048, IntBuffer.allocate(1024 * 2048)); updates.end(true);
+            assertFalse(atlas.current()); updates.flush(); assertFalse(atlas.current());
+            fail[0] = true; assertThrows(IllegalStateException.class, updates::flush); assertFalse(atlas.current());
+            fail[0] = false; updates.flush(); assertTrue(atlas.current());
+            updates.begin(1, 0, 0, 1, 1);
+            upload(updates, 0, 0, 1, 1, IntBuffer.wrap(new int[] {0xff123456})); updates.end(true);
+            assertTrue(atlas.current()); updates.flush();
+            updates.begin(1, 4, 5, 1, 1);
+            upload(updates, 4, 5, 1, 1, IntBuffer.allocate(0)); updates.end(true);
+            assertFalse(atlas.current());
+            updates.begin(1, 4, 5, 1, 1);
+            upload(updates, 4, 5, 1, 1, IntBuffer.wrap(new int[] {-1})); updates.end(true);
+            assertTrue(atlas.lost.empty()); assertFalse(atlas.current());
+            fail[0] = true; assertThrows(IllegalStateException.class, updates::flush); assertFalse(atlas.current());
+            fail[0] = false; updates.flush(); assertTrue(atlas.current());
+            assertFalse(atlas.opaque()); assertFalse(atlas.binary());
+        }
+    }
+
     @Test public void opaqueProofSurvivesOpaquePatchesButNeverPromotesUnknownOrTranslucentPixels() {
         try (TextureUpdates updates = new TextureUpdates(batch -> { })) {
             TextureUpdates.Binding proven = updates.subscribe(1, 11, 2, 2, true);
             TextureUpdates.Binding unknown = updates.subscribe(2, 22, 1, 1);
             assertTrue(proven.opaque()); assertFalse(unknown.opaque());
+            assertTrue(proven.binary()); assertFalse(unknown.binary());
             updates.begin(1, 1, 0, 1, 1);
             upload(updates, 1, 0, 1, 1, IntBuffer.wrap(new int[] {0xff123456})); updates.end(true);
             assertFalse(proven.opaque()); // Pending pixels cannot authorize an opaque native draw.
-            updates.flush(); assertTrue(proven.opaque());
+            assertFalse(proven.binary()); updates.flush(); assertTrue(proven.opaque()); assertTrue(proven.binary());
             updates.begin(1, 0, 1, 1, 1);
             upload(updates, 0, 1, 1, 1, IntBuffer.wrap(new int[] {0xfe123456})); updates.end(true);
             assertFalse(proven.opaque()); updates.flush(); assertFalse(proven.opaque()); assertTrue(proven.current());
+            assertFalse(proven.binary());
             updates.begin(1, 0, 1, 1, 1);
             upload(updates, 0, 1, 1, 1, IntBuffer.wrap(new int[] {0xff123456})); updates.end(true); updates.flush();
             assertFalse(proven.opaque()); // Partial repair cannot prove the complete image again.
+            assertFalse(proven.binary());
             updates.begin(2, 0, 0, 1, 1);
             upload(updates, 0, 0, 1, 1, IntBuffer.wrap(new int[] {-1})); updates.end(true); updates.flush();
             assertFalse(unknown.opaque());
+            assertFalse(unknown.binary());
+        }
+    }
+
+    @Test public void transparentPatchesRevokeFullOpacityWithoutLosingTheIndependentBinaryProof() {
+        try (TextureUpdates updates = new TextureUpdates(batch -> { })) {
+            TextureUpdates.Binding opaque = updates.subscribe(1, 11, 2, 1, true);
+            TextureUpdates.Binding binary = updates.subscribe(2, 22, 2, 1, false, true);
+            assertTrue(opaque.opaque()); assertTrue(opaque.binary());
+            assertFalse(binary.opaque()); assertTrue(binary.binary());
+            for (int id = 1; id <= 2; id++) {
+                updates.begin(id, 0, 0, 2, 1);
+                upload(updates, 0, 0, 2, 1, IntBuffer.wrap(new int[] {0x00123456, 0xffabcdef})); updates.end(true);
+            }
+            assertFalse(opaque.binary()); assertFalse(binary.binary());
+            updates.flush();
+            assertFalse(opaque.opaque()); assertFalse(binary.opaque());
+            assertTrue(opaque.binary()); assertTrue(binary.binary());
+            updates.begin(2, 0, 0, 1, 1);
+            upload(updates, 0, 0, 1, 1, IntBuffer.wrap(new int[] {0x01123456})); updates.end(true); updates.flush();
+            assertFalse(binary.binary()); assertTrue(opaque.binary());
+            updates.begin(2, 0, 0, 1, 1);
+            upload(updates, 0, 0, 1, 1, IntBuffer.wrap(new int[] {0xff123456})); updates.end(true); updates.flush();
+            assertTrue(binary.current()); assertFalse(binary.binary());
         }
     }
 
@@ -46,11 +135,14 @@ public class TextureUpdatesTest {
             updates.deleted(3); updates.unsubscribe(released);
             assertFalse(wrongFormat.opaque()); assertFalse(failed.opaque());
             assertFalse(deleted.opaque()); assertFalse(released.opaque());
+            assertFalse(wrongFormat.binary()); assertFalse(failed.binary());
+            assertFalse(deleted.binary()); assertFalse(released.binary());
             for (int id = 1; id <= 2; id++) {
                 updates.begin(id, 0, 0, 1, 1); upload(updates, 0, 0, 1, 1, IntBuffer.wrap(new int[] {-1})); updates.end(true);
             }
             updates.flush(); assertTrue(wrongFormat.current()); assertTrue(failed.current());
             assertFalse(wrongFormat.opaque()); assertFalse(failed.opaque());
+            assertFalse(wrongFormat.binary()); assertFalse(failed.binary());
         }
     }
 
@@ -85,10 +177,12 @@ public class TextureUpdatesTest {
             maximum[0] = Math.max(maximum[0], bytes);
             if (fail[0]) throw new IllegalStateException("native update");
         })) {
-            TextureUpdates.Binding binding = updates.subscribe(1, 11, 1024, 2048);
+            TextureUpdates.Binding binding = updates.subscribe(1, 11, 1024, 2048, true);
             updates.begin(1, 0, 0, 1024, 2048); upload(updates, 0, 0, 1024, 2048, IntBuffer.allocate(1024 * 2048)); updates.end(true);
             assertFalse(binding.current()); assertThrows(IllegalStateException.class, updates::flush); assertFalse(binding.current());
-            fail[0] = false; updates.flush(); assertFalse(binding.current()); updates.flush(); assertTrue(binding.current());
+            assertFalse(binding.binary());
+            fail[0] = false; updates.flush(); assertFalse(binding.current()); assertFalse(binding.binary());
+            updates.flush(); assertTrue(binding.current()); assertTrue(binding.binary()); assertFalse(binding.opaque());
             assertEquals(TextureUpdates.BYTES_PER_FRAME, maximum[0]); assertEquals(2, updates.updateCount());
         }
     }

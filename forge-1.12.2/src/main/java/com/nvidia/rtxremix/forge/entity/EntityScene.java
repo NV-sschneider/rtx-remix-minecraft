@@ -60,8 +60,10 @@ public final class EntityScene implements AutoCloseable {
     private final Map<MeshKey, MeshAsset> meshes = new HashMap<MeshKey, MeshAsset>();
     private final List<EntityTextures.Asset> textures = new ArrayList<EntityTextures.Asset>();
     private final EntityMesh geometry = new EntityMesh();
+    private final ViewModelGeometry viewGeometry = new ViewModelGeometry();
     private final MeshKey meshProbe = new MeshKey();
     private final TriangleUploadBudget triangleBudget = new TriangleUploadBudget();
+    private final ViewModelUploadBudget viewBudget = new ViewModelUploadBudget();
     private long frame;
     private long meshBytes;
     private long textureBytes;
@@ -84,6 +86,7 @@ public final class EntityScene implements AutoCloseable {
         frame++;
         int count = Math.min(parts.size(), MAX_PARTS);
         int first = triangleBudget.beginFrame(parts, count);
+        int viewFirst = viewStart(parts, count);
         deferredTriangleUploads = 0;
         for (int i = 0; i < count; i++) {
             CapturedEntityPart captured = parts.get(i);
@@ -97,8 +100,9 @@ public final class EntityScene implements AutoCloseable {
         retireUnseenMeshes();
         // Pending revisions have no visible instances, but their asset must survive until this
         // frame's capture requests it again. Retire textures after processing those requests.
-        for (int i = 0; i < count; i++) {
-            CapturedEntityPart captured = parts.get((first + i) % count);
+        for (int pass = 0; pass < 2; pass++) for (int i = 0; i < count; i++) {
+            CapturedEntityPart captured = parts.get(((pass == 0 ? viewFirst : first) + i) % count);
+            if (ViewModelGeometry.applies(captured.categoryFlags) != (pass == 0)) continue;
             if (!valid(captured)) continue;
             Owner owner = owners.get(ownerProbe.set(captured.owner, captured.categoryFlags));
             Part part = owner == null ? null : owner.parts[captured.occurrence];
@@ -122,6 +126,16 @@ public final class EntityScene implements AutoCloseable {
         retireParts(false);
         retireUnseenMeshes();
         retireUnseenTextures();
+    }
+
+    private int viewStart(List<CapturedEntityPart> parts, int count) {
+        int views = 0;
+        for (int i = 0; i < count; i++) if (valid(parts.get(i)) && ViewModelGeometry.applies(parts.get(i).categoryFlags)) views++;
+        int ordinal = viewBudget.beginFrame(views);
+        for (int i = 0; i < count; i++) {
+            if (valid(parts.get(i)) && ViewModelGeometry.applies(parts.get(i).categoryFlags) && ordinal-- == 0) return i;
+        }
+        return 0;
     }
 
     public int partCount() { checkThread(); return partCount; }
@@ -284,7 +298,8 @@ public final class EntityScene implements AutoCloseable {
         MeshAsset found = meshes.get(meshProbe);
         if (found != null) return found;
         boolean triangles = captured.triangles != null;
-        boolean dynamic = TriangleUploadBudget.dynamic(captured);
+        boolean viewModel = ViewModelGeometry.applies(captured.categoryFlags);
+        boolean dynamic = viewModel || TriangleUploadBudget.dynamic(captured);
         if (meshes.size() >= MAX_MESHES) { if (dynamic) deferredTriangleUploads++; return null; }
         if (captured.surface != EntitySurface.ORDINARY && texture.emissiveMaterial == 0) {
             texture.emissiveMaterial = api.createEmissiveMaterial(texture, HASHES.incrementAndGet());
@@ -293,12 +308,14 @@ public final class EntityScene implements AutoCloseable {
         if (!triangles && !geometry.prepare(captured.modelPart, captured.scale, material,
                 captured.transformedTexture ? captured.textureTransform : null)) return null;
         long bytes = triangles ? EntityTriangles.bytes(captured.vertexCount) : geometry.bytes();
-        if (bytes > MAX_MESH_BYTES - meshBytes || dynamic && !triangleBudget.admit(bytes)) {
+        if (bytes > MAX_MESH_BYTES - meshBytes || dynamic && !(viewModel ? viewBudget.admit(bytes) : triangleBudget.admit(bytes))) {
             if (dynamic) deferredTriangleUploads++;
             return null;
         }
-        long handle = api.createMesh(triangles ? captured.triangles.info(captured.firstVertex, captured.vertexCount,
-                material, HASHES.incrementAndGet()) : geometry.info(HASHES.incrementAndGet()));
+        MeshInfo info = triangles ? captured.triangles.info(captured.firstVertex, captured.vertexCount,
+                material, HASHES.incrementAndGet()) : geometry.info(HASHES.incrementAndGet());
+        if (viewModel) info = viewGeometry.prepare(info, meshProbe.pose);
+        long handle = api.createMesh(info);
         MeshAsset created = new MeshAsset(handle, bytes, texture, triangles, captured.surface,
                 !triangles || captured.triangles.opaque(captured.firstVertex, captured.vertexCount));
         MeshKey key = new MeshKey();
@@ -324,12 +341,16 @@ public final class EntityScene implements AutoCloseable {
 
     private void submit(Part part, MeshAsset mesh, CapturedEntityPart captured, Owner owner) {
         boolean first = part.instance == 0;
-        // Some fixed-function renderers enable ordinary blending for fully opaque models.
+        boolean viewModel = ViewModelGeometry.applies(captured.categoryFlags);
+        float[] transform = viewModel ? FirstPersonCapture.anchorTransform() : captured.transform;
+        // Fully opaque models and alpha-tested binary cutouts do not need blending.
         // Keep those out of unordered translucency, which can ghost the base over the sky.
         // Texture revisions are consulted every frame, including when geometry is retained.
         boolean alphaBlend = captured.alphaBlend && !(captured.surface == EntitySurface.ORDINARY
-                && mesh.texture.opaque() && mesh.opaqueVertices && (captured.argb >>> 24) == 255);
-        boolean transformChanged = !Arrays.equals(part.transform, captured.transform);
+                && (mesh.texture.opaque() || mesh.texture.binary()
+                        && rejectsZeroAlpha(captured.alphaCompare, captured.alphaReference))
+                && mesh.opaqueVertices && (captured.argb >>> 24) == 255);
+        boolean transformChanged = !Arrays.equals(part.transform, transform) || viewModel && part.mesh != mesh;
         boolean blendChanged = first || part.argb != captured.argb || part.alphaBlend != alphaBlend
                 || part.alphaCompare != captured.alphaCompare || part.alphaReference != captured.alphaReference
                 || part.vertexColors != mesh.triangles || part.surface != captured.surface;
@@ -338,12 +359,12 @@ public final class EntityScene implements AutoCloseable {
                 captured.alphaCompare, captured.alphaReference, mesh.triangles, captured.surface)) : part.blend;
         try {
             if (first) {
-                part.instance = api.createInstance(mesh.handle, captured.transform, captured.categoryFlags, blend);
+                part.instance = api.createInstance(mesh.handle, transform, captured.categoryFlags, blend);
                 partCount++;
                 part.tileEntity = captured.owner instanceof TileEntity;
                 if (part.tileEntity) tilePartCount++;
             } else {
-                api.updateInstance(part.instance, mesh.handle, captured.transform, captured.categoryFlags, blend);
+                api.updateInstance(part.instance, mesh.handle, transform, captured.categoryFlags, blend);
                 if (transformChanged) owner.transformUpdates++;
             }
         } catch (RuntimeException | LinkageError failure) {
@@ -374,9 +395,22 @@ public final class EntityScene implements AutoCloseable {
             if (mesh.triangles) trianglePartCount++;
             part.mesh = mesh;
         }
-        System.arraycopy(captured.transform, 0, part.transform, 0, 12);
+        System.arraycopy(transform, 0, part.transform, 0, 12);
         // Commit the native instance's new dependencies before fallible old-state cleanup.
         if (part.retiredBlend != 0) { api.freeBlend(part.retiredBlend); part.retiredBlend = 0; }
+    }
+
+    private static boolean rejectsZeroAlpha(int compare, int reference) {
+        switch (compare) {
+            case InstanceInfoBlendEXT.VK_COMPARE_OP_NEVER: return true;
+            case InstanceInfoBlendEXT.VK_COMPARE_OP_LESS: return reference <= 0;
+            case InstanceInfoBlendEXT.VK_COMPARE_OP_EQUAL: return reference != 0;
+            case InstanceInfoBlendEXT.VK_COMPARE_OP_LESS_OR_EQUAL: return reference < 0;
+            case InstanceInfoBlendEXT.VK_COMPARE_OP_GREATER: return reference >= 0;
+            case InstanceInfoBlendEXT.VK_COMPARE_OP_NOT_EQUAL: return reference == 0;
+            case InstanceInfoBlendEXT.VK_COMPARE_OP_GREATER_OR_EQUAL: return reference > 0;
+            default: return false;
+        }
     }
 
     /** Draw-call alpha state belongs to the occurrence, so cutout and blended shells share a texture. */
@@ -604,6 +638,8 @@ public final class EntityScene implements AutoCloseable {
         int vertexCount;
         int surface;
         final int[] textureTransform = new int[6];
+        boolean viewModel;
+        final float[] pose = new float[12];
         void set(CapturedEntityPart captured, EntityTextures.Asset texture) {
             if (captured.triangles == null) set(captured.modelPart, captured.displayList, captured.scale, texture);
             else {
@@ -616,6 +652,9 @@ public final class EntityScene implements AutoCloseable {
             surface = captured.surface;
             for (int i = 0; i < textureTransform.length; i++) textureTransform[i] = captured.transformedTexture
                     ? Float.floatToIntBits(captured.textureTransform[i]) : 0;
+            viewModel = ViewModelGeometry.applies(captured.categoryFlags);
+            if (viewModel) FirstPersonCapture.geometryPose(captured.transform, pose);
+            else Arrays.fill(pose, 0);
         }
         void set(ModelRenderer part, int displayList, float scale, EntityTextures.Asset texture) {
             this.part = part;
@@ -626,17 +665,21 @@ public final class EntityScene implements AutoCloseable {
             vertexCount = 0;
             surface = EntitySurface.ORDINARY;
             Arrays.fill(textureTransform, 0);
+            viewModel = false;
+            Arrays.fill(pose, 0);
         }
         @Override public int hashCode() {
             int result = 31 * (31 * (31 * System.identityHashCode(part) + System.identityHashCode(texture)) + scale) + displayList;
-            return 31 * (31 * (31 * (31 * result + (int) (fingerprint ^ fingerprint >>> 32)) + vertexCount) + surface) + Arrays.hashCode(textureTransform);
+            result = 31 * (31 * (31 * (31 * result + (int) (fingerprint ^ fingerprint >>> 32)) + vertexCount) + surface) + Arrays.hashCode(textureTransform);
+            return 31 * (31 * result + (viewModel ? 1 : 0)) + Arrays.hashCode(pose);
         }
         @Override public boolean equals(Object value) {
             if (!(value instanceof MeshKey)) return false;
             MeshKey other = (MeshKey) value;
             return part == other.part && texture == other.texture && scale == other.scale && displayList == other.displayList
                     && fingerprint == other.fingerprint && vertexCount == other.vertexCount && surface == other.surface
-                    && Arrays.equals(textureTransform, other.textureTransform);
+                    && Arrays.equals(textureTransform, other.textureTransform) && viewModel == other.viewModel
+                    && Arrays.equals(pose, other.pose);
         }
     }
 }
