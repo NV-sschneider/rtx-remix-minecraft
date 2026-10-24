@@ -13,7 +13,6 @@ import net.minecraft.client.particle.Particle;
 import net.minecraft.client.renderer.BufferBuilder;
 import net.minecraft.client.renderer.GlStateManager;
 import net.minecraft.client.renderer.OpenGlHelper;
-import net.minecraft.client.renderer.texture.DynamicTexture;
 import net.minecraft.client.renderer.texture.ITextureObject;
 import net.minecraft.client.renderer.vertex.VertexFormat;
 import net.minecraft.client.renderer.vertex.VertexFormatElement;
@@ -118,12 +117,13 @@ public final class EffectCaptureHooks {
     private static void capture(BufferBuilder buffer) {
         int vertices = buffer.getVertexCount();
         if (vertices == 0) return;
-        int attempted = Math.max(0, vertices / 4);
+        int mode = buffer.getDrawMode();
+        int attempted = EffectVertexDecoder.primitiveCount(mode, vertices);
         VertexFormat format = buffer.getVertexFormat();
-        if (!scopeValid || world != Minecraft.getMinecraft().world || buffer.getDrawMode() != GL11.GL_QUADS
-                || (vertices & 3) != 0 || !supported(format) || texture == null || texture instanceof DynamicTexture
+        if (!scopeValid || world != Minecraft.getMinecraft().world || attempted < 0
+                || !supported(format) || texture == null || GL11.glGetInteger(GL11.GL_LIST_INDEX) != 0
                 || !GL11.glIsEnabled(GL11.GL_DEPTH_TEST) || GL11.glGetInteger(GL20.GL_CURRENT_PROGRAM) != 0) {
-            omit(attempted); return;
+            omit(Math.max(0, attempted)); return;
         }
         boolean blend = GL11.glIsEnabled(GL11.GL_BLEND), alpha = GL11.glIsEnabled(GL11.GL_ALPHA_TEST);
         long blendKey = EffectBlend.key(damage, blend, GL11.glGetInteger(GL14.GL_BLEND_SRC_RGB),
@@ -150,7 +150,8 @@ public final class EffectCaptureHooks {
         CapturedEffectBatch batch = null;
         for (int i = 0; i < BATCHES.size(); i++) {
             CapturedEffectBatch candidate = BATCHES.get(i);
-            if (candidate.damage == damage && candidate.matches(texture, textureId, weather, atlas, blendKey, x, y, z)
+            if (candidate.damage == damage && candidate.triangles == (mode != GL11.GL_QUADS)
+                    && candidate.matches(texture, textureId, weather, atlas, blendKey, x, y, z)
                     && candidate.quads < CapturedEffectBatch.MAX_QUADS) { batch = candidate; break; }
         }
         if (quads == MAX_QUADS || batch == null && BATCHES.size() == MAX_BATCHES) { omit(attempted); return; }
@@ -160,6 +161,7 @@ public final class EffectCaptureHooks {
             batch = POOL[index];
             batch.initialize(texture, textureId, weather, atlas, blendKey, x, y, z);
             batch.damage = damage;
+            batch.triangles = mode != GL11.GL_QUADS;
             BATCHES.add(batch);
         }
         readMatrix(GL11.GL_MODELVIEW_MATRIX, CURRENT);
@@ -172,7 +174,7 @@ public final class EffectCaptureHooks {
         }
         int accepted;
         try {
-            accepted = DECODER.append(buffer.getByteBuffer(), vertices, format.getSize(), format.getUvOffsetById(0),
+            accepted = DECODER.append(buffer.getByteBuffer(), vertices, mode, format.getSize(), format.getUvOffsetById(0),
                     format.hasColor() ? format.getColorOffset() : -1, color, RELATIVE, MAX_QUADS - quads, batch);
         } catch (IllegalArgumentException unsupported) { omit(attempted); return; }
         quads += accepted;

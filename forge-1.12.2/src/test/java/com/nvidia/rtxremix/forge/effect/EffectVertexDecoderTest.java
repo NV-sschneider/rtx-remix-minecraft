@@ -96,6 +96,38 @@ public class EffectVertexDecoderTest {
         assertNotEquals(first.contentHash, second.contentHash);
     }
 
+    @Test public void triangleFanAndStripBecomeIndependentTrianglesWithConsistentWinding() {
+        EffectVertexDecoder decoder = new EffectVertexDecoder();
+        CapturedEffectBatch fan = new CapturedEffectBatch(); fan.triangles = true;
+        assertEquals(2, decoder.append(quad(1), 4, 6, 28, 12, 20, -1, new Matrix4f(), 8, fan));
+        assertEquals(6 * HardcodedVertex.STRIDE, fan.vertices.position());
+        assertEquals(1, fan.vertices.getFloat(20), 0);
+        assertEquals(1, fan.vertices.getFloat(3 * HardcodedVertex.STRIDE + 20), 0);
+        ByteBuffer source = quad(1);
+        // A strip visits bottom-left, bottom-right, top-left, top-right.
+        source.putFloat(2 * 28, 0); source.putFloat(3 * 28, 1);
+        CapturedEffectBatch strip = new CapturedEffectBatch(); strip.triangles = true;
+        assertEquals(2, decoder.append(source, 4, 5, 28, 12, 20, -1, new Matrix4f(), 8, strip));
+        assertEquals(1, strip.vertices.getFloat(20), 0);
+        assertEquals(1, strip.vertices.getFloat(3 * HardcodedVertex.STRIDE + 20), 0);
+        assertEquals(0x78123456, strip.vertices.getInt(3 * HardcodedVertex.STRIDE + 32));
+        CapturedEffectBatch one = new CapturedEffectBatch(); one.triangles = true;
+        assertEquals(1, decoder.append(source, 3, 4, 28, 12, -1, 0x42123456, new Matrix4f(), 1, one));
+        assertEquals(0x42123456, one.vertices.getInt(32));
+    }
+
+    @Test public void triangleCountsTopologyAndBudgetAreValidatedBeforeAnyAppend() {
+        EffectVertexDecoder decoder = new EffectVertexDecoder();
+        CapturedEffectBatch target = new CapturedEffectBatch(); target.triangles = true;
+        assertEquals(1, decoder.append(quad(1), 4, 6, 28, 12, 20, -1, new Matrix4f(), 1, target));
+        long hash = target.contentHash;
+        assertThrows(IllegalArgumentException.class, () -> decoder.append(quad(1), 4, 4, 28, 12, 20, -1, new Matrix4f(), 4, target));
+        assertThrows(IllegalArgumentException.class, () -> decoder.append(quad(1), 4, 7, 28, 12, 20, -1, new Matrix4f(), 4, target));
+        assertThrows(IllegalArgumentException.class, () -> decoder.append(quad(1), 4, 1, 28, 12, 20, -1, new Matrix4f(), 4, target));
+        assertEquals(hash, target.contentHash); assertEquals(1, target.quads);
+        assertEquals(3 * HardcodedVertex.STRIDE, target.vertices.position());
+    }
+
     static ByteBuffer quad(int count) {
         ByteBuffer result = CapturedEffectBatch.direct(count * 4 * 28);
         float[] xy = {0, 0, 1, 0, 1, 1, 0, 1};

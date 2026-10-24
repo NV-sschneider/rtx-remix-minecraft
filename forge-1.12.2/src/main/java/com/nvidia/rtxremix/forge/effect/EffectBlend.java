@@ -6,9 +6,11 @@ package com.nvidia.rtxremix.forge.effect;
 
 import com.nvidia.rtxremix.InstanceInfoBlendEXT;
 
-/** Exact fixed-function alpha state for the supported ordinary alpha-blended passes. */
+/** Exact fixed-function state for ordinary alpha, additive emission, and damage decals. */
 final class EffectBlend {
     private static final long DAMAGE = 1L << 20;
+    private static final long ADDITIVE_ALPHA = 1L << 21;
+    private static final long ADDITIVE = 1L << 22;
     private EffectBlend() {}
 
     static long key(boolean blend, int source, int destination, int equation,
@@ -30,15 +32,20 @@ final class EffectBlend {
                     alphaEquation, alphaTest, compare, reference);
             return ordinary < 0 ? -1 : ordinary | DAMAGE;
         }
-        // Premultiplied, additive and shader-specific effects need separate material semantics.
-        if (blend && (source != 770 || destination != 771 || equation != 32774
+        // ONE / ONE_MINUS_SRC_ALPHA is ambiguous to the runtime's legacy blend
+        // translator. Do not silently reinterpret premultiplied albedo as emission.
+        long mode = source == 770 && destination == 1 ? ADDITIVE_ALPHA
+                : source == 1 && destination == 1 ? ADDITIVE : 0;
+        if (blend && (mode == 0 && (source != 770 || destination != 771) || equation != 32774
                 || alphaEquation != 32774 || factor(sourceAlpha) < 0 || factor(destinationAlpha) < 0)) return -1;
         if (alphaTest && (compare < 512 || compare > 519)) return -1;
         int op = alphaTest ? compare - 512 : 7;
-        return (blend ? 1L : 0) | (long) op << 1 | (long) Math.max(0, Math.min(255, reference)) << 4
+        return (blend ? 1L | mode : 0) | (long) op << 1 | (long) Math.max(0, Math.min(255, reference)) << 4
                 | (long) (blend ? factor(sourceAlpha) : 1) << 12
                 | (long) (blend ? factor(destinationAlpha) : 0) << 16;
     }
+
+    static boolean emissive(long key) { return (key & (ADDITIVE_ALPHA | ADDITIVE)) != 0; }
 
     static InstanceInfoBlendEXT extension(long key) {
         InstanceInfoBlendEXT ext = InstanceInfoBlendEXT.textureTimesVertexColor();
@@ -48,8 +55,10 @@ final class EffectBlend {
         ext.alphaTestReferenceValue = (byte) (key >> 4);
         if (ext.alphaBlendEnabled != 0) {
             ext.srcColorBlendFactor = (key & DAMAGE) != 0 ? 4 /* VK_BLEND_FACTOR_DST_COLOR */
+                    : (key & ADDITIVE) != 0 ? InstanceInfoBlendEXT.VK_BLEND_FACTOR_ONE
                     : InstanceInfoBlendEXT.VK_BLEND_FACTOR_SRC_ALPHA;
             ext.dstColorBlendFactor = (key & DAMAGE) != 0 ? 2 /* VK_BLEND_FACTOR_SRC_COLOR */
+                    : emissive(key) ? InstanceInfoBlendEXT.VK_BLEND_FACTOR_ONE
                     : InstanceInfoBlendEXT.VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
             ext.srcAlphaBlendFactor = (int) (key >> 12) & 15;
             ext.dstAlphaBlendFactor = (int) (key >> 16) & 15;

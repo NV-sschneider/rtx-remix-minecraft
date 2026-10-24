@@ -40,9 +40,26 @@ public class EffectBlendTest {
         assertEquals(0, state.alphaBlendEnabled);
         assertEquals(0, state.alphaTestEnabled);
     }
-    @Test public void rejectsUnrepresentedAdditivePremultipliedAndBlendEquations() {
-        assertEquals(-1, EffectBlend.key(true, 770, 1, 32774, 1, 0, 32774, false, 519, 0));
+    @Test public void additiveMaterialsKeepAlphaWeightedAndUnweightedEmissionDistinct() {
+        long alpha = EffectBlend.key(true, 770, 1, 32774, 1, 0, 32774, false, 519, 0);
+        long direct = EffectBlend.key(true, 1, 1, 32774, 1, 1, 32774, false, 519, 0);
+        assertTrue(EffectBlend.emissive(alpha)); assertTrue(EffectBlend.emissive(direct));
+        assertNotEquals(alpha, direct);
+        assertEquals(6, EffectBlend.extension(alpha).srcColorBlendFactor);
+        assertEquals(1, EffectBlend.extension(direct).srcColorBlendFactor);
+        assertEquals(1, EffectBlend.extension(alpha).dstColorBlendFactor);
+        assertEquals(1, EffectBlend.extension(direct).dstColorBlendFactor);
+        assertEquals(0, EffectBlend.extension(alpha).dstAlphaBlendFactor);
+        assertEquals(1, EffectBlend.extension(direct).dstAlphaBlendFactor);
+        long ordinary = EffectBlend.key(true, 770, 771, 32774, 1, 0, 32774, false, 519, 0);
+        assertFalse(EffectBlend.emissive(ordinary));
+        assertEquals(0, EffectScene.material(42, false).emissiveTexture);
+        assertEquals(42, EffectScene.material(42, true).emissiveTexture);
+        assertEquals(100, EffectScene.material(42, true).emissiveIntensity, 0);
+    }
+    @Test public void rejectsUnrepresentedPremultipliedAndBlendEquations() {
         assertEquals(-1, EffectBlend.key(true, 1, 771, 32774, 1, 0, 32774, false, 519, 0));
         assertEquals(-1, EffectBlend.key(true, 770, 771, 32778, 1, 0, 32774, false, 519, 0));
+        assertEquals(-1, EffectBlend.key(true, 1, 1, 32774, 1, 1, 32778, false, 519, 0));
     }
 }

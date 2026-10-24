@@ -8,6 +8,7 @@ import com.nvidia.rtxremix.MaterialInfo;
 import com.nvidia.rtxremix.MeshInfo;
 import com.nvidia.rtxremix.TextureFromMemoryInfo;
 import java.util.Collections;
+import java.util.Arrays;
 import java.util.HashSet;
 import java.util.Set;
 import org.junit.Test;
@@ -77,6 +78,52 @@ public class EffectSceneTest {
         scene.close();
     }
 
+    @Test public void additiveAndOrdinaryBatchesShareOneObservedTextureButUseDistinctMaterials() {
+        Owned api = new Owned(); EffectScene scene = new EffectScene(api);
+        CapturedEffectBatch ordinary = batch(), additive = batch();
+        ordinary.blockAtlas = additive.blockAtlas = false;
+        additive.textureIdentity = ordinary.textureIdentity;
+        additive.blend = EffectBlend.key(true, 770, 1, 32774, 1, 0, 32774, false, 519, 0);
+        scene.sync(Arrays.asList(ordinary, additive), 42);
+        assertEquals(1, api.reads); assertEquals(1, api.observed); assertEquals(1, api.textures.size());
+        assertEquals(2, api.materials.size()); assertEquals(1, scene.additivePrimitives());
+        assertEquals(2, scene.particleQuads());
+        api.binding.current = false;
+        scene.sync(Arrays.asList(ordinary, additive), 42);
+        assertEquals(0, scene.batchCount()); assertTrue(api.meshes.isEmpty());
+        assertEquals(1, api.reads); // Pending patches never trigger a stale GPU fallback snapshot.
+        api.binding.current = true;
+        scene.sync(Arrays.asList(ordinary, additive), 42);
+        assertEquals(2, scene.batchCount()); assertEquals(1, api.reads);
+        scene.close(); assertEquals(0, scene.resourceCount()); assertEquals(0, scene.retainedBytes());
+        assertEquals(1, api.released); assertTrue(api.textures.isEmpty()); assertTrue(api.closed);
+    }
+
+    @Test public void deletedTexturesAreRetiredBeforeRecycledIdsGetNewBindings() {
+        Owned api = new Owned(); EffectScene scene = new EffectScene(api);
+        CapturedEffectBatch old = batch(); old.blockAtlas = false;
+        scene.sync(Collections.singletonList(old), 42);
+        Binding deleted = api.binding; deleted.current = false; deleted.deleted = true;
+        CapturedEffectBatch replacement = batch(); replacement.blockAtlas = false;
+        scene.sync(Collections.singletonList(replacement), 42);
+        assertEquals(2, api.reads); assertEquals(2, api.observed); assertEquals(1, api.released);
+        assertNotSame(deleted, api.binding); assertEquals(1, api.textures.size());
+        scene.sync(Collections.<CapturedEffectBatch>emptyList(), 42);
+        assertEquals(0, scene.particleQuads());
+        for (int i = 0; i < 121; i++) scene.sync(Collections.<CapturedEffectBatch>emptyList(), 42);
+        assertTrue(api.textures.isEmpty()); assertEquals(2, api.released);
+        scene.close();
+    }
+
+    @Test public void triangleMeshesUseThreeVerticesAndThreeIndicesWithoutDegeneratePadding() {
+        Fake api = new Fake(); EffectScene scene = new EffectScene(api);
+        CapturedEffectBatch batch = batch(); batch.quads = 0; batch.triangles = true;
+        new EffectVertexDecoder().append(EffectVertexDecoderTest.quad(1), 4, 6, 28, 12, 20, -1, new Matrix4f(), 2, batch);
+        scene.sync(Collections.singletonList(batch), 42);
+        assertEquals(6, api.vertices); assertEquals(6, api.indices); assertEquals(2, scene.trianglePrimitives());
+        scene.close();
+    }
+
     private static CapturedEffectBatch batch() {
         CapturedEffectBatch batch = new CapturedEffectBatch();
         batch.initialize(new Object(), 1, false, true,
@@ -84,12 +131,15 @@ public class EffectSceneTest {
         EffectVertexDecoderTest.decode(EffectVertexDecoderTest.quad(1), 4, new Matrix4f(), 1, batch);
         return batch;
     }
-    private static final class Fake implements EffectScene.Backend {
+    private static class Fake implements EffectScene.Backend {
         long next = 100;
         final Set<Long> meshes = new HashSet<Long>(), materials = new HashSet<Long>(), blends = new HashSet<Long>();
-        int draws, category;
+        int draws, category, vertices, indices;
         boolean failDestroy;
-        public long createMesh(MeshInfo info) { long handle = next++; meshes.add(handle); return handle; }
+        public long createMesh(MeshInfo info) {
+            vertices = info.surfaces[0].vertexCount; indices = info.surfaces[0].indexCount;
+            long handle = next++; meshes.add(handle); return handle;
+        }
         public void destroyMesh(long handle) {
             if (failDestroy) throw new IllegalStateException("retry mesh");
             assertTrue(meshes.remove(handle));
@@ -104,5 +154,26 @@ public class EffectSceneTest {
         public void destroyMaterial(long handle) { assertTrue(meshes.isEmpty()); assertTrue(materials.remove(handle)); }
         public long createBlend(long key) { long handle = next++; blends.add(handle); return handle; }
         public void freeBlend(long handle) { assertTrue(blends.remove(handle)); }
+    }
+    private static final class Binding { boolean current = true, deleted; }
+    private static final class Owned extends Fake {
+        final Set<Long> textures = new HashSet<Long>();
+        int reads, observed, released; boolean closed; Binding binding;
+        public boolean readTexture(int id, long available, EffectTextures reader) {
+            reads++; reader.width = reader.height = 1;
+            reader.pixels.clear(); reader.pixels.putInt(-1).flip(); return available >= 4;
+        }
+        public long createTextureFromMemory(TextureFromMemoryInfo info) { long handle = next++; textures.add(handle); return handle; }
+        public void destroyTexture(long handle) { assertTrue(meshes.isEmpty()); assertTrue(materials.isEmpty()); assertTrue(textures.remove(handle)); }
+        public long createMaterial(MaterialInfo info) {
+            assertTrue(textures.contains(info.albedoTexture));
+            if (info.emissiveTexture != 0) assertEquals(info.albedoTexture, info.emissiveTexture);
+            long handle = next++; materials.add(handle); return handle;
+        }
+        public Object observeTexture(int id, long texture, int width, int height) { observed++; return binding = new Binding(); }
+        public boolean textureCurrent(Object value) { return value == null || ((Binding) value).current; }
+        public boolean textureDeleted(Object value) { return value != null && ((Binding) value).deleted; }
+        public void releaseTexture(Object value) { if (value != null) released++; }
+        public void closeTextures() { closed = true; }
     }
 }

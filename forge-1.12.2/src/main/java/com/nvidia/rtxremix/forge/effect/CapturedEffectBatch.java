@@ -15,7 +15,7 @@ public final class CapturedEffectBatch {
     ByteBuffer vertices = direct(64 * 4 * HardcodedVertex.STRIDE);
     Object textureIdentity;
     int textureId;
-    boolean weather, blockAtlas, damage;
+    boolean weather, blockAtlas, damage, triangles;
     long blend;
     double originX, originY, originZ;
     int quads;
@@ -30,6 +30,7 @@ public final class CapturedEffectBatch {
     void initialize(Object texture, int id, boolean weather, boolean atlas, long blend,
                     double x, double y, double z) {
         textureIdentity = texture; textureId = id; this.weather = weather; blockAtlas = atlas; this.blend = blend;
+        triangles = false;
         originX = x; originY = y; originZ = z;
         transform[3] = (float) x; transform[7] = (float) y; transform[11] = (float) z;
         contentHash = mix(mix(mix(0xcbf29ce484222325L, Double.doubleToLongBits(x)),
@@ -37,7 +38,7 @@ public final class CapturedEffectBatch {
     }
 
     void ensure(int additional) {
-        int needed = (quads + additional) * 4 * HardcodedVertex.STRIDE;
+        int needed = (quads + additional) * verticesPerPrimitive() * HardcodedVertex.STRIDE;
         if (quads + additional > MAX_QUADS) throw new IllegalArgumentException("Effect batch exceeds quad cap");
         if (vertices.capacity() < needed) {
             ByteBuffer replacement = direct(Math.min(MAX_QUADS * 4 * HardcodedVertex.STRIDE,
@@ -45,11 +46,14 @@ public final class CapturedEffectBatch {
             vertices.flip(); replacement.put(vertices); vertices = replacement;
         }
         vertices.limit(vertices.capacity());
-        vertices.position(quads * 4 * HardcodedVertex.STRIDE);
+        vertices.position(quads * verticesPerPrimitive() * HardcodedVertex.STRIDE);
     }
 
+    int verticesPerPrimitive() { return triangles ? 3 : 4; }
+    int indicesPerPrimitive() { return triangles ? 3 : 6; }
+
     void clear() {
-        textureIdentity = null; textureId = 0; quads = 0; damage = false; vertices.clear();
+        textureIdentity = null; textureId = 0; quads = 0; damage = triangles = false; vertices.clear();
         contentHash = 0xcbf29ce484222325L;
     }
     static long mix(long hash, long value) { return (hash ^ value) * 0x100000001b3L; }

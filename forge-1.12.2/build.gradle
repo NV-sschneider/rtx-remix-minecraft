@@ -37,6 +37,9 @@ test {
     if (System.getProperty('rtxremix.betterFoliageJar')) {
         systemProperty 'rtxremix.betterFoliageJar', System.getProperty('rtxremix.betterFoliageJar')
     }
+    if (System.getProperty('rtxremix.rlcraftMods')) {
+        systemProperty 'rtxremix.rlcraftMods', System.getProperty('rtxremix.rlcraftMods')
+    }
 }
 
 jar {

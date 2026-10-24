@@ -8,17 +8,23 @@ import com.nvidia.rtxremix.HardcodedVertex;
 import java.nio.ByteBuffer;
 import org.lwjgl.util.vector.Matrix4f;
 
-/** Copies completed quads, retaining UV and RGBA while omitting vanilla lightmap coordinates. */
+/** Copies completed fixed-function primitives, retaining UV/RGBA and omitting lightmaps. */
 final class EffectVertexDecoder {
     private final float[] positions = new float[12], uv = new float[8];
     private final int[] colors = new int[4];
 
     int append(ByteBuffer source, int vertices, int stride, int uvOffset, int colorOffset,
                int fallbackColor, Matrix4f transform, int allowedQuads, CapturedEffectBatch target) {
-        if (vertices < 0 || (vertices & 3) != 0 || stride < 20 || uvOffset < 12
+        return append(source, vertices, 7, stride, uvOffset, colorOffset, fallbackColor, transform, allowedQuads, target);
+    }
+
+    int append(ByteBuffer source, int vertices, int mode, int stride, int uvOffset, int colorOffset,
+               int fallbackColor, Matrix4f transform, int allowedQuads, CapturedEffectBatch target) {
+        int primitives = primitiveCount(mode, vertices), corners = mode == 7 ? 4 : 3;
+        if (primitives < 0 || target.triangles != (mode != 7) || stride < 20 || uvOffset < 12
                 || uvOffset + 8 > stride || colorOffset < -1 || colorOffset + 4 > stride
                 || (long) vertices * stride > source.limit()) throw new IllegalArgumentException("Invalid effect vertex buffer");
-        int count = Math.min(vertices / 4, Math.min(allowedQuads, CapturedEffectBatch.MAX_QUADS - target.quads));
+        int count = Math.min(primitives, Math.min(Math.max(0, allowedQuads), CapturedEffectBatch.MAX_QUADS - target.quads));
         target.ensure(count);
         int startQuads = target.quads;
         long startHash = target.contentHash;
@@ -27,8 +33,8 @@ final class EffectVertexDecoder {
                 float minU = Float.POSITIVE_INFINITY, minV = Float.POSITIVE_INFINITY;
                 float maxU = Float.NEGATIVE_INFINITY, maxV = Float.NEGATIVE_INFINITY;
                 boolean valid = true;
-                for (int v = 0; v < 4; v++) {
-                    int offset = (quad * 4 + v) * stride;
+                for (int v = 0; v < corners; v++) {
+                    int offset = vertex(mode, quad, v) * stride;
                     float x = source.getFloat(offset), y = source.getFloat(offset + 4), z = source.getFloat(offset + 8);
                     positions[v * 3] = transform.m00 * x + transform.m10 * y + transform.m20 * z + transform.m30;
                     positions[v * 3 + 1] = transform.m01 * x + transform.m11 * y + transform.m21 * z + transform.m31;
@@ -56,7 +62,7 @@ final class EffectVertexDecoder {
                 if (!Float.isFinite(length) || length < 0.000001f) continue;
                 nx /= length; ny /= length; nz /= length;
                 int minimum = HardcodedVertex.packHalf2x16(minU, minV), maximum = HardcodedVertex.packHalf2x16(maxU, maxV);
-                for (int v = 0; v < 4; v++) {
+                for (int v = 0; v < corners; v++) {
                     target.vertices.putFloat(positions[v * 3]).putFloat(positions[v * 3 + 1]).putFloat(positions[v * 3 + 2]);
                     target.vertices.putFloat(nx).putFloat(ny).putFloat(nz);
                     target.vertices.putFloat(uv[v * 2]).putFloat(uv[v * 2 + 1]).putInt(colors[v]);
@@ -73,10 +79,26 @@ final class EffectVertexDecoder {
         } catch (RuntimeException error) {
             target.quads = startQuads;
             target.contentHash = startHash;
-            target.vertices.position(startQuads * 4 * HardcodedVertex.STRIDE);
+            target.vertices.position(startQuads * corners * HardcodedVertex.STRIDE);
             throw error;
         }
         return target.quads - startQuads;
+    }
+
+    static int primitiveCount(int mode, int vertices) {
+        if (vertices < 0) return -1;
+        if (mode == 7) return vertices % 4 == 0 ? vertices / 4 : -1;
+        if (mode == 4) return vertices % 3 == 0 ? vertices / 3 : -1;
+        return mode == 5 || mode == 6 ? Math.max(0, vertices - 2) : -1;
+    }
+
+    private static int vertex(int mode, int primitive, int corner) {
+        if (mode == 7) return primitive * 4 + corner;
+        if (mode == 4) return primitive * 3 + corner;
+        if (mode == 6) return corner == 0 ? 0 : primitive + corner;
+        // Triangle strips alternate winding. Emit independent triangles in the
+        // same orientation before the scene applies its existing index reversal.
+        return primitive + (corner < 2 && (primitive & 1) != 0 ? 1 - corner : corner);
     }
 
 }
