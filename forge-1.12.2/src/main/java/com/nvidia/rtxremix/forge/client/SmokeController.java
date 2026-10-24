@@ -66,7 +66,7 @@ final class SmokeController {
     private enum State {
         INACTIVE, WAIT_MENU, WAIT_WORLD, BUILD_SCENE, SETTLE, REMIX, VANILLA,
         REENABLE, MATERIALS, GLASS, OBJECTS, EFFECTS, COMBAT, CLOUDS, PBR, FIRSTPERSON, HELD_LIGHTS, GLINT, TILES, FOLIAGE, WINDOW, TERRAIN,
-        COMPATIBILITY, SURVIVAL, DIMENSIONS, TERRAIN_OPTIMIZATION, SOAK, MULTIPLAYER, RESTORE_MULTIPLAYER,
+        COMPATIBILITY, FALLING_TREES, MOB_HUD, BLOCK_EFFECTS, VISIBILITY, SURVIVAL, DIMENSIONS, TERRAIN_OPTIMIZATION, SOAK, MULTIPLAYER, RESTORE_MULTIPLAYER,
         SKY_APPLY, SKY_CAPTURE, RESTORE_SURVIVAL, RESTORE_DIMENSIONS, RESTORE_RULES, DISCONNECT, UNLOAD, EXIT, DONE
     }
 
@@ -91,6 +91,10 @@ final class SmokeController {
     private final boolean includeHeldLights, includeFoliage, includeGlint;
     private final boolean includeCompatibility, includeDimensions;
     private final boolean includeSurvival;
+    private final boolean includeFallingTrees;
+    private final boolean includeMobHud;
+    private final boolean includeBlockEffects;
+    private final boolean includeVisibility;
     private final boolean includeTerrainOptimization;
     private final boolean includeSoak;
     private final boolean includeMultiplayer;
@@ -162,6 +166,14 @@ final class SmokeController {
     private FixtureCompatibility compatibilityFixture;
     private volatile FixtureCompatibility.Layout compatibilityLayout;
     private FixtureSurvival survivalFixture;
+    private FixtureFallingTrees fallingTreesFixture;
+    private volatile FixtureFallingTrees.Layout fallingTreesLayout;
+    private FixtureMobHud mobHudFixture;
+    private volatile FixtureMobHud.Layout mobHudLayout;
+    private FixtureBlockEffects blockEffectsFixture;
+    private volatile FixtureBlockEffects.Layout blockEffectsLayout;
+    private FixtureVisibility visibilityFixture;
+    private volatile FixtureVisibility.Layout visibilityLayout;
     private volatile FixtureSurvival.Layout survivalLayout;
     private FixtureDimensions dimensionsFixture;
     private FixtureTerrainOptimization optimizationFixture;
@@ -199,13 +211,18 @@ final class SmokeController {
         this.includeCompatibility = requested && Boolean.getBoolean("rlcraftremix.smoke.compatibility");
         this.includeDimensions = requested && Boolean.getBoolean("rlcraftremix.smoke.dimensions");
         this.includeSurvival = requested && Boolean.getBoolean("rlcraftremix.smoke.survival");
+        this.includeFallingTrees = requested && Boolean.getBoolean("rlcraftremix.smoke.fallingTrees");
+        this.includeMobHud = requested && Boolean.getBoolean("rlcraftremix.smoke.mobHud");
+        this.includeBlockEffects = requested && Boolean.getBoolean("rlcraftremix.smoke.blockEffects");
+        this.includeVisibility = requested && Boolean.getBoolean("rlcraftremix.smoke.visibility");
         this.includeTerrainOptimization = requested && Boolean.getBoolean("rlcraftremix.smoke.terrainOptimization");
         this.includeSoak = requested && Boolean.getBoolean("rlcraftremix.smoke.soak");
         this.includeMultiplayer = requested && Boolean.getBoolean("rlcraftremix.smoke.multiplayer");
         if (includeMultiplayer && (includeEntities || includeSky || includeTerrain || includeMaterials || includeObjects
                 || includeEffects || includeCombat || includeClouds || includePbr || includeFirstPerson || includeTiles
                 || includeWindow || includeHeldLights || includeGlint || includeFoliage || includeCompatibility
-                || includeDimensions || includeTerrainOptimization || includeSoak || includeSurvival))
+                || includeDimensions || includeTerrainOptimization || includeSoak || includeSurvival
+                || includeFallingTrees || includeMobHud || includeBlockEffects || includeVisibility))
             throw new IllegalArgumentException("Multiplayer smoke runs separately from integrated-world fixtures");
         this.id = requested
                 ? DateTimeFormatter.ofPattern("uuuuMMdd-HHmmss").withZone(ZoneOffset.UTC).format(Instant.now())
@@ -221,6 +238,10 @@ final class SmokeController {
                 + " heldlights=" + includeHeldLights + " foliage=" + includeFoliage + " glint=" + includeGlint
                 + " compatibility=" + includeCompatibility + " dimensions=" + includeDimensions
                 + " survival=" + includeSurvival
+                + " fallingTrees=" + includeFallingTrees
+                + " mobHud=" + includeMobHud
+                + " blockEffects=" + includeBlockEffects
+                + " visibility=" + includeVisibility
                 + " terrainOptimization=" + includeTerrainOptimization
                 + " soak=" + includeSoak
                 + " multiplayer=" + includeMultiplayer
@@ -474,6 +495,26 @@ final class SmokeController {
                     if (!fixtureReady()) break;
                     lastFrames = events.renderedFrames();
                     if (compatibilityFixture.tick()) beginAfterCompatibility();
+                    break;
+                case FALLING_TREES:
+                    if (!fixtureReady()) break;
+                    lastFrames = events.renderedFrames();
+                    if (fallingTreesFixture.tick()) beginAfterFallingTrees();
+                    break;
+                case MOB_HUD:
+                    if (!fixtureReady()) break;
+                    lastFrames = events.renderedFrames();
+                    if (mobHudFixture.tick()) beginAfterMobHud();
+                    break;
+                case BLOCK_EFFECTS:
+                    if (!fixtureReady()) break;
+                    lastFrames = events.renderedFrames();
+                    if (blockEffectsFixture.tick()) beginAfterBlockEffects();
+                    break;
+                case VISIBILITY:
+                    if (!fixtureReady()) break;
+                    lastFrames = events.renderedFrames();
+                    if (visibilityFixture.tick()) beginAfterVisibility();
                     break;
                 case SURVIVAL:
                     if (!fixtureReady()) break;
@@ -750,6 +791,10 @@ final class SmokeController {
         if (includeFoliage) foliageLayout = FixtureFoliage.build(world, cx + 176, floorY, cz);
         if (includeCompatibility) compatibilityLayout = FixtureCompatibility.build(world, cx + 400, floorY, cz);
         if (includeSurvival) survivalLayout = FixtureSurvival.build(world, cx + 560, floorY, cz);
+        if (includeFallingTrees) fallingTreesLayout = FixtureFallingTrees.build(world, cx + 640, floorY, cz);
+        if (includeMobHud) mobHudLayout = FixtureMobHud.build(world, cx + 720, floorY, cz);
+        if (includeBlockEffects) blockEffectsLayout = FixtureBlockEffects.build(world, cx + 800, floorY, cz);
+        if (includeVisibility) visibilityLayout = FixtureVisibility.build(world, cx + 880, floorY, cz);
         Pose result = new Pose(cx + 0.5, floorY + 4.0, cz + 17.5, 180f, 16f, creatures);
         world.setSpawnPoint(new BlockPos(cx, floorY + 1, cz + 12));
         player.setGameType(GameType.CREATIVE);
@@ -777,6 +822,10 @@ final class SmokeController {
         if (windowFixture != null) windowFixture.close();
         if (compatibilityFixture != null) compatibilityFixture.close();
         if (survivalFixture != null) survivalFixture.close();
+        if (fallingTreesFixture != null) fallingTreesFixture.close();
+        if (mobHudFixture != null) mobHudFixture.close();
+        if (blockEffectsFixture != null) blockEffectsFixture.close();
+        if (visibilityFixture != null) visibilityFixture.close();
         if (optimizationFixture != null) optimizationFixture.close();
         if (soakFixture != null) soakFixture.close();
         if (multiplayerFixture != null) multiplayerFixture.close();
@@ -972,6 +1021,38 @@ final class SmokeController {
     }
 
     private void beginAfterCompatibility() {
+        if (includeFallingTrees) {
+            fallingTreesFixture = new FixtureFallingTrees(mc, events, fixtureServer, fixtureServerWorld,
+                    saveName, fallingTreesLayout, pose.x, pose.y, pose.z, pose.yaw, pose.pitch, fixtureOutput());
+            transition(State.FALLING_TREES);
+        } else beginAfterFallingTrees();
+    }
+
+    private void beginAfterFallingTrees() {
+        if (includeMobHud) {
+            mobHudFixture = new FixtureMobHud(mc, events, fixtureServer, fixtureServerWorld,
+                    saveName, mobHudLayout, pose.x, pose.y, pose.z, pose.yaw, pose.pitch, fixtureOutput());
+            transition(State.MOB_HUD);
+        } else beginAfterMobHud();
+    }
+
+    private void beginAfterMobHud() {
+        if (includeBlockEffects) {
+            blockEffectsFixture = new FixtureBlockEffects(mc, events, fixtureServer, fixtureServerWorld,
+                    saveName, blockEffectsLayout, pose.x, pose.y, pose.z, pose.yaw, pose.pitch, fixtureOutput());
+            transition(State.BLOCK_EFFECTS);
+        } else beginAfterBlockEffects();
+    }
+
+    private void beginAfterBlockEffects() {
+        if (includeVisibility) {
+            visibilityFixture = new FixtureVisibility(mc, events, fixtureServer, fixtureServerWorld,
+                    saveName, visibilityLayout, pose.x, pose.y, pose.z, pose.yaw, pose.pitch, fixtureOutput());
+            transition(State.VISIBILITY);
+        } else beginAfterVisibility();
+    }
+
+    private void beginAfterVisibility() {
         if (includeSurvival) {
             survivalFixture = new FixtureSurvival(mc, events, fixtureServer, fixtureServerWorld,
                     saveName, survivalLayout, pose.x, pose.y, pose.z, pose.yaw, pose.pitch, fixtureOutput());
@@ -1039,7 +1120,7 @@ final class SmokeController {
     private boolean objectsReleased() {
         return events.capturedTileParts() == 0 && events.entityResourceCount() == 0
                 && events.vboCacheBytes() == 0 && events.itemResourceCount() == 0 && events.effectResourceCount() == 0
-                && events.cloudResourceCount() == 0;
+                && events.cloudResourceCount() == 0 && com.nvidia.rtxremix.forge.hud.MobHudHooks.resourceCount() == 0;
     }
 
     private void beginSkyPhase(SkyPhase phase) {
@@ -1367,6 +1448,10 @@ final class SmokeController {
                 + (windowFixture == null ? "" : " " + windowFixture.status())
                 + (compatibilityFixture == null ? "" : " " + compatibilityFixture.status())
                 + (survivalFixture == null ? "" : " " + survivalFixture.status())
+                + (fallingTreesFixture == null ? "" : " " + fallingTreesFixture.status())
+                + (mobHudFixture == null ? "" : " " + mobHudFixture.status())
+                + (blockEffectsFixture == null ? "" : " " + blockEffectsFixture.status())
+                + (visibilityFixture == null ? "" : " " + visibilityFixture.status())
                 + (dimensionsFixture == null ? "" : " " + dimensionsFixture.status())
                 + (optimizationFixture == null ? "" : " " + optimizationFixture.status())
                 + (soakFixture == null ? "" : " " + soakFixture.status())
@@ -1424,6 +1509,10 @@ final class SmokeController {
             windowFixture = null;
             compatibilityFixture = null; compatibilityLayout = null; dimensionsFixture = null;
             survivalFixture = null; survivalLayout = null;
+            fallingTreesFixture = null; fallingTreesLayout = null;
+            mobHudFixture = null; mobHudLayout = null;
+            blockEffectsFixture = null; blockEffectsLayout = null;
+            visibilityFixture = null; visibilityLayout = null;
             optimizationFixture = null;
             soakFixture = null;
             clientRules = null;

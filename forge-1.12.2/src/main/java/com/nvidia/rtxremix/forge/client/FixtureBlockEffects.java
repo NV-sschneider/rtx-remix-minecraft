@@ -1,0 +1,402 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+package com.nvidia.rtxremix.forge.client;
+
+import com.nvidia.rtxremix.forge.effect.EffectCaptureHooks;
+import java.awt.image.BufferedImage;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
+import java.util.UUID;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import net.minecraft.block.Block;
+import net.minecraft.block.BlockTallGrass;
+import net.minecraft.block.state.IBlockState;
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.multiplayer.WorldClient;
+import net.minecraft.client.particle.Particle;
+import net.minecraft.entity.player.EntityPlayerMP;
+import net.minecraft.init.Blocks;
+import net.minecraft.server.integrated.IntegratedServer;
+import net.minecraft.util.EnumParticleTypes;
+import net.minecraft.util.math.BlockPos;
+import net.minecraft.world.World;
+import net.minecraft.world.WorldServer;
+import net.minecraftforge.fml.relauncher.ReflectionHelper;
+
+/** Real FBP debris/placement and vanilla crack decals in a controller-owned smoke arena. */
+final class FixtureBlockEffects implements AutoCloseable {
+    private static final String DIGGING = "com.TominoCZ.FBP.particle.FBPParticleDigging";
+    private static final String PLACEMENT = "com.TominoCZ.FBP.particle.FBPParticleBlock";
+    private static final int BREAKER = Integer.MIN_VALUE + 7290;
+    private enum Phase { SETUP, ARRIVE, BASELINE, CRACK_EARLY, CRACK_LATE, CRACK_CLEAR, PLANT, STONE,
+        PLACE_STONE_READY, PLACE_STONE, PLACE_STONE_REST, PLACE_GRASS_READY, PLACE_GRASS, PLACE_GRASS_REST, RETURN, DONE }
+    private final Minecraft mc;
+    private final ClientEvents events;
+    private final IntegratedServer server;
+    private final WorldServer world;
+    private final WorldClient clientWorld;
+    private final String save;
+    private final Layout layout;
+    private final FixtureTerrain.Output output;
+    private final UUID playerId;
+    private final int originalView, originalParticles;
+    private final boolean originalHud, originalFlying;
+    private final double returnX, returnY, returnZ;
+    private final float returnYaw, returnPitch;
+    private Constructor<?> placementConstructor;
+    private Method killPlacement;
+    private Field particleAge, placementHeight;
+    private final List<Particle> debris = new ArrayList<>(24);
+    private Phase phase = Phase.SETUP;
+    private Future<?> action;
+    private Particle placement;
+    private BufferedImage firstPoseImage;
+    private BlockEffectObservation observation;
+    private long since = System.nanoTime(), progress = since, readyFrame = -1, lastFrame = -1, damageHash, debrisHash;
+    private int debrisSamples, bursts, attempts, lastBurstTick = Integer.MIN_VALUE;
+    private int lastAge = -1;
+    private float lastHeight;
+    private boolean placementCleaned, cleanupQueued, closed, smoothLighting, clientConfigured;
+    // Only server tasks read/write these fields; cleanup is ordered after the setup task.
+    private boolean serverConfigured, serverFlying;
+
+    FixtureBlockEffects(Minecraft mc, ClientEvents events, IntegratedServer server, WorldServer world,
+            String save, Layout layout, double x, double y, double z, float yaw, float pitch,
+            FixtureTerrain.Output output) {
+        FixtureCompatibility.requireSmokeSave(save);
+        if (mc.getIntegratedServer() != server || !save.equals(server.getFolderName()) || mc.world == null || mc.player == null)
+            throw new IllegalStateException("Block-effect fixture requires its current integrated smoke world");
+        this.mc = mc; this.events = events; this.server = server; this.world = world; this.save = save;
+        this.layout = layout; this.output = output; clientWorld = mc.world; playerId = mc.player.getUniqueID();
+        returnX = x; returnY = y; returnZ = z; returnYaw = yaw; returnPitch = pitch;
+        originalView = mc.gameSettings.thirdPersonView; originalHud = mc.gameSettings.hideGUI;
+        originalParticles = mc.gameSettings.particleSetting; originalFlying = mc.player.capabilities.isFlying;
+    }
+
+    private void setup() throws ReflectiveOperationException {
+        Class<?> fbp = Class.forName("com.TominoCZ.FBP.FBP");
+        if (!(Boolean) fbp.getMethod("isEnabled").invoke(null) || !fbp.getField("fancyPlaceAnim").getBoolean(null)
+                || fbp.getField("frozen").getBoolean(null)
+                || !mc.effectRenderer.getClass().getName().equals("com.TominoCZ.FBP.particle.FBPParticleManager"))
+            throw new IllegalStateException("Block-effect fixture requires enabled, unfrozen FBP placement and its actual particle manager");
+        smoothLighting = fbp.getField("animSmoothLighting").getBoolean(null);
+        Class<?> placementType = Class.forName(PLACEMENT);
+        placementConstructor = placementType.getConstructor(World.class, double.class, double.class, double.class, IBlockState.class, long.class);
+        killPlacement = placementType.getMethod("killParticle");
+        particleAge = ReflectionHelper.findField(Particle.class, "particleAge", "field_70546_d");
+        // ClientTick END follows the next particle update, while the screenshot
+        // and native counters describe the preceding rendered pose.
+        placementHeight = ReflectionHelper.findField(placementType, "prevHeight");
+        clientConfigured = true;
+        mc.gameSettings.thirdPersonView = 0; mc.gameSettings.hideGUI = true; mc.gameSettings.particleSetting = 0;
+        action = server.callFromMainThread(() -> {
+            requireWorld(); EntityPlayerMP player = player();
+            serverFlying = player.capabilities.isFlying; serverConfigured = true;
+            player.capabilities.isFlying = true; player.sendPlayerAbilities();
+            player.connection.setPlayerLocation(cameraX(), cameraY(), cameraZ(), 180, 18);
+            return null;
+        });
+        log("STARTED");
+    }
+
+    static Layout build(WorldServer world, int x, int y, int z) {
+        FixtureCompatibility.requireSmokeSave(world.getMinecraftServer().getFolderName());
+        if (!world.getMinecraftServer().isCallingFromMinecraftThread() || world.provider.getDimension() != 0 || y < 1 || y > 230)
+            throw new IllegalStateException("Block-effect arena requires its owned overworld server thread and bounded height");
+        Layout layout = new Layout(x, y, z);
+        for (int dx = -8; dx <= 8; dx++) for (int dz = 0; dz <= 14; dz++) {
+            world.setBlockState(new BlockPos(x + dx, y, z + dz), Blocks.GRASS.getDefaultState(), 3);
+            int top = Math.min(255, Math.max(y + 12, world.getHeight(new BlockPos(x + dx, y, z + dz)).getY()));
+            for (int yy = y + 1; yy <= top; yy++) world.setBlockToAir(new BlockPos(x + dx, yy, z + dz));
+        }
+        world.setBlockState(layout.dark, Blocks.OBSIDIAN.getDefaultState(), 3);
+        world.setBlockState(layout.bright, Blocks.QUARTZ_BLOCK.getDefaultState(), 3);
+        world.setBlockState(layout.plant, plantState(), 3);
+        world.setBlockState(layout.stone, Blocks.STONE.getDefaultState(), 3);
+        world.setBlockState(layout.grass, Blocks.GRASS.getDefaultState(), 3);
+        return layout;
+    }
+
+    boolean tick() throws Exception {
+        if (!ownsClient() || !events.isEnabled() || events.failureMessage() != null)
+            throw new IllegalStateException("Block-effect fixture renderer/world unavailable");
+        if (System.nanoTime() - since > TimeUnit.SECONDS.toNanos(60)) {
+            capture("block-effects-timeout-" + phase.name().toLowerCase(Locale.ROOT));
+            throw new IllegalStateException("Block-effect fixture timed out: " + status());
+        }
+        if (System.nanoTime() - progress > TimeUnit.SECONDS.toNanos(5)) { log("PROGRESS"); progress = System.nanoTime(); }
+        if (phase != Phase.SETUP && phase != Phase.RETURN && phase != Phase.DONE) holdPose();
+        switch (phase) {
+            case SETUP:
+                setup(); transition(Phase.ARRIVE);
+                break;
+            case ARRIVE:
+                if (complete()) transition(Phase.BASELINE);
+                break;
+            case BASELINE:
+                if (settled(arenaReady() && events.terrainPendingSectionCount() == 0 && events.terrainRetirementCount() == 0, 20)) {
+                    capture("block-effects-baseline-obsidian-quartz-plant-stone-grass");
+                    cracks(1); transition(Phase.CRACK_EARLY);
+                }
+                break;
+            case CRACK_EARLY:
+                if (settled(events.damageQuads() >= 2, 20)) {
+                    capture("block-effects-cracks-stage-1-obsidian-quartz"); damageHash = events.damageGeometryHash();
+                    cracks(8); transition(Phase.CRACK_LATE);
+                }
+                break;
+            case CRACK_LATE:
+                if (settled(events.damageQuads() >= 2 && events.damageGeometryHash() != damageHash, 20)) {
+                    capture("block-effects-cracks-stage-8-obsidian-quartz"); log("CRACKS_PASS");
+                    cracks(-1); transition(Phase.CRACK_CLEAR);
+                }
+                break;
+            case CRACK_CLEAR:
+                if (settled(events.damageQuads() == 0, 10)) { transition(Phase.PLANT); seedDebris(plantState(), layout.plant); }
+                break;
+            case PLANT:
+            case STONE:
+                boolean plant = phase == Phase.PLANT;
+                observeDebris();
+                if (debrisSamples >= 3) {
+                    capture(plant ? "block-effects-fbp-plant-breaking-debris" : "block-effects-fbp-stone-breaking-debris");
+                    log(plant ? "PLANT_DEBRIS_PASS" : "STONE_DEBRIS_PASS"); clearDebris();
+                    if (plant) { transition(Phase.STONE); seedDebris(Blocks.STONE.getDefaultState(), layout.stone); }
+                    else { attempts = 0; transition(Phase.PLACE_STONE_READY); }
+                } else if (mc.player.ticksExisted - lastBurstTick >= 10 && liveDebris() == 0) {
+                    if (bursts >= 3) throw new IllegalStateException("FBP debris expired without captured animation: " + status());
+                    seedDebris(plant ? plantState() : Blocks.STONE.getDefaultState(), plant ? layout.plant : layout.stone);
+                }
+                break;
+            case PLACE_STONE_READY:
+            case PLACE_GRASS_READY:
+                boolean nextGrass = phase == Phase.PLACE_GRASS_READY;
+                BlockPos nextPos = nextGrass ? layout.grass : layout.stone;
+                IBlockState nextState = nextGrass ? Blocks.GRASS.getDefaultState() : Blocks.STONE.getDefaultState();
+                // PNG encoding may consume the entire ten-tick animation lifetime.
+                // Drain catch-up ticks through actual rendered frames before spawning.
+                if (complete() && settled(clientWorld.getBlockState(nextPos).getBlock() == nextState.getBlock()
+                        && events.terrainSectionReady(nextPos.getX() >> 4, nextPos.getY() >> 4, nextPos.getZ() >> 4), 2)) {
+                    transition(nextGrass ? Phase.PLACE_GRASS : Phase.PLACE_STONE);
+                    spawnPlacement(nextState, nextPos);
+                }
+                break;
+            case PLACE_STONE:
+            case PLACE_GRASS:
+                boolean grass = phase == Phase.PLACE_GRASS;
+                observePlacement();
+                if (observation.passed()) {
+                    BufferedImage secondPose = output.image();
+                    String name = grass ? "block-effects-fbp-placed-tinted-grass" : "block-effects-fbp-placed-stone";
+                    output.capture(name + "-first-pose", firstPoseImage);
+                    output.capture(name + "-intermediate", secondPose);
+                    firstPoseImage = null;
+                    log(grass ? "GRASS_PLACEMENT_PASS" : "STONE_PLACEMENT_PASS");
+                    transition(grass ? Phase.PLACE_GRASS_REST : Phase.PLACE_STONE_REST);
+                } else if (!placement.isAlive()) {
+                    if (attempts >= 3) throw new IllegalStateException("FBP placement expired without two native intermediate poses: " + status());
+                    finishPlacement();
+                    firstPoseImage = null;
+                    action = resendPlacement(grass ? layout.grass : layout.stone, grass ? Blocks.GRASS : Blocks.STONE);
+                    transition(grass ? Phase.PLACE_GRASS_READY : Phase.PLACE_STONE_READY);
+                }
+                break;
+            case PLACE_STONE_REST:
+            case PLACE_GRASS_REST:
+                boolean last = phase == Phase.PLACE_GRASS_REST;
+                BlockPos pos = last ? layout.grass : layout.stone;
+                Block block = last ? Blocks.GRASS : Blocks.STONE;
+                if (!placement.isAlive()) {
+                    if (!placementCleaned) { finishPlacement(); action = resendPlacement(pos, block); }
+                    if (complete() && settled(clientWorld.getBlockState(pos).getBlock() == block
+                            && events.terrainSectionReady(pos.getX() >> 4, pos.getY() >> 4, pos.getZ() >> 4), 10)) {
+                        capture(last ? "block-effects-fbp-tinted-grass-restored" : "block-effects-fbp-stone-restored");
+                        if (!last) { attempts = 0; transition(Phase.PLACE_GRASS_READY); }
+                        else {
+                            restoreClient(); action = restoreServer(); cleanupQueued = true; transition(Phase.RETURN);
+                        }
+                    }
+                }
+                break;
+            case RETURN:
+                if (complete()) { transition(Phase.DONE); log("PASS"); }
+                break;
+            default: break;
+        }
+        return phase == Phase.DONE;
+    }
+
+    private void seedDebris(IBlockState state, BlockPos pos) {
+        clearDebris(); lastBurstTick = mc.player.ticksExisted; bursts++;
+        for (int i = 0; i < 18; i++) {
+            Particle particle = mc.effectRenderer.spawnEffectParticle(EnumParticleTypes.BLOCK_CRACK.getParticleID(),
+                    pos.getX() + .2 + i % 3 * .3, pos.getY() + .2 + i / 9 * .3, pos.getZ() + .2 + i / 3 % 3 * .3,
+                    (i % 3 - 1) * .025, .04, (i / 3 % 3 - 1) * .025, Block.getStateId(state));
+            if (particle == null || !DIGGING.equals(particle.getClass().getName())) {
+                if (particle != null) particle.setExpired();
+                throw new IllegalStateException("Installed particle manager did not return real FBP debris for " + state.getBlock().getRegistryName());
+            }
+            debris.add(particle);
+        }
+        lastFrame = events.renderedFrames(); debrisHash = events.particleGeometryHash();
+    }
+
+    private void observeDebris() {
+        long frame = events.renderedFrames(), hash = events.particleGeometryHash();
+        if (frame <= lastFrame || liveDebris() == 0 || events.particleQuads() < 6 || hash == debrisHash) return;
+        lastFrame = frame; debrisHash = hash; debrisSamples++;
+    }
+
+    private void spawnPlacement(IBlockState state, BlockPos pos) throws ReflectiveOperationException {
+        if (clientWorld.getBlockState(pos).getBlock() != state.getBlock())
+            throw new IllegalStateException("Placement source block differs at " + pos + ": " + clientWorld.getBlockState(pos));
+        placement = (Particle) placementConstructor.newInstance(clientWorld,
+                pos.getX() + .5, pos.getY(), pos.getZ() + .5, state, 7290L);
+        mc.effectRenderer.addEffect(placement);
+        observation = new BlockEffectObservation(events.renderedFrames(), EffectCaptureHooks.placedOpaqueCutoutQuadTotal()); attempts++;
+        firstPoseImage = null; placementCleaned = false; lastAge = -1; lastHeight = 0;
+    }
+
+    private void observePlacement() throws Exception {
+        lastAge = particleAge.getInt(placement); lastHeight = placementHeight.getFloat(placement);
+        observation.sample(events.renderedFrames(), lastAge, placement.isAlive(), lastHeight,
+                EffectCaptureHooks.placedOpaqueCutoutQuadTotal(), events.particleGeometryHash());
+        // Keep only one uncompressed image while the short animation runs; writing
+        // it here would advance the client clock before the second pose can render.
+        if (firstPoseImage == null && observation.samples() > 0) firstPoseImage = output.image();
+    }
+
+    private void finishPlacement() throws ReflectiveOperationException {
+        if (placement == null || placementCleaned) return;
+        // FBP's setExpired override only removes an event entry. Its public cleanup
+        // also retires the animation node, so use that method for our exact particle.
+        killPlacement.invoke(placement);
+        placementCleaned = true;
+    }
+
+    private boolean arenaReady() {
+        for (BlockPos pos : new BlockPos[] {layout.dark, layout.bright, layout.plant, layout.stone, layout.grass})
+            if (!events.terrainSectionReady(pos.getX() >> 4, pos.getY() >> 4, pos.getZ() >> 4)) return false;
+        return clientWorld.getBlockState(layout.dark).getBlock() == Blocks.OBSIDIAN
+                && clientWorld.getBlockState(layout.bright).getBlock() == Blocks.QUARTZ_BLOCK
+                && clientWorld.getBlockState(layout.plant).getBlock() == Blocks.TALLGRASS
+                && clientWorld.getBlockState(layout.stone).getBlock() == Blocks.STONE
+                && clientWorld.getBlockState(layout.grass).getBlock() == Blocks.GRASS;
+    }
+    private static IBlockState plantState() { return Blocks.TALLGRASS.getDefaultState().withProperty(BlockTallGrass.TYPE, BlockTallGrass.EnumType.GRASS); }
+    private void cracks(int stage) { mc.renderGlobal.sendBlockBreakProgress(BREAKER, layout.dark, stage); mc.renderGlobal.sendBlockBreakProgress(BREAKER + 1, layout.bright, stage); }
+    private int liveDebris() { int count = 0; for (Particle particle : debris) if (particle.isAlive()) count++; return count; }
+    private void clearDebris() { for (Particle particle : debris) particle.setExpired(); debris.clear(); }
+    private boolean ownsClient() { return mc.getIntegratedServer() == server && mc.world == clientWorld && mc.player != null && playerId.equals(mc.player.getUniqueID()); }
+    private double cameraX() { return layout.x + .5; }
+    private double cameraY() { return layout.y + 1.2; }
+    private double cameraZ() { return layout.z + 11.5; }
+    private void holdPose() {
+        mc.player.setPositionAndRotation(cameraX(), cameraY(), cameraZ(), 180, 18);
+        mc.player.prevPosX = mc.player.lastTickPosX = cameraX(); mc.player.prevPosY = mc.player.lastTickPosY = cameraY();
+        mc.player.prevPosZ = mc.player.lastTickPosZ = cameraZ(); mc.player.prevRotationYaw = 180; mc.player.prevRotationPitch = 18;
+        mc.player.motionX = mc.player.motionY = mc.player.motionZ = 0; mc.player.capabilities.isFlying = true;
+    }
+    private EntityPlayerMP player() {
+        EntityPlayerMP player = server.getPlayerList().getPlayerByUUID(playerId);
+        if (player == null) throw new IllegalStateException("Block-effect fixture player unavailable"); return player;
+    }
+    private void requireWorld() {
+        FixtureCompatibility.requireSmokeSave(save);
+        if (!server.isCallingFromMinecraftThread() || !save.equals(server.getFolderName()) || server.getWorld(0) != world)
+            throw new IllegalStateException("Block-effect fixture no longer owns its server world");
+    }
+    private Future<?> resendPlacement(BlockPos pos, Block expected) {
+        return server.callFromMainThread(() -> {
+            requireWorld();
+            IBlockState state = world.getBlockState(pos);
+            if (state.getBlock() != expected) throw new IllegalStateException("Owned placement source changed at " + pos);
+            // FBP's killParticle retires its node but can leave the client dummy
+            // when no final animation frame rendered. Re-send the unchanged owner.
+            world.notifyBlockUpdate(pos, state, state, 3);
+            return null;
+        });
+    }
+    private Future<?> restoreServer() {
+        return server.callFromMainThread(() -> {
+            requireWorld();
+            // Re-sending just the two owned animation blocks repairs a client-side
+            // dummy left by interruption, without touching any unrelated block.
+            world.notifyBlockUpdate(layout.stone, world.getBlockState(layout.stone), world.getBlockState(layout.stone), 3);
+            world.notifyBlockUpdate(layout.grass, world.getBlockState(layout.grass), world.getBlockState(layout.grass), 3);
+            if (serverConfigured) {
+                EntityPlayerMP player = server.getPlayerList().getPlayerByUUID(playerId);
+                if (player != null && player.world == world) {
+                    player.capabilities.isFlying = serverFlying; player.sendPlayerAbilities();
+                    player.connection.setPlayerLocation(returnX, returnY, returnZ, returnYaw, returnPitch);
+                }
+                serverConfigured = false;
+            }
+            return null;
+        });
+    }
+    private void restoreClient() {
+        if (!clientConfigured) return;
+        mc.gameSettings.thirdPersonView = originalView; mc.gameSettings.hideGUI = originalHud;
+        mc.gameSettings.particleSetting = originalParticles;
+        if (ownsClient()) mc.player.capabilities.isFlying = originalFlying;
+        clientConfigured = false;
+    }
+    private boolean complete() throws Exception { if (!action.isDone()) return false; action.get(); return true; }
+    private boolean settled(boolean ready, int frames) {
+        if (!ready) { readyFrame = -1; return false; }
+        if (readyFrame < 0) readyFrame = events.renderedFrames(); return events.renderedFrames() - readyFrame >= frames;
+    }
+    private void transition(Phase next) {
+        phase = next; since = progress = System.nanoTime(); readyFrame = lastFrame = -1;
+        debrisSamples = bursts = 0; log("PHASE");
+    }
+    private void capture(String name) throws Exception { output.capture(name, output.image()); }
+    private void log(String name) { output.log("BLOCK_EFFECTS_" + name, status()); }
+    String status() {
+        return "phase=" + phase + " smoothLighting=" + smoothLighting + " damageQuads=" + events.damageQuads()
+                + " damageHash=" + events.damageGeometryHash() + " particleQuads=" + events.particleQuads()
+                + " particleHash=" + events.particleGeometryHash() + " liveDebris=" + liveDebris()
+                + " debrisSamples=" + debrisSamples + " bursts=" + bursts + " placementAttempts=" + attempts
+                + " placementAlive=" + (placement != null && placement.isAlive()) + " age=" + lastAge + " height=" + lastHeight
+                + " placementSamples=" + (observation == null ? 0 : observation.samples())
+                + " correctedPlacementQuadTotal=" + EffectCaptureHooks.placedColorQuadTotal()
+                + " opaqueCutoutPlacementQuadTotal=" + EffectCaptureHooks.placedOpaqueCutoutQuadTotal()
+                + " stone=" + clientWorld.getBlockState(layout.stone).getBlock().getRegistryName()
+                + " grass=" + clientWorld.getBlockState(layout.grass).getBlock().getRegistryName()
+                + " pendingTerrain=" + events.terrainPendingSectionCount() + " skippedQuads=" + events.effectSkippedQuads();
+    }
+    @Override public void close() {
+        if (closed) return;
+        try {
+            clearDebris();
+            if (ownsClient() && clientConfigured) {
+                cracks(-1);
+                try { finishPlacement(); }
+                catch (ReflectiveOperationException error) { throw new IllegalStateException("Owned FBP animation cleanup failed", error); }
+            }
+        } finally {
+            firstPoseImage = null;
+            restoreClient();
+            if (!cleanupQueued && action != null) { cleanupQueued = true; restoreServer(); }
+            closed = true;
+        }
+    }
+
+    static final class Layout {
+        final int x, y, z;
+        final BlockPos dark, bright, plant, stone, grass;
+        Layout(int x, int y, int z) {
+            this.x = x; this.y = y; this.z = z;
+            dark = new BlockPos(x - 2, y + 1, z + 2); bright = new BlockPos(x + 2, y + 1, z + 2);
+            plant = new BlockPos(x - 2, y + 1, z + 5); stone = new BlockPos(x, y + 1, z + 5); grass = new BlockPos(x + 2, y + 1, z + 5);
+        }
+    }
+}

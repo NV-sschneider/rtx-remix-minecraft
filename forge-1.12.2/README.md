@@ -34,6 +34,17 @@ The configured test instances use windowed mode; the launcher preserves their
 display settings. Fullscreen, resize, and minimize/restore
 have dedicated optional fixtures below.
 
+New installs use a modest local tone-mapping shadow level of `2.5`, with the
+runtime's exposure and highlight settings unchanged. The same-room validation
+increased sampled shadow brightness by about 11% without increasing clipped
+highlights. `/mrtx shadows <0-5>` adjusts this control; `/mrtx shadows status`
+reports its saved override and `/mrtx shadows reset` saves the native baseline,
+`2`. The preference lives separately in `config/rlcraft-remix-visibility.properties`
+and selects local tone mapping when applied. With no saved override, Remix's
+existing settings remain in control. Installs preserve an existing `rtx.conf`;
+use `/mrtx shadows 2.5` to apply the new level there. The command does not rewrite
+`rtx.conf`.
+
 The runtime and its GL timeline remain alive while Remix is off, but world
 resources are released. Shutdown follows Minecraft's `Display.destroy()` call.
 The pinned runtime DLL stays loaded until process exit because unloading it
@@ -220,13 +231,23 @@ capture path for shadows/reflections; it does not capture every distant entity.
 
 An ordinary alpha-blended entity base uses opaque rendering only when its entire
 texture, vertex colors, and tint have alpha 255. This avoids ghosting for opaque
-OBJ models whose renderer leaves blending enabled. Supported texture updates
-revoke that proof on transparent or unknown pixels, updating retained instances
-without rebuilding geometry. Fractional alpha, glint, and additive layers keep
-their blending behavior.
+OBJ models whose renderer leaves blending enabled. Textures containing only alpha
+0/255 can also use cutout rendering when the original alpha test rejects zero
+and every vertex/tint is opaque; the original alpha test preserves holes such as
+Flowersaur's foliage. Texture updates recheck these proofs: transparent pixels
+revoke full opacity, and fractional or unknown pixels revoke binary coverage.
+Retained instances change their blend state without rebuilding geometry.
+Fractional alpha, glint, and additive layers keep their blending behavior.
 
 First-person hands and baked held items use their actual equip, swing, use, and
-view transforms, with a separate native view-model category. Local body geometry
+view transforms, with a separate native view-model category. Small local meshes
+contain the hand pose and camera rotation; their retained instances use only a
+translation matching the runtime camera's float view-matrix round trip. This
+preserves fine motion at large world coordinates. Unchanged poses reuse meshes,
+and replaced meshes retire after their instances switch. Each hand capture scene
+has a separate rotating allowance of eight uploads and 4 MiB per frame, so world
+animation cannot consume its upload budget. Held lights still receive world-space
+poses. Local body geometry
 uses a separate category for shadows and reflections. Third-person, hidden-HUD,
 and inventory transitions release the relevant occurrences. Dropped items use
 actual `RenderItem` vertices, stack copies, tint, and ItemPhysic transforms and
@@ -244,12 +265,15 @@ pose changes update instances, and unseen occurrences retire before their assets
 
 Entity/effect texture owners observe supported CPU uploads through Minecraft's
 texture helpers, including `DynamicTexture` revisions, and observe deletion.
-Updates are bounded and applied before scene submission. A dirty, failed, or
-partially published texture is hidden until a complete supported upload recovers
-it; deleted textures cannot be reused through an old GL ID. The observer does not
-see arbitrary direct GL uploads, GPU copies, render-to-texture changes, or shader
-writes. Such producers need an adapter. First-use snapshots are not a substitute
-for observing later changes.
+Updates are bounded and applied before scene submission. Ordinary textures stay
+hidden while their pending or lost pixels await publication or repair. The block
+atlas may retain its last published animation pixels while independent sprite
+patches drain, so an animation backlog does not hide atlas-backed entities.
+Lost pixels and full-image replacement still require complete repair and
+publication. Deletion permanently invalidates the old binding, even if its GL ID
+is reused. The observer does not see arbitrary direct GL uploads, GPU copies,
+render-to-texture changes, or shader writes. Such producers need an adapter.
+First-use snapshots are not a substitute for observing later changes.
 
 ## Better Foliage and effects
 
@@ -268,15 +292,37 @@ passes. Quads, triangles, triangle strips, and fans preserve geometry, UVs, and
 vertex color. Conventional alpha blending uses albedo; supported `SRC_ALPHA/ONE`
 and `ONE/ONE` additive draws use emission and retain the source-alpha distinction.
 Known additive entity eyes/projectile sprites use the corresponding material
-rules. Vanilla block-breaking overlays retain their multiplicative blend and
-static decal category, including stage changes, reload, and cancellation.
+rules. Vanilla block-breaking overlays use a static black decal whose alpha is
+derived from the destroy texture's grayscale darkening, preserving the underlying
+block color. Remix cannot represent vanilla's multiplicative crack material:
+source values above half brightness contribute no decal, so their brightening is
+omitted. The compact damage atlas supports static grayscale destroy sprites up to
+512 pixels per side; colored, animated, rotated, or malformed sources are omitted
+with a warning. Stage changes, resource reload, and cancellation retain their
+normal lifecycle; ordinary particle textures use their original atlas.
+
+Fancy Block Particles 2.4.1 cube debris preserves and transforms its supplied
+outward lighting normals. Its placement animation records original model colors
+and biome tint before Minecraft bakes lighting into them, while the mod evaluates
+and draws its model once. A bounded color stream is used only when the standard
+renderer, buffer, vertex count, and quad contract match. FBP settings, animation,
+particle tint, and intentional dark smoke are preserved.
+Placement draws use ordinary world lighting when a bounded check proves every
+vertex fully opaque and every source animation frame's level-zero pixels opaque
+or binary-alpha.
+Binary textures additionally require the captured alpha test to reject transparent
+texels. Removing inherited particle blending makes filtered binary-texture edges
+use cutout coverage instead of fractional blend weighting, matching the entity
+cutout policy. Fractional level-zero alpha, unknown sprite implementations, and
+draws exceeding the proof budget retain their original blending.
 
 Ordinary premultiplied `ONE/ONE_MINUS_SRC_ALPHA` effects remain unsupported:
 interpreting them as ordinary alpha or additive emission would change their
 meaning. Effect capture also excludes custom shaders, unsupported blend equations,
 nonidentity texture matrices, unknown texture bindings, and non-buffer geometry.
 Existing mod-authored vertex shading is preserved; the observer cannot infer and
-remove arbitrary lighting already mixed into those colors.
+remove arbitrary lighting already mixed into those colors. The explicit FBP
+placement adapter supplies its original colors through the contract above.
 
 Effects admit 32 batches and 8,192 primitives per frame, with 16 textures/32 MiB
 and at most one first-use texture snapshot per frame. Historical diagnostic names
@@ -295,6 +341,12 @@ an ordinary F2 screenshot alone does not establish visible native presentation.
 Window recreation within the same GL context preserves the interop timeline;
 resizing reimports the color image. Replacing the GL context is unsupported and
 is rejected by the native ownership check. Menu capture follows window changes.
+
+The optional Neat adapter keeps its original health-bar draw in an RGBA overlay
+and composites it after the Remix world image, before Minecraft's HUD. Neat still
+chooses entities, names, health values, distance, focus, and F1 visibility; its
+draw runs once and the adapter does not change its configuration. Other world
+HUD renderers need their own presentation adapter.
 
 Vanilla traversal still hosts capture and normally draws the world before Remix
 replaces its color output. Experimental SOLID VBO draw suppression is opt-in:
@@ -365,6 +417,7 @@ focused run; their presence describes an available check, not a recorded pass.
 | `-ObjectSmokeTest` | Chest lids, beds, dropped items, optional Lycanites model, screens, resize, and reload. |
 | `-TileSmokeTest` | Owned fast/custom TESR geometry, mutation, reload, dynamic texture, and removal. |
 | `-FirstPersonSmokeTest` | Equip/swing/bow/FOV, body/view categories, screens, and block damage stages/reload/cancel. |
+| `-FirstPersonFarSmokeTest` | Moves the first-person arena 16,384 blocks farther along X to exercise coordinate precision; also requires `-FirstPersonSmokeTest`. |
 | `-HeldLightSmokeTest` | Held-light ownership, movement, extinguishing, toggle, and cleanup. |
 | `-GlintSmokeTest` | Item/armor glint, animated UVs, material categories, and reload. |
 | `-CombatSmokeTest` | Nonliving projectiles and offscreen entity capture. |
@@ -373,6 +426,10 @@ focused run; their presence describes an available check, not a recorded pass.
 | `-FoliageSmokeTest` | Installed Better Foliage geometry, AO independence, reload, and removal. |
 | `-CompatibilitySmokeTest` | Actual installed mod creatures, animation, offscreen capture, reload, and removal. |
 | `-SurvivalSmokeTest` | Server damage, client melee/projectile/eating actions, native capture, and restored player state, including First Aid when installed. |
+| `-FallingTreeSmokeTest` | Installed Dynamic Trees generation, player chopping, falling branch capture/animation, and retirement. |
+| `-MobHudSmokeTest` | Installed Neat health-bar pixels, disabled/focused/F1 visibility rules, and settings restoration. |
+| `-BlockEffectSmokeTest` | Contrasting crack stages 1/8, real FBP plant/stone debris, intermediate stone/tinted-grass placement poses, and cleanup. |
+| `-VisibilitySmokeTest` | Same-room shadow controls at 2 and 2.5, image comparison including highlights, and exact native-setting restoration. |
 | `-DimensionSmokeTest` | Server-owned Overworld/Nether/End/Overworld transitions with rendering enabled. |
 | `-WindowSmokeTest` | Native menus in gameplay/inventory, input release, fullscreen, resize, and restoration. |
 | `-TerrainOptimizationSmokeTest` | Supported SOLID draw suppression, injected failure with pixel-exact pre-HUD recovery, release, reload, and resize. |
@@ -384,6 +441,13 @@ focused run; their presence describes an available check, not a recorded pass.
 with the same `-InstanceName`/`-LauncherDirectory`; it waits for the fixture's
 request and validates the owning game process/window before minimizing and
 restoring it. It does not select an unrelated desktop window.
+
+The falling-tree, mob-HUD, and block-effect fixtures require their corresponding
+installed mods; the FBP fixture uses its enabled, unfrozen placement configuration
+without changing it. Select the RLCraft instance with `-InstanceName` for these
+checks. Screenshots identify each crack stage, debris type, and placement pose;
+placement evidence requires new corrected-color, proven opaque/cutout draws and
+changing native geometry across intermediate frames.
 
 `-SoakSeconds` sets the soak duration from 60 to 7200 seconds, default 1800. The
 fixture must also finish four travel cycles, a reload, and a disable/re-enable
@@ -508,6 +572,30 @@ in both the Forge and Fabric clients. Both clients finish shutdown, but this
 native accounting issue remains unresolved and is distinct from the checked
 zero world-resource ownership. The matching runtime source is maintained
 separately; a fix must ship in a matching published runtime package.
+
+The playthrough regression run `20261024-165322-9f94c6eb` passed the six-mob
+movement/reload/retirement cohort, Dynamic Trees capture on all 19 renderable
+falling frames, all six Neat visibility cases, and FBP damage/debris/placement
+checks. Inspected placement images retain stone and grass shading through two
+animation poses; damage images retain the underlying obsidian and quartz colors.
+The shadow comparison (`160935`) raised mean shadow luminance from 43.06 to 47.74
+without increasing clipped highlights; exposure and highlight controls were
+unchanged.
+
+Native first-person probes under the Forge runtime configuration pass at the
+origin and at positive/negative 15,000-block coordinates, including rotated
+cameras and per-frame replacement of opaque, cutout, and alpha-blended meshes.
+The live empty hand is visible. The settled sword/bow image check remains pending
+an active Windows desktop: earlier captures reached the newly selected item while
+its equip animation was still lowered. The fixture now waits for both vanilla
+equip-progress samples before applying its strict sword-pixel check. Optional
+`-Drlcraftremix.viewModelDiagnostics=true` records bounded pose/projection details
+and captures a vanilla control if that image check fails.
+
+The default Arisaur's binary-alpha body now renders as solid geometry. Flowersaur
+contains authored fractional alpha, so it retains blending; its raised tail's
+visibility at the horizon remains unresolved. The user's exact reported creature
+is not yet identified, and still screenshots do not establish temporal ghosting.
 
 ## RLCraft test instance
 
