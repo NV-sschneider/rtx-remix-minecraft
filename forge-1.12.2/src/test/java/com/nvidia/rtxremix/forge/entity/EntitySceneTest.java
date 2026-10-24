@@ -18,11 +18,73 @@ import java.util.UUID;
 import net.minecraft.tileentity.TileEntity;
 import net.minecraft.entity.Entity;
 import net.minecraft.nbt.NBTTagCompound;
+import net.minecraft.util.math.BlockPos;
 import org.junit.Test;
 import sun.reflect.ReflectionFactory;
 import static org.junit.Assert.*;
 
 public class EntitySceneTest {
+    @Test public void tileReadinessUsesItsLiveTextureEvenWhenAnotherTextureIsDirty() {
+        Fake api = new Fake(); EntityScene scene = new EntityScene(api); List<CapturedEntityPart> parts = parts(2);
+        BlockPos target = new BlockPos(3, 4, 5), other = new BlockPos(6, 7, 8);
+        ((TileEntity) parts.get(0).owner).setPos(target);
+        TileEntity unrelated = new TileEntity() {}; unrelated.setPos(other);
+        parts.get(1).owner = unrelated; parts.get(1).textureIdentity = new Object(); parts.get(1).textureId = 2;
+        scene.sync(parts);
+        assertTrue(scene.tileTextureCurrent(target, 1)); assertTrue(scene.tileTextureCurrent(other, 2));
+        assertFalse(scene.tileTextureCurrent(target, 2)); assertFalse(scene.tileTextureCurrent(new BlockPos(9, 9, 9), 1));
+        api.dirty.add(api.uploaded.get(1));
+        assertTrue(scene.tileTextureCurrent(target, 1)); assertFalse(scene.tileTextureCurrent(other, 2));
+        api.dirty.add(api.uploaded.get(0)); assertFalse(scene.tileTextureCurrent(target, 1));
+        scene.sync(parts); assertFalse(scene.tileTextureCurrent(target, 1));
+        api.dirty.clear(); scene.sync(parts); assertTrue(scene.tileTextureCurrent(target, 1));
+        parts.clear(); scene.sync(parts); assertFalse(scene.tileTextureCurrent(target, 1));
+        scene.close(); api.assertEmpty();
+    }
+
+    @Test public void ordinaryAndEmissiveMaterialsShareOneObservedTextureAndRetireTogether() {
+        Fake api = new Fake(); EntityScene scene = new EntityScene(api); List<CapturedEntityPart> parts = parts(2);
+        CapturedEntityPart glow = parts.get(1); glow.surface = EntitySurface.EYES; glow.alphaBlend = true;
+        glow.triangleGroup = parts.get(0).triangleGroup;
+        scene.sync(parts);
+        assertEquals(2, scene.partCount()); assertEquals(2, api.meshCreates);
+        assertEquals(1, api.uploaded.size()); assertEquals(1, api.textures.size()); assertEquals(2, api.materials.size());
+        EntityTextures.Asset texture = api.uploaded.get(0);
+        assertNotEquals(texture.material, texture.emissiveMaterial);
+        assertEquals(Long.valueOf(texture.texture), api.materials.get(texture.material));
+        assertEquals(Long.valueOf(texture.texture), api.materials.get(texture.emissiveMaterial));
+        api.dirty.add(texture); scene.sync(parts); assertEquals(0, scene.partCount()); assertEquals(1, api.uploaded.size());
+        api.dirty.clear(); scene.sync(parts); assertEquals(2, scene.partCount()); assertEquals(1, api.uploaded.size());
+        scene.close(); api.assertEmpty(); assertEquals(1, api.released.size());
+    }
+
+    @Test public void switchingSurfaceReplacesMaterialAndBlendEvenWithIdenticalGeometry() {
+        Fake api = new Fake(); EntityScene scene = new EntityScene(api); List<CapturedEntityPart> parts = parts(1);
+        scene.sync(parts); long originalMesh = api.meshes.keySet().iterator().next();
+        CapturedEntityPart part = parts.get(0); part.surface = EntitySurface.GLINT; part.alphaBlend = true;
+        scene.sync(parts); assertEquals(1, scene.partCount()); assertFalse(api.meshes.containsKey(originalMesh));
+        assertEquals(2, api.instanceUpdates); assertEquals(1, api.uploaded.size()); assertEquals(2, api.materials.size());
+        scene.sync(parts); assertEquals(2, api.instanceUpdates);
+        scene.close(); api.assertEmpty();
+    }
+
+    @Test public void pendingTextureRevisionIsHiddenWithoutRepeatedSnapshotsAndRecoversInPlace() {
+        Fake api = new Fake(); EntityScene scene = new EntityScene(api); List<CapturedEntityPart> parts = parts(1);
+        scene.sync(parts); EntityTextures.Asset texture = api.uploaded.get(0); long nativeTexture = texture.texture, material = texture.material;
+        api.dirty.add(texture); scene.sync(parts); assertEquals(0, scene.partCount()); assertEquals(1, api.uploaded.size());
+        scene.sync(parts); assertEquals(0, scene.partCount()); assertEquals(1, api.uploaded.size());
+        assertTrue(api.textures.contains(nativeTexture)); assertTrue(api.materials.containsKey(material));
+        api.dirty.clear(); scene.sync(parts); assertEquals(1, scene.partCount()); assertEquals(1, api.uploaded.size());
+        scene.close(); api.assertEmpty(); assertTrue(api.observerClosed);
+    }
+
+    @Test public void deletedGlIdentityNeverKeepsItsOldPixelsWhenTheNumericIdIsReused() {
+        Fake api = new Fake(); EntityScene scene = new EntityScene(api); List<CapturedEntityPart> parts = parts(1);
+        scene.sync(parts); EntityTextures.Asset old = api.uploaded.get(0); long oldTexture = old.texture;
+        api.deleted.add(old); scene.sync(parts);
+        assertEquals(2, api.uploaded.size()); assertEquals(1, scene.partCount()); assertFalse(api.textures.contains(oldTexture));
+        assertTrue(api.released.contains(old)); scene.close(); api.assertEmpty();
+    }
     @Test public void bodyAndHandsRetainSeparateInstancesAndRetireIndependently() {
         Fake api = new Fake();
         EntityScene scene = new EntityScene(api);
@@ -168,6 +230,9 @@ public class EntitySceneTest {
         final Map<Long, Float> positions = new HashMap<>();
         final Map<Long, Integer> categories = new HashMap<>();
         final Set<Long> textures = new HashSet<>(), blends = new HashSet<>();
+        final List<EntityTextures.Asset> uploaded = new ArrayList<>();
+        final Set<EntityTextures.Asset> dirty = new HashSet<>(), deleted = new HashSet<>(), released = new HashSet<>();
+        boolean observerClosed;
         long next = 1, failMesh, failBlend;
         int meshCreates, instanceUpdates;
         boolean failMaterialCreation;
@@ -194,14 +259,22 @@ public class EntitySceneTest {
             assertTrue(blends.remove(handle));
         }
         public boolean uploadTexture(EntityTextures.Asset asset, long budget, long hash) {
+            uploaded.add(asset);
             asset.texture = next++; asset.bytes = 4; textures.add(asset.texture);
             if (failMaterialCreation) throw new IllegalStateException("material creation");
             asset.material = next++; materials.put(asset.material, asset.texture); return true;
+        }
+        public long createEmissiveMaterial(EntityTextures.Asset asset, long hash) {
+            long handle = next++; materials.put(handle, asset.texture); return handle;
         }
         public void destroyMaterial(long handle) {
             assertFalse(meshes.containsValue(handle)); assertNotNull(materials.remove(handle));
         }
         public void destroyTexture(long handle) { assertFalse(materials.containsValue(handle)); assertTrue(textures.remove(handle)); }
+        public boolean textureCurrent(EntityTextures.Asset asset) { return !dirty.contains(asset) && !deleted.contains(asset); }
+        public boolean textureDeleted(EntityTextures.Asset asset) { return deleted.contains(asset); }
+        public void releaseTextureObservation(EntityTextures.Asset asset) { released.add(asset); }
+        public void closeTextureObservations() { observerClosed = true; }
         void assertEmpty() {
             assertTrue(meshes.isEmpty()); assertTrue(instances.isEmpty()); assertTrue(materials.isEmpty());
             assertTrue(textures.isEmpty()); assertTrue(blends.isEmpty());

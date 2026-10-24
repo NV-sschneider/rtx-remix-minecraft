@@ -39,8 +39,19 @@ public final class EntityScene implements AutoCloseable {
         long createBlend(InstanceInfoBlendEXT blend);
         void freeBlend(long handle);
         boolean uploadTexture(EntityTextures.Asset asset, long budget, long hash);
+        long createEmissiveMaterial(EntityTextures.Asset asset, long hash);
         void destroyMaterial(long handle);
         void destroyTexture(long handle);
+        default void flushTextures() { }
+        default boolean textureCurrent(EntityTextures.Asset asset) { return asset.revision == null || asset.revision.current(); }
+        default boolean textureDeleted(EntityTextures.Asset asset) { return asset.revision != null && asset.revision.deleted(); }
+        default void releaseTextureObservation(EntityTextures.Asset asset) { }
+        default void closeTextureObservations() { }
+        default long textureUpdates() { return 0; }
+        default long texturePatches() { return 0; }
+        default long texturePatchBytes() { return 0; }
+        default long droppedTextureRevisions() { return 0; }
+        default int dirtyTextures() { return 0; }
     }
     private final Backend api;
     private final Thread renderThread = Thread.currentThread();
@@ -60,6 +71,7 @@ public final class EntityScene implements AutoCloseable {
     private long triangleUploads;
     private int deferredTriangleUploads;
     private boolean closed;
+    private boolean closing;
 
     public EntityScene(RemixAPI api) { this(backend(api)); }
     EntityScene(Backend api) { this.api = api; }
@@ -67,7 +79,8 @@ public final class EntityScene implements AutoCloseable {
     /** Consumes this frame's mutable capture records synchronously; none are retained. */
     public void sync(List<CapturedEntityPart> parts) {
         checkThread();
-        if (closed) throw new IllegalStateException("Entity scene is closed");
+        if (closed || closing) throw new IllegalStateException("Entity scene is closing or closed");
+        api.flushTextures();
         frame++;
         int count = Math.min(parts.size(), MAX_PARTS);
         int first = triangleBudget.beginFrame(parts, count);
@@ -77,12 +90,13 @@ public final class EntityScene implements AutoCloseable {
             if (!valid(captured)) continue;
             Owner owner = owners.get(ownerProbe.set(captured.owner, captured.categoryFlags));
             Part part = owner == null ? null : owner.parts[captured.occurrence];
-            if (part != null) part.requested = frame;
+            if (part != null && api.textureCurrent(part.mesh.texture) && sameTexture(part.mesh.texture, captured)) part.requested = frame;
         }
         // Release departed occurrences before admission so native handles also stay under the cap.
         retireParts(true);
         retireUnseenMeshes();
-        retireUnseenTextures();
+        // Pending revisions have no visible instances, but their asset must survive until this
+        // frame's capture requests it again. Retire textures after processing those requests.
         for (int i = 0; i < count; i++) {
             CapturedEntityPart captured = parts.get((first + i) % count);
             if (!valid(captured)) continue;
@@ -115,12 +129,25 @@ public final class EntityScene implements AutoCloseable {
     public int trianglePartCount() { checkThread(); return trianglePartCount; }
     public long triangleUploadCount() { checkThread(); return triangleUploads; }
     public int deferredTriangleUploadCount() { checkThread(); return deferredTriangleUploads; }
+    public long textureUpdateCount() { checkThread(); return api.textureUpdates(); }
+    public long texturePatchCount() { checkThread(); return api.texturePatches(); }
+    public long texturePatchBytes() { checkThread(); return api.texturePatchBytes(); }
+    public long droppedTextureRevisionCount() { checkThread(); return api.droppedTextureRevisions(); }
+    public int dirtyTextureCount() { checkThread(); return api.dirtyTextures(); }
     public int categoryCount(int category) {
         checkThread();
         int count = 0;
         for (Map.Entry<CaptureOwnerKey, Owner> entry : owners.entrySet()) {
             if (entry.getKey().category() != category) continue;
             for (Part part : entry.getValue().parts) if (part != null && part.instance != 0) count++;
+        }
+        return count;
+    }
+
+    public int emissivePartCount(UUID ownerId) {
+        checkThread(); int count = 0;
+        for (Owner owner : owners.values()) if (ownerId.equals(owner.id)) {
+            for (Part part : owner.parts) if (part != null && part.instance != 0 && part.mesh.surface != EntitySurface.ORDINARY) count++;
         }
         return count;
     }
@@ -140,6 +167,7 @@ public final class EntityScene implements AutoCloseable {
         int count = meshes.size();
         for (EntityTextures.Asset texture : textures) {
             if (texture.material != 0) count++;
+            if (texture.emissiveMaterial != 0) count++;
             if (texture.texture != 0) count++;
         }
         for (Owner owner : owners.values()) for (Part part : owner.parts) if (part != null) {
@@ -194,6 +222,20 @@ public final class EntityScene implements AutoCloseable {
         return count;
     }
 
+    /** Current observed texture on a live occurrence of this exact block entity. */
+    public boolean tileTextureCurrent(BlockPos position, int textureId) {
+        checkThread();
+        for (Map.Entry<CaptureOwnerKey, Owner> entry : owners.entrySet()) {
+            if (!(entry.getKey().owner instanceof TileEntity)
+                    || !((TileEntity) entry.getKey().owner).getPos().equals(position)) continue;
+            for (Part part : entry.getValue().parts) {
+                if (part != null && part.instance != 0 && part.mesh.texture.textureId == textureId
+                        && api.textureCurrent(part.mesh.texture)) return true;
+            }
+        }
+        return false;
+    }
+
     public boolean contains(UUID ownerId) {
         checkThread();
         for (Owner owner : owners.values()) if (ownerId.equals(owner.id)) return true;
@@ -217,10 +259,13 @@ public final class EntityScene implements AutoCloseable {
 
     private EntityTextures.Asset texture(Object identity, int textureId) {
         for (EntityTextures.Asset asset : textures) {
-            if (asset.identity == identity && asset.textureId == textureId) return asset;
+            if (asset.identity == identity && asset.textureId == textureId && !api.textureDeleted(asset)) {
+                asset.requested = frame; return api.textureCurrent(asset) ? asset : null;
+            }
         }
         if (textures.size() >= MAX_TEXTURES || textureBytes >= MAX_TEXTURE_BYTES) return null;
         EntityTextures.Asset created = new EntityTextures.Asset(identity, textureId, 0, 0, 0);
+        created.requested = frame;
         textures.add(created);
         try {
             if (!api.uploadTexture(created, MAX_TEXTURE_BYTES - textureBytes, HASHES.getAndAdd(2))) {
@@ -239,30 +284,41 @@ public final class EntityScene implements AutoCloseable {
         MeshAsset found = meshes.get(meshProbe);
         if (found != null) return found;
         boolean triangles = captured.triangles != null;
-        if (meshes.size() >= MAX_MESHES) { if (triangles) deferredTriangleUploads++; return null; }
-        if (!triangles && !geometry.prepare(captured.modelPart, captured.scale, texture.material)) return null;
+        boolean dynamic = TriangleUploadBudget.dynamic(captured);
+        if (meshes.size() >= MAX_MESHES) { if (dynamic) deferredTriangleUploads++; return null; }
+        if (captured.surface != EntitySurface.ORDINARY && texture.emissiveMaterial == 0) {
+            texture.emissiveMaterial = api.createEmissiveMaterial(texture, HASHES.incrementAndGet());
+        }
+        long material = captured.surface == EntitySurface.ORDINARY ? texture.material : texture.emissiveMaterial;
+        if (!triangles && !geometry.prepare(captured.modelPart, captured.scale, material,
+                captured.transformedTexture ? captured.textureTransform : null)) return null;
         long bytes = triangles ? EntityTriangles.bytes(captured.vertexCount) : geometry.bytes();
-        if (bytes > MAX_MESH_BYTES - meshBytes || triangles && !triangleBudget.admit(bytes)) {
-            if (triangles) deferredTriangleUploads++;
+        if (bytes > MAX_MESH_BYTES - meshBytes || dynamic && !triangleBudget.admit(bytes)) {
+            if (dynamic) deferredTriangleUploads++;
             return null;
         }
         long handle = api.createMesh(triangles ? captured.triangles.info(captured.firstVertex, captured.vertexCount,
-                texture.material, HASHES.incrementAndGet()) : geometry.info(HASHES.incrementAndGet()));
-        MeshAsset created = new MeshAsset(handle, bytes, texture, triangles);
+                material, HASHES.incrementAndGet()) : geometry.info(HASHES.incrementAndGet()));
+        MeshAsset created = new MeshAsset(handle, bytes, texture, triangles, captured.surface);
         MeshKey key = new MeshKey();
         key.set(captured, texture);
         meshes.put(key, created);
         meshBytes += bytes;
         texture.references++;
-        if (triangles) triangleUploads++;
+        if (dynamic) triangleUploads++;
         return created;
     }
 
     /** A budgeted replacement keeps its previous native mesh alive until admission succeeds. */
     private void keep(Part part, CapturedEntityPart captured, Owner owner) {
-        if (part == null || part.mesh == null) return;
+        if (part == null || part.mesh == null || part.mesh.surface != captured.surface
+                || !api.textureCurrent(part.mesh.texture) || !sameTexture(part.mesh.texture, captured)) return;
         submit(part, part.mesh, captured, owner);
         part.lastSeen = frame;
+    }
+
+    private static boolean sameTexture(EntityTextures.Asset asset, CapturedEntityPart captured) {
+        return asset.identity == captured.textureIdentity && asset.textureId == captured.textureId;
     }
 
     private void submit(Part part, MeshAsset mesh, CapturedEntityPart captured, Owner owner) {
@@ -270,10 +326,10 @@ public final class EntityScene implements AutoCloseable {
         boolean transformChanged = !Arrays.equals(part.transform, captured.transform);
         boolean blendChanged = first || part.argb != captured.argb || part.alphaBlend != captured.alphaBlend
                 || part.alphaCompare != captured.alphaCompare || part.alphaReference != captured.alphaReference
-                || part.vertexColors != mesh.triangles;
+                || part.vertexColors != mesh.triangles || part.surface != captured.surface;
         if (!first && !transformChanged && !blendChanged && part.mesh == mesh) return;
         long blend = blendChanged ? api.createBlend(blendState(captured.argb, captured.alphaBlend,
-                captured.alphaCompare, captured.alphaReference, mesh.triangles)) : part.blend;
+                captured.alphaCompare, captured.alphaReference, mesh.triangles, captured.surface)) : part.blend;
         try {
             if (first) {
                 part.instance = api.createInstance(mesh.handle, captured.transform, captured.categoryFlags, blend);
@@ -300,6 +356,7 @@ public final class EntityScene implements AutoCloseable {
             part.alphaCompare = captured.alphaCompare;
             part.alphaReference = captured.alphaReference;
             part.vertexColors = mesh.triangles;
+            part.surface = captured.surface;
         }
         if (part.mesh != mesh) {
             if (part.mesh != null) {
@@ -322,6 +379,10 @@ public final class EntityScene implements AutoCloseable {
     }
 
     static InstanceInfoBlendEXT blendState(int argb, boolean alphaBlend, int alphaCompare, int alphaReference, boolean vertexColors) {
+        return blendState(argb, alphaBlend, alphaCompare, alphaReference, vertexColors, EntitySurface.ORDINARY);
+    }
+
+    static InstanceInfoBlendEXT blendState(int argb, boolean alphaBlend, int alphaCompare, int alphaReference, boolean vertexColors, int surface) {
         InstanceInfoBlendEXT ext = alphaBlend
                 ? InstanceInfoBlendEXT.textureTimesVertexColorAlphaBlend(alphaReference)
                 : InstanceInfoBlendEXT.textureTimesVertexColor();
@@ -331,6 +392,12 @@ public final class EntityScene implements AutoCloseable {
         ext.textureColorArg2Source = vertexColors ? InstanceInfoBlendEXT.RT_TEXTURE_ARG_VERTEX_COLOR : InstanceInfoBlendEXT.RT_TEXTURE_ARG_TFACTOR;
         ext.textureAlphaArg2Source = ext.textureColorArg2Source;
         ext.tFactor = argb;
+        if (surface != EntitySurface.ORDINARY) {
+            ext.alphaBlendEnabled = 1;
+            ext.srcColorBlendFactor = ext.srcAlphaBlendFactor = surface == EntitySurface.GLINT ? 2 /* VK_BLEND_FACTOR_SRC_COLOR */
+                    : surface == EntitySurface.ADDITIVE_ALPHA ? InstanceInfoBlendEXT.VK_BLEND_FACTOR_SRC_ALPHA : 1;
+            ext.dstColorBlendFactor = ext.dstAlphaBlendFactor = 1;
+        }
         return ext;
     }
 
@@ -371,16 +438,21 @@ public final class EntityScene implements AutoCloseable {
         Iterator<EntityTextures.Asset> iterator = textures.iterator();
         while (iterator.hasNext()) {
             EntityTextures.Asset asset = iterator.next();
-            if (asset.references != 0) continue;
+            if (asset.references != 0 || !closing && asset.requested == frame) continue;
+            api.releaseTextureObservation(asset);
             if (asset.material != 0) {
                 try { api.destroyMaterial(asset.material); asset.material = 0; }
                 catch (RuntimeException | LinkageError error) { failure = collect(failure, error); }
             }
-            if (asset.material == 0 && asset.texture != 0) {
+            if (asset.emissiveMaterial != 0) {
+                try { api.destroyMaterial(asset.emissiveMaterial); asset.emissiveMaterial = 0; }
+                catch (RuntimeException | LinkageError error) { failure = collect(failure, error); }
+            }
+            if (asset.material == 0 && asset.emissiveMaterial == 0 && asset.texture != 0) {
                 try { api.destroyTexture(asset.texture); asset.texture = 0; textureBytes -= asset.bytes; }
                 catch (RuntimeException | LinkageError error) { failure = collect(failure, error); }
             }
-            if (asset.material == 0 && asset.texture == 0) iterator.remove();
+            if (asset.material == 0 && asset.emissiveMaterial == 0 && asset.texture == 0) iterator.remove();
         }
         if (failure != null) throw new IllegalStateException("Cannot release entity textures", failure);
     }
@@ -410,6 +482,7 @@ public final class EntityScene implements AutoCloseable {
     @Override public void close() {
         checkThread();
         if (closed) return;
+        closing = true;
         Throwable failure = null;
         Iterator<Owner> iterator = owners.values().iterator();
         while (iterator.hasNext()) {
@@ -426,6 +499,7 @@ public final class EntityScene implements AutoCloseable {
         try { retireUnseenMeshes(); } catch (RuntimeException | LinkageError error) { failure = collect(failure, error); }
         try { retireUnseenTextures(); } catch (RuntimeException | LinkageError error) { failure = collect(failure, error); }
         if (failure != null) throw new IllegalStateException("Cannot close entity scene", failure);
+        api.closeTextureObservations();
         closed = true;
     }
 
@@ -453,8 +527,19 @@ public final class EntityScene implements AutoCloseable {
             public boolean uploadTexture(EntityTextures.Asset asset, long budget, long hash) {
                 return reader.upload(remix, asset, budget, hash);
             }
+            public long createEmissiveMaterial(EntityTextures.Asset asset, long hash) {
+                return remix.createMaterial(EntityTextures.material(asset, hash, true));
+            }
             public void destroyMaterial(long handle) { remix.destroyMaterial(handle); }
             public void destroyTexture(long handle) { remix.destroyTexture(handle); }
+            public void flushTextures() { reader.flush(); }
+            public void releaseTextureObservation(EntityTextures.Asset asset) { reader.release(asset); }
+            public void closeTextureObservations() { reader.close(); }
+            public long textureUpdates() { return reader.updateCount(); }
+            public long texturePatches() { return reader.patchCount(); }
+            public long texturePatchBytes() { return reader.retainedBytes(); }
+            public long droppedTextureRevisions() { return reader.droppedCount(); }
+            public int dirtyTextures() { return reader.dirtyCount(); }
         };
     }
 
@@ -486,6 +571,7 @@ public final class EntityScene implements AutoCloseable {
         boolean vertexColors;
         int alphaCompare;
         int alphaReference;
+        int surface;
     }
 
     private static final class MeshAsset {
@@ -493,9 +579,10 @@ public final class EntityScene implements AutoCloseable {
         final long bytes;
         final EntityTextures.Asset texture;
         final boolean triangles;
+        final int surface;
         int references;
-        MeshAsset(long handle, long bytes, EntityTextures.Asset texture, boolean triangles) {
-            this.handle = handle; this.bytes = bytes; this.texture = texture; this.triangles = triangles;
+        MeshAsset(long handle, long bytes, EntityTextures.Asset texture, boolean triangles, int surface) {
+            this.handle = handle; this.bytes = bytes; this.texture = texture; this.triangles = triangles; this.surface = surface;
         }
     }
 
@@ -507,6 +594,8 @@ public final class EntityScene implements AutoCloseable {
         int displayList;
         long fingerprint;
         int vertexCount;
+        int surface;
+        final int[] textureTransform = new int[6];
         void set(CapturedEntityPart captured, EntityTextures.Asset texture) {
             if (captured.triangles == null) set(captured.modelPart, captured.displayList, captured.scale, texture);
             else {
@@ -516,6 +605,9 @@ public final class EntityScene implements AutoCloseable {
                 fingerprint = captured.geometryFingerprint;
                 vertexCount = captured.vertexCount;
             }
+            surface = captured.surface;
+            for (int i = 0; i < textureTransform.length; i++) textureTransform[i] = captured.transformedTexture
+                    ? Float.floatToIntBits(captured.textureTransform[i]) : 0;
         }
         void set(ModelRenderer part, int displayList, float scale, EntityTextures.Asset texture) {
             this.part = part;
@@ -524,16 +616,19 @@ public final class EntityScene implements AutoCloseable {
             this.displayList = displayList;
             fingerprint = 0;
             vertexCount = 0;
+            surface = EntitySurface.ORDINARY;
+            Arrays.fill(textureTransform, 0);
         }
         @Override public int hashCode() {
             int result = 31 * (31 * (31 * System.identityHashCode(part) + System.identityHashCode(texture)) + scale) + displayList;
-            return 31 * (31 * result + (int) (fingerprint ^ fingerprint >>> 32)) + vertexCount;
+            return 31 * (31 * (31 * (31 * result + (int) (fingerprint ^ fingerprint >>> 32)) + vertexCount) + surface) + Arrays.hashCode(textureTransform);
         }
         @Override public boolean equals(Object value) {
             if (!(value instanceof MeshKey)) return false;
             MeshKey other = (MeshKey) value;
             return part == other.part && texture == other.texture && scale == other.scale && displayList == other.displayList
-                    && fingerprint == other.fingerprint && vertexCount == other.vertexCount;
+                    && fingerprint == other.fingerprint && vertexCount == other.vertexCount && surface == other.surface
+                    && Arrays.equals(textureTransform, other.textureTransform);
         }
     }
 }

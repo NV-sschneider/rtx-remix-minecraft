@@ -85,6 +85,7 @@ public final class EntityCaptureHooks {
         Object world = capture ? Minecraft.getMinecraft().world : null;
         if (world != vboWorld || !capture) { clearVboCache(); vboWorld = world; }
         VBO_CACHE.beginFrame();
+        EntityGlintHooks.beginFrame();
         OFFSCREEN.beginFrame();
         armed = capture;
     }
@@ -112,6 +113,7 @@ public final class EntityCaptureHooks {
         managedDepth = nameDepth = 0;
         observedTriangleBuffer = null;
         FirstPersonCapture.reset();
+        EntityGlintHooks.reset();
     }
 
     /** Runs before finishFrame, with entity/item observers still armed and the world view intact. */
@@ -157,7 +159,7 @@ public final class EntityCaptureHooks {
             MANAGED_SCOPES[managedDepth++] = open;
             if (rendered instanceof Entity && ((Entity) rendered).world == Minecraft.getMinecraft().world) OFFSCREEN.observe(rendered);
             if (!open || !SCOPE.enter(rendered, false)) return;
-            if (!(rendered instanceof Entity) || rendered instanceof EntityItem
+            if (!(rendered instanceof Entity)
                     || ((Entity) rendered).world != Minecraft.getMinecraft().world || ((Entity) rendered).isDead) {
                 SCOPE.reject(); return;
             }
@@ -277,6 +279,19 @@ public final class EntityCaptureHooks {
             part.modelPart = model;
             part.displayList = displayList;
             part.scale = scale;
+            if (part.surface != EntitySurface.ORDINARY) {
+                int active = GL11.glGetInteger(GL13.GL_ACTIVE_TEXTURE);
+                try {
+                    OpenGlHelper.setActiveTexture(OpenGlHelper.defaultTexUnit);
+                    BUFFER.clear(); GL11.glGetFloat(GL11.GL_TEXTURE_MATRIX, BUFFER); VBO_TEXTURE.load(BUFFER);
+                } finally { OpenGlHelper.setActiveTexture(active); }
+                if (VBO_TEXTURE.m03 != 0 || VBO_TEXTURE.m13 != 0 || VBO_TEXTURE.m33 != 1) return;
+                float[] uv = part.textureTransform;
+                uv[0] = VBO_TEXTURE.m00; uv[1] = VBO_TEXTURE.m10; uv[2] = VBO_TEXTURE.m30;
+                uv[3] = VBO_TEXTURE.m01; uv[4] = VBO_TEXTURE.m11; uv[5] = VBO_TEXTURE.m31;
+                for (float value : uv) if (!Float.isFinite(value)) return;
+                part.transformedTexture = uv[0] != 1 || uv[1] != 0 || uv[2] != 0 || uv[3] != 0 || uv[4] != 1 || uv[5] != 0;
+            }
             PARTS.add(part);
             occurrence++;
         } catch (RuntimeException | LinkageError ex) { fail(ex); }
@@ -319,8 +334,9 @@ public final class EntityCaptureHooks {
     public static void captureEntityBuffer(Object completed) {
         Object owner = SCOPE.owner();
         if (!armed || failure != null || nameDepth != 0 || !(owner instanceof Entity || owner instanceof TileEntity)
-                || owner instanceof EntityLivingBase && !FirstPersonCapture.hand()
-                || owner instanceof EntityItem || texture == null || ItemCaptureHooks.modelScopeOpen()) return;
+                || owner instanceof EntityLivingBase && !FirstPersonCapture.hand() && !EntityGlintHooks.active()
+                || owner instanceof EntityItem && !EntityGlintHooks.active()
+                || texture == null || ItemCaptureHooks.ownsModelBuffer()) return;
         if (completed == observedTriangleBuffer) { observedTriangleBuffer = null; return; }
         try {
             BufferBuilder buffer = (BufferBuilder) completed;
@@ -346,11 +362,19 @@ public final class EntityCaptureHooks {
                 BUFFER.clear(); GL11.glGetFloat(GL11.GL_TEXTURE_MATRIX, BUFFER); VBO_TEXTURE.load(BUFFER);
             } finally { OpenGlHelper.setActiveTexture(active); }
             int start = TRIANGLES.count();
-            if (!TRIANGLES.appendPrimitives(buffer.getByteBuffer(), buffer.getVertexCount(), mode == GL11.GL_QUADS ? 4 : 3,
+            if (part.surface == EntitySurface.GLINT && EntityGlintHooks.hasItemQuads()) {
+                if (mode != GL11.GL_QUADS || !EntityGlintHooks.append(TRIANGLES, buffer, format.getSize(),
+                        format.getUvOffsetById(0), format.hasColor() ? format.getColorOffset() : -1,
+                        format.hasNormal() ? format.getNormalOffset() : -1, argb, VBO_TEXTURE, part.alphaReference)) return;
+            } else if (!TRIANGLES.appendPrimitives(buffer.getByteBuffer(), buffer.getVertexCount(), mode == GL11.GL_QUADS ? 4 : 3,
                     format.getSize(), format.getUvOffsetById(0), format.hasColor() ? format.getColorOffset() : -1,
-                    format.hasNormal() ? format.getNormalOffset() : -1, argb, VBO_TEXTURE)) {
+                    format.hasNormal() ? format.getNormalOffset() : -1, argb, VBO_TEXTURE,
+                    part.surface == EntitySurface.GLINT ? EntitySurface.ITEM_GLINT_SHELL_OFFSET : 0)) {
                 rejectTriangles(); return;
             }
+            if (TRIANGLES.count() == start) return;
+            part.categoryFlags = EntitySurface.categories(FirstPersonCapture.category(), part.surface,
+                    part.surface == EntitySurface.GLINT);
             part.triangles = TRIANGLES;
             part.triangleGroup = BUFFER_GROUPS[occurrence];
             part.firstVertex = start;
@@ -437,7 +461,9 @@ public final class EntityCaptureHooks {
     }
 
     /** Called by reload/release, not the per-frame discard that keeps reusable VBO snapshots. */
-    public static void clearVboCache() { VBO_CACHE.clear(); vboReadback = null; vboWorld = null; OFFSCREEN.release(!armed); }
+    public static void clearVboCache() {
+        VBO_CACHE.clear(); vboReadback = null; vboWorld = null; OFFSCREEN.release(!armed); EntityGlintHooks.clearCache();
+    }
     public static long vboUploadSnapshots() { return vboUploads; }
     public static long vboReadbackCount() { return vboReadbacks; }
     public static long vboDrawCount() { return vboDraws; }
@@ -463,13 +489,12 @@ public final class EntityCaptureHooks {
     }
 
     private static CapturedEntityPart captureState(boolean vertexColors) {
-        if (nameDepth != 0) return null;
-        // Player skins enable ordinary alpha blending even for their solid body.
-        // Additive eyes, glint and faded invisible models need separate semantics.
+        if (nameDepth != 0 || SCOPE.owner() instanceof EntityItem && !EntityGlintHooks.active()) return null;
         boolean alphaBlend = GL11.glIsEnabled(GL11.GL_BLEND);
-        if (alphaBlend && (GL11.glGetInteger(GL11.GL_BLEND_SRC) != GL11.GL_SRC_ALPHA
-                || GL11.glGetInteger(GL11.GL_BLEND_DST) != GL11.GL_ONE_MINUS_SRC_ALPHA
-                || GL11.glGetInteger(GL14.GL_BLEND_EQUATION) != GL14.GL_FUNC_ADD)) { return null; }
+        int surface = EntitySurface.classify(alphaBlend, alphaBlend ? GL11.glGetInteger(GL11.GL_BLEND_SRC) : 0,
+                alphaBlend ? GL11.glGetInteger(GL11.GL_BLEND_DST) : 0,
+                alphaBlend ? GL11.glGetInteger(GL14.GL_BLEND_EQUATION) : 0, EntityGlintHooks.active());
+        if (surface < 0) return null;
         BUFFER.clear();
         GL11.glGetFloat(GL11.GL_CURRENT_COLOR, BUFFER);
         if (!vertexColors && BUFFER.get(3) < 0.999f) { return null; }
@@ -493,7 +518,8 @@ public final class EntityCaptureHooks {
         part.clear();
         part.owner = SCOPE.owner();
         part.occurrence = occurrence;
-        part.categoryFlags = FirstPersonCapture.category();
+        part.categoryFlags = EntitySurface.categories(FirstPersonCapture.category(), surface, false);
+        part.surface = surface;
         part.textureId = textureId;
         part.textureIdentity = texture;
         part.argb = argb;

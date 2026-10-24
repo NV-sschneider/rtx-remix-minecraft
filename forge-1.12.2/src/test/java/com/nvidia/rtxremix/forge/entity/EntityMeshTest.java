@@ -81,4 +81,27 @@ public class EntityMeshTest {
         assertEquals(0, surface.vertexBuffer.position());
         assertEquals(24 * 64, surface.vertexBuffer.remaining());
     }
+
+    @Test public void observedArmorTextureMatrixChangesOnlyUvsAndParticipatesInCacheIdentity() {
+        ModelRenderer model = box(false); EntityMesh mesh = new EntityMesh();
+        assertTrue(mesh.prepare(model, 0.0625f, 1));
+        ByteBuffer source = mesh.info(1).surfaces[0].vertexBuffer;
+        byte[] baseline = new byte[source.remaining()]; source.duplicate().get(baseline);
+        ByteBuffer before = ByteBuffer.wrap(baseline).order(source.order());
+        float[] uv = {0.3f, 0.1f, 1.25f, -0.1f, 0.3f, 0.75f};
+        assertTrue(mesh.prepare(model, 0.0625f, 1, uv)); ByteBuffer after = mesh.info(2).surfaces[0].vertexBuffer;
+        for (int vertex = 0; vertex < 24; vertex++) {
+            int offset = vertex * 64;
+            float u = before.getFloat(offset + 24), v = before.getFloat(offset + 28);
+            assertEquals(uv[0] * u + uv[1] * v + uv[2], after.getFloat(offset + 24), 0);
+            assertEquals(uv[3] * u + uv[4] * v + uv[5], after.getFloat(offset + 28), 0);
+            for (int i = 0; i < 64; i++) if (i < 24 || i >= 32) assertEquals(before.get(offset + i), after.get(offset + i));
+        }
+        CapturedEntityPart part = new CapturedEntityPart(); part.modelPart = model; part.scale = 0.0625f;
+        part.surface = EntitySurface.GLINT; part.transformedTexture = true; System.arraycopy(uv, 0, part.textureTransform, 0, 6);
+        EntityScene.MeshKey first = new EntityScene.MeshKey(), next = new EntityScene.MeshKey();
+        first.set(part, null); next.set(part, null); assertEquals(first, next);
+        part.textureTransform[2] += 0.05f; next.set(part, null); assertNotEquals(first, next);
+        assertTrue(TriangleUploadBudget.dynamic(part));
+    }
 }

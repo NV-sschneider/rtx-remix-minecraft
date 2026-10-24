@@ -46,14 +46,28 @@ final class EntityTriangles {
     /** Converts completed fixed-function quads or triangles into the shared bounded arena. */
     boolean appendPrimitives(ByteBuffer source, int vertexCount, int primitiveSize, int stride,
             int uvOffset, int colorOffset, int normalOffset, int argb, Matrix4f texture) {
+        return appendPrimitives(source, vertexCount, primitiveSize, stride,
+                uvOffset, colorOffset, normalOffset, argb, texture, 0);
+    }
+
+    /** Separates an explicitly layered item surface from its coincident base in local model units. */
+    boolean appendPrimitives(ByteBuffer source, int vertexCount, int primitiveSize, int stride,
+            int uvOffset, int colorOffset, int normalOffset, int argb, Matrix4f texture, float shellOffset) {
         return appendPrimitivesRange(source, 0, vertexCount, primitiveSize, stride,
-                uvOffset, colorOffset, normalOffset, argb, texture);
+                uvOffset, colorOffset, normalOffset, argb, texture, shellOffset);
     }
 
     /** Copies one completed owner range from a shared batch without slicing or changing its cursor. */
     boolean appendPrimitivesRange(ByteBuffer source, int firstVertex, int vertexCount, int primitiveSize, int stride,
             int uvOffset, int colorOffset, int normalOffset, int argb, Matrix4f texture) {
+        return appendPrimitivesRange(source, firstVertex, vertexCount, primitiveSize, stride,
+                uvOffset, colorOffset, normalOffset, argb, texture, 0);
+    }
+
+    private boolean appendPrimitivesRange(ByteBuffer source, int firstVertex, int vertexCount, int primitiveSize, int stride,
+            int uvOffset, int colorOffset, int normalOffset, int argb, Matrix4f texture, float shellOffset) {
         if (primitiveSize != 3 && primitiveSize != 4 || firstVertex < 0 || firstVertex % primitiveSize != 0
+                || !Float.isFinite(shellOffset)
                 || vertexCount <= 0 || vertexCount % primitiveSize != 0
                 || stride < 12 || uvOffset < 12 || uvOffset + 8 > stride
                 || colorOffset != -1 && (colorOffset < 12 || colorOffset + 4 > stride)
@@ -91,8 +105,15 @@ final class EntityTriangles {
                     vertices.position(checkpoint);
                     return false;
                 }
+                nx /= length; ny /= length; nz /= length;
+                if (shellOffset != 0) {
+                    x += nx * shellOffset; y += ny * shellOffset; z += nz * shellOffset;
+                    if (!Float.isFinite(x) || !Float.isFinite(y) || !Float.isFinite(z)) {
+                        vertices.position(checkpoint); return false;
+                    }
+                }
                 int color = base + colorOffset;
-                vertices.putFloat(x).putFloat(y).putFloat(z).putFloat(nx / length).putFloat(ny / length).putFloat(nz / length);
+                vertices.putFloat(x).putFloat(y).putFloat(z).putFloat(nx).putFloat(ny).putFloat(nz);
                 vertices.putFloat(u).putFloat(v).putInt(colorOffset < 0 ? argb : (source.get(color + 3) & 255) << 24
                         | (source.get(color) & 255) << 16 | (source.get(color + 1) & 255) << 8 | source.get(color + 2) & 255);
                 for (int pad = 0; pad < 7; pad++) vertices.putInt(0);

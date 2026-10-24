@@ -6,6 +6,7 @@ package com.nvidia.rtxremix.forge.item;
 
 import com.nvidia.rtxremix.InstanceCategoryBit;
 import com.nvidia.rtxremix.forge.entity.EntityCaptureHooks;
+import com.nvidia.rtxremix.forge.entity.EntityGlintHooks;
 import java.lang.reflect.Field;
 import java.nio.FloatBuffer;
 import java.util.ArrayList;
@@ -75,7 +76,9 @@ public final class ItemCaptureHooks {
     private static void clearScope() { owner = null; active = null; sprite = null; entityDepth = modelDepth = 0; }
 
     public static void beginFirstPerson() { if (armed) occurrence = 0; }
-    public static boolean modelScopeOpen() { return armed && modelDepth != 0; }
+    /** A RenderItem scope can belong to an unsupported holder, such as a snowball.
+     * Only an accepted item snapshot owns the buffer and suppresses entity capture. */
+    public static boolean ownsModelBuffer() { return armed && modelDepth != 0 && active != null; }
     public static void beginSupplementary() {
         supplementaryStart = PARTS.size(); supplementaryVertices = GEOMETRY.count(); supplementaryLights = HeldItemLights.checkpoint();
     }
@@ -168,6 +171,7 @@ public final class ItemCaptureHooks {
 
     /** The tint operand is observed after ItemColors; the emitted buffer contains its final result. */
     public static void beforeQuad(Object quad, int tint, Object buffer) {
+        EntityGlintHooks.beforeQuad(quad, buffer);
         if (!capturing()) return;
         try {
             quadStart = ((BufferBuilder) buffer).getVertexCount();
@@ -176,6 +180,7 @@ public final class ItemCaptureHooks {
         } catch (RuntimeException | LinkageError ex) { fail(ex); }
     }
     public static void afterQuad(Object drawnBuffer) {
+        EntityGlintHooks.afterQuad(drawnBuffer);
         if (!capturing() || sprite == null) return;
         try {
             BufferBuilder buffer = (BufferBuilder) drawnBuffer;

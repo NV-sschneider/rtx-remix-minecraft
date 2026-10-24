@@ -16,11 +16,13 @@ final class TriangleUploadBudget {
 
     int beginFrame(List<CapturedEntityPart> parts, int count) {
         int triangles = 0;
-        for (int i = 0; i < count; i++) if (parts.get(i).triangles != null) triangles++;
+        for (int i = 0; i < count; i++) if (dynamic(parts.get(i))) triangles++;
         int ordinal = beginFrame(triangles);
-        for (int i = 0; i < count; i++) if (parts.get(i).triangles != null && ordinal-- == 0) return i;
+        for (int i = 0; i < count; i++) if (dynamic(parts.get(i)) && ordinal-- == 0) return i;
         return 0;
     }
+
+    static boolean dynamic(CapturedEntityPart part) { return part.triangles != null || part.transformedTexture; }
 
     int beginFrame(int partCount) {
         uploads = 0;

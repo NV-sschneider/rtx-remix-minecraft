@@ -19,6 +19,9 @@ public final class CapturedEntityPart {
     long geometryFingerprint;
     public int occurrence;
     public int categoryFlags;
+    int surface;
+    boolean transformedTexture;
+    final float[] textureTransform = new float[6];
     public float scale;
     public int textureId;
     public Object textureIdentity;
@@ -35,5 +38,7 @@ public final class CapturedEntityPart {
         triangleGroup = null;
         textureIdentity = null;
         categoryFlags = 0;
+        surface = EntitySurface.ORDINARY;
+        transformedTexture = false;
     }
 }

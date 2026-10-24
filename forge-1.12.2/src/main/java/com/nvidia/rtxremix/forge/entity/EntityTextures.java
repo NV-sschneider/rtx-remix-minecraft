@@ -8,6 +8,7 @@ import com.nvidia.rtxremix.MaterialInfo;
 import com.nvidia.rtxremix.MaterialInfoOpaqueEXT;
 import com.nvidia.rtxremix.RemixAPI;
 import com.nvidia.rtxremix.TextureFromMemoryInfo;
+import com.nvidia.rtxremix.forge.texture.TextureUpdates;
 import java.nio.ByteBuffer;
 import net.minecraft.client.renderer.GlStateManager;
 import net.minecraft.client.renderer.OpenGlHelper;
@@ -17,12 +18,13 @@ import org.lwjgl.opengl.GL14;
 import org.lwjgl.opengl.GL15;
 import org.lwjgl.opengl.GL21;
 
-/** Static entity texture snapshots, read with Minecraft's GL state restored exactly. */
+/** Initial entity snapshots plus successful CPU upload revisions, preserving Minecraft's GL state. */
 final class EntityTextures {
     private static final int[] PACK_NAMES = {GL11.GL_PACK_ALIGNMENT, GL11.GL_PACK_ROW_LENGTH,
             GL11.GL_PACK_SKIP_ROWS, GL11.GL_PACK_SKIP_PIXELS};
     private final int[] packValues = new int[PACK_NAMES.length];
     private ByteBuffer pixels = EntityMesh.direct(64 * 64 * 4);
+    private TextureUpdates updates;
 
     boolean upload(RemixAPI api, Asset asset, long byteBudget, long hash) {
         int oldActive = GL11.glGetInteger(GL13.GL_ACTIVE_TEXTURE);
@@ -47,15 +49,12 @@ final class EntityTextures {
             asset.texture = api.createTextureFromMemory(TextureFromMemoryInfo.builder().hash(hash)
                     .pixelData(pixels).size(width, height).build());
             asset.bytes = bytes;
-                MaterialInfo material = new MaterialInfo(hash + 1);
-                material.albedoTexture = asset.texture;
-                material.filterMode = 0;
-                material.wrapModeU = wrapMode(GL11.glGetTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_WRAP_S));
-                material.wrapModeV = wrapMode(GL11.glGetTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_WRAP_T));
-                material.opaqueExt = MaterialInfoOpaqueEXT.builder().albedoConstant(1, 1, 1)
-                        .roughnessConstant(1).metallicConstant(0).useDrawCallAlphaState(true).build();
-                asset.material = api.createMaterial(material);
-                return true;
+            asset.wrapU = wrapMode(GL11.glGetTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_WRAP_S));
+            asset.wrapV = wrapMode(GL11.glGetTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_WRAP_T));
+            asset.material = api.createMaterial(material(asset, hash + 1, false));
+            if (updates == null) updates = new TextureUpdates(api);
+            asset.revision = updates.subscribe(asset.textureId, asset.texture, width, height);
+            return true;
         } finally {
             GL15.glBindBuffer(GL21.GL_PIXEL_PACK_BUFFER, oldPackBuffer);
             for (int i = 0; i < PACK_NAMES.length; i++) GL11.glPixelStorei(PACK_NAMES[i], packValues[i]);
@@ -63,6 +62,25 @@ final class EntityTextures {
             GlStateManager.setActiveTexture(oldActive);
         }
     }
+
+    static MaterialInfo material(Asset asset, long hash, boolean emissive) {
+        MaterialInfo material = new MaterialInfo(hash);
+        material.albedoTexture = asset.texture;
+        material.filterMode = 0; material.wrapModeU = asset.wrapU; material.wrapModeV = asset.wrapV;
+        material.opaqueExt = MaterialInfoOpaqueEXT.builder().albedoConstant(1, 1, 1)
+                .roughnessConstant(1).metallicConstant(0).useDrawCallAlphaState(true).build();
+        if (emissive) { material.emissiveTexture = asset.texture; material.emissiveIntensity = 100; }
+        return material;
+    }
+
+    void flush() { if (updates != null) updates.flush(); }
+    void release(Asset asset) { if (updates != null && asset.revision != null) updates.unsubscribe(asset.revision); }
+    void close() { if (updates != null) { updates.close(); updates = null; } }
+    long updateCount() { return updates == null ? 0 : updates.updateCount(); }
+    long patchCount() { return updates == null ? 0 : updates.patchCount(); }
+    long retainedBytes() { return updates == null ? 0 : updates.retainedBytes(); }
+    long droppedCount() { return updates == null ? 0 : updates.droppedCount(); }
+    int dirtyCount() { return updates == null ? 0 : updates.dirtyCount(); }
 
     static byte wrapMode(int glMode) {
         return glMode == GL11.GL_REPEAT ? MaterialInfo.WRAP_MODE_REPEAT
@@ -74,7 +92,11 @@ final class EntityTextures {
         final int textureId;
         long texture;
         long material;
+        long emissiveMaterial;
+        byte wrapU, wrapV;
         long bytes;
+        long requested;
+        TextureUpdates.Binding revision;
         int references;
         Asset(Object identity, int textureId, long texture, long material, long bytes) {
             this.identity = identity;

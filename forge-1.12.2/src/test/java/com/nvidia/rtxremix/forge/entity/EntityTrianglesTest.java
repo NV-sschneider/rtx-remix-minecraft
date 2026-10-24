@@ -17,6 +17,33 @@ import org.lwjgl.util.vector.Matrix4f;
 import static org.junit.Assert.*;
 
 public class EntityTrianglesTest {
+    @Test public void itemGlintShellSeparatesBothFacesWithoutChangingUvsColorsNormalsOrSource() {
+        ByteBuffer source = source(6);
+        for (int vertex = 3; vertex < 6; vertex++) source.put(vertex * 28 + 26, (byte) -127);
+        source.position(3).mark().position(7);
+        Matrix4f texture = new Matrix4f(); texture.m30 = 0.125f; texture.m31 = -0.25f;
+        EntityTriangles triangles = new EntityTriangles();
+        assertTrue(triangles.appendPrimitives(source, 6, 3, 28, 12, 20, 24, -1, texture));
+        long baseHash = triangles.fingerprint();
+        ByteBuffer base = triangles.info(0, 6, 1, 2).surfaces[0].vertexBuffer;
+        assertTrue(triangles.appendPrimitives(source, 6, 3, 28, 12, 20, 24, -1, texture, EntitySurface.ITEM_GLINT_SHELL_OFFSET));
+        assertNotEquals(baseHash, triangles.fingerprint());
+        ByteBuffer shell = triangles.info(6, 6, 1, 3).surfaces[0].vertexBuffer;
+        for (int vertex = 0; vertex < 6; vertex++) {
+            int offset = vertex * 64;
+            assertEquals(base.getFloat(offset), shell.getFloat(offset), 0);
+            assertEquals(base.getFloat(offset + 4), shell.getFloat(offset + 4), 0);
+            assertEquals((vertex < 3 ? 1 : -1) * EntitySurface.ITEM_GLINT_SHELL_OFFSET, shell.getFloat(offset + 8), 0);
+            for (int attribute = 12; attribute < 64; attribute += 4) {
+                assertEquals(base.getInt(offset + attribute), shell.getInt(offset + attribute));
+            }
+            assertEquals(0, source.getFloat(vertex * 28 + 8), 0);
+        }
+        assertEquals(7, source.position()); source.reset(); assertEquals(3, source.position());
+        assertFalse(triangles.appendPrimitives(source, 6, 3, 28, 12, 20, 24, -1, texture, Float.NaN));
+        assertEquals(12, triangles.count());
+    }
+
     @Test public void projectileQuadsPreservePoseUvsAndCurrentColorWithoutVertexNormals() {
         ByteBuffer source = EntityMesh.direct(4 * 20);
         float[] xy = {0, 0, 1, 0, 1, 1, 0, 1};

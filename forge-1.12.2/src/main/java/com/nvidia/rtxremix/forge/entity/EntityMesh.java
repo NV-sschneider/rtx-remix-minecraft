@@ -36,7 +36,12 @@ final class EntityMesh {
 
     /** The returned buffers remain valid only until the next prepare; submit them synchronously. */
     boolean prepare(ModelRenderer part, float scale, long material) {
+        return prepare(part, scale, material, null);
+    }
+
+    boolean prepare(ModelRenderer part, float scale, long material, float[] texture) {
         if (!Float.isFinite(scale) || scale == 0) return false;
+        if (texture != null) for (float value : texture) if (!Float.isFinite(value)) return false;
         if (part.cubeList.size() > MAX_QUADS) return capacityExceeded();
         int quadCount = 0;
         for (ModelBox box : part.cubeList) {
@@ -58,7 +63,7 @@ final class EntityMesh {
             if (!filter.supported) continue;
             TexturedQuad[] faces = quads(box);
             for (int face = 0; face < faces.length; face++) {
-                if (filter.visible(box, face) && supported(faces[face])) append(faces[face], scale);
+                if (filter.visible(box, face) && supported(faces[face])) append(faces[face], scale, texture);
             }
         }
         if (vertices.position() == 0) return false;
@@ -96,7 +101,7 @@ final class EntityMesh {
         return true;
     }
 
-    private void append(TexturedQuad quad, float scale) {
+    private void append(TexturedQuad quad, float scale, float[] texture) {
         PositionTextureVertex[] face = quad.vertexPositions;
         double ax = face[1].vector3D.x - face[0].vector3D.x;
         double ay = face[1].vector3D.y - face[0].vector3D.y;
@@ -122,7 +127,9 @@ final class EntityMesh {
             vertices.putFloat((float) (vertex.vector3D.y * scale));
             vertices.putFloat((float) (vertex.vector3D.z * scale));
             vertices.putFloat((float) nx).putFloat((float) ny).putFloat((float) nz);
-            vertices.putFloat(vertex.texturePositionX).putFloat(vertex.texturePositionY);
+            float u = vertex.texturePositionX, v = vertex.texturePositionY;
+            vertices.putFloat(texture == null ? u : texture[0] * u + texture[1] * v + texture[2]);
+            vertices.putFloat(texture == null ? v : texture[3] * u + texture[4] * v + texture[5]);
             vertices.putInt(0xFFFFFFFF);
             for (int pad = 0; pad < 7; pad++) vertices.putInt(0);
         }
