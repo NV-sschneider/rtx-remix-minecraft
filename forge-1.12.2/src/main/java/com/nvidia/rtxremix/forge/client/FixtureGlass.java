@@ -40,11 +40,11 @@ final class FixtureGlass implements AutoCloseable {
     private final double returnX, returnY, returnZ;
     private final float returnYaw, returnPitch;
     private final long[] removalRevisions;
+    private final PublicationSettlement settlement = new PublicationSettlement();
     private Phase phase = Phase.ARRIVE;
     private Future<?> action;
-    private long since = System.nanoTime(), lastProgress = since, readyFrame = -1;
+    private long since = System.nanoTime(), lastProgress = since;
     private long reloadBaseline, clearBaseline, stainedBaseline;
-    private long lastClear = -1, lastStained = -1;
     private boolean angled, closed;
 
     FixtureGlass(Minecraft mc, ClientEvents events, IntegratedServer server, WorldServer world,
@@ -203,12 +203,8 @@ final class FixtureGlass implements AutoCloseable {
     private boolean sectionReady(BlockPos section) { return events.terrainSectionReady(section.getX(), section.getY(), section.getZ()); }
     private long revision(BlockPos section) { return events.terrainSectionRevision(section.getX(), section.getY(), section.getZ()); }
     private boolean settled(boolean ready) {
-        long clear = events.terrainClearGlassVertexCount(), stained = events.terrainStainedGlassVertexCount();
-        if (!ready || clear != lastClear || stained != lastStained) readyFrame = -1;
-        lastClear = clear; lastStained = stained;
-        if (!ready) return false;
-        if (readyFrame < 0) readyFrame = events.renderedFrames();
-        return events.renderedFrames() - readyFrame >= SETTLE_FRAMES;
+        return settlement.update(ready, events.terrainPendingSectionCount(), events.terrainRetirementCount(),
+                events.terrainClearGlassVertexCount(), events.terrainStainedGlassVertexCount(), events.renderedFrames());
     }
     private boolean complete() throws Exception { if (!action.isDone()) return false; action.get(); return true; }
     private double cameraX(boolean side) { return layout.x + (side ? 6.5 : 0.5); }
@@ -236,14 +232,32 @@ final class FixtureGlass implements AutoCloseable {
         if (!server.isCallingFromMinecraftThread() || !saveName.equals(server.getFolderName()) || server.getWorld(0) != world)
             throw new IllegalStateException("Glass fixture no longer owns the server world");
     }
-    private void transition(Phase next) { phase = next; since = lastProgress = System.nanoTime(); readyFrame = -1; log("PHASE"); }
+    private void transition(Phase next) { phase = next; since = lastProgress = System.nanoTime(); settlement.reset(); log("PHASE"); }
     private void capture(String name) throws Exception { output.log("GLASS_CAPTURE", status() + " file=" + output.capture(name, output.image())); }
     private void log(String event) { output.log("GLASS_" + event, status()); }
     String status() {
         return "glassPhase=" + phase + " clearVertices=" + events.terrainClearGlassVertexCount()
                 + " stainedVertices=" + events.terrainStainedGlassVertexCount() + " clearBaseline=" + clearBaseline
                 + " stainedBaseline=" + stainedBaseline + " pendingSections=" + events.terrainPendingSectionCount()
+                + " retirement=" + events.terrainRetirementCount()
                 + " ready=" + sceneReady() + " removed=" + removed() + " reloads=" + events.textureReloadCount();
+    }
+
+    /** Global glass totals are comparable only after unrelated terrain publication finishes. */
+    static final class PublicationSettlement {
+        private long readyFrame = -1, lastClear = -1, lastStained = -1;
+
+        boolean update(boolean ready, int pending, int retiring, long clear, long stained, long frame) {
+            boolean complete = ready && pending == 0 && retiring == 0;
+            if (!complete || clear != lastClear || stained != lastStained) readyFrame = -1;
+            lastClear = clear;
+            lastStained = stained;
+            if (!complete) return false;
+            if (readyFrame < 0) readyFrame = frame;
+            return frame - readyFrame >= SETTLE_FRAMES;
+        }
+
+        void reset() { readyFrame = -1; }
     }
 
     /** Parent cleanup restores time/weather after this fixture's queued pose restoration. */
