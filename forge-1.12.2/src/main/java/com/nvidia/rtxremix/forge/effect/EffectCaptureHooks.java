@@ -174,8 +174,7 @@ public final class EffectCaptureHooks {
         }
         int accepted;
         try {
-            accepted = DECODER.append(buffer.getByteBuffer(), vertices, mode, format.getSize(), format.getUvOffsetById(0),
-                    format.hasColor() ? format.getColorOffset() : -1, color, RELATIVE, MAX_QUADS - quads, batch);
+            accepted = FinishedEffectBuffer.append(DECODER, buffer, color, RELATIVE, MAX_QUADS - quads, batch);
         } catch (IllegalArgumentException unsupported) { omit(attempted); return; }
         quads += accepted;
         if (accepted != attempted) { skippedBatches++; skippedQuads += attempted - accepted; }
