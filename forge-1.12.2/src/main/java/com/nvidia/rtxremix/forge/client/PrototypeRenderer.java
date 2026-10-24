@@ -18,6 +18,10 @@ import com.nvidia.rtxremix.forge.effect.EffectScene;
 import com.nvidia.rtxremix.forge.interop.LegacyGlInterop;
 import com.nvidia.rtxremix.forge.sky.SkyScene;
 import com.nvidia.rtxremix.forge.terrain.TerrainCapture;
+import com.nvidia.rtxremix.forge.runtime.ForgeRuntime;
+import com.nvidia.rtxremix.forge.cloud.CapturedCloudBatch;
+import com.nvidia.rtxremix.forge.cloud.CloudCaptureHooks;
+import com.nvidia.rtxremix.forge.cloud.CloudScene;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.WorldClient;
 
@@ -36,6 +40,7 @@ final class PrototypeRenderer {
     private EntityScene entities;
     private ItemScene items;
     private EffectScene effects;
+    private CloudScene clouds;
     private SkyScene sky;
     private CameraMedium medium;
     private WorldClient world;
@@ -49,7 +54,8 @@ final class PrototypeRenderer {
     PrototypeRenderer(Minecraft mc) { this.mc = mc; }
 
     void render(float partialTicks, List<CapturedEntityPart> capturedParts,
-            List<CapturedItem> capturedItems, List<CapturedEffectBatch> capturedEffects) {
+            List<CapturedItem> capturedItems, List<CapturedEffectBatch> capturedEffects,
+            List<CapturedCloudBatch> capturedClouds) {
         if (windowClosing) { return; }
         if (api == null) { initialize(); }
         if (!initialized) { throw new IllegalStateException("Native initialization failed; restart Minecraft before retrying."); }
@@ -63,6 +69,7 @@ final class PrototypeRenderer {
             entities = new EntityScene(api);
             items = new ItemScene(api);
             effects = new EffectScene(api);
+            clouds = new CloudScene(api);
             sky = new SkyScene(api);
             medium = new CameraMedium(api);
         }
@@ -72,6 +79,7 @@ final class PrototypeRenderer {
         effects.sync(capturedEffects, terrain.getAtlasTexture());
         CameraInfo captured = camera.capture(mc, partialTicks);
         api.setupCamera(captured);
+        clouds.sync(capturedClouds);
         medium.update(world, captured.parameterizedExt.position);
         terrain.updateLights(captured.parameterizedExt.position);
         sky.update(world, partialTicks, captured.parameterizedExt.position);
@@ -94,8 +102,7 @@ final class PrototypeRenderer {
     }
 
     private void initialize() {
-        File runtime = new File(System.getProperty("rlcraftremix.runtime",
-                new File(mc.gameDir, "remix-sdk").getAbsolutePath()), "d3d9.dll");
+        File runtime = ForgeRuntime.prepare(mc.gameDir);
         RemixAPI.redactCommandLineOptions(runtime.getAbsolutePath(), Arrays.asList(
                 "--username", "--accessToken", "--uuid", "--xuid", "--clientId"));
         api = RemixAPI.load(runtime.getAbsolutePath());
@@ -126,6 +133,10 @@ final class PrototypeRenderer {
         if (sky != null) {
             sky.close();
             sky = new SkyScene(api);
+        }
+        if (clouds != null) {
+            clouds.close();
+            clouds = new CloudScene(api);
         }
         textureReloads++;
     }
@@ -163,6 +174,22 @@ final class PrototypeRenderer {
     long effectTextureSnapshotCount() { return effects == null ? 0 : effects.textureSnapshotCount(); }
     int skyResourceCount() { return sky == null ? 0 : sky.resourceCount(); }
     long skyTextureUpdates() { return sky == null ? 0 : sky.textureUpdates(); }
+    int cloudTriangles() { return clouds == null ? 0 : clouds.cloudTriangles(); }
+    int customSkyTriangles() { return clouds == null ? 0 : clouds.customSkyTriangles(); }
+    int cloudResourceCount() { return clouds == null ? 0 : clouds.resourceCount(); }
+    long cloudMeshUploads() { return clouds == null ? 0 : clouds.meshUploadCount(); }
+    long cloudRetainedBytes() { return clouds == null ? 0 : clouds.retainedBytes(); }
+    long cloudSkippedDraws() { return clouds == null ? 0 : clouds.skippedDrawCount(); }
+    int cloudMeshCount() { return clouds == null ? 0 : clouds.cloudMeshCount(); }
+    long cloudGeometryHash() { return clouds == null ? 0 : clouds.geometryHash(); }
+    long cloudPlacementHash() { return clouds == null ? 0 : clouds.placementHash(); }
+    long cloudTextureSnapshots() { return clouds == null ? 0 : clouds.textureSnapshotCount(); }
+    boolean customSkyHandlerActive() { return clouds != null && clouds.customSkyHandlerActive(); }
+    boolean customSkyUncaptured() { return clouds != null && clouds.customSkyUncaptured(); }
+    int pbrSpriteCount() { return terrain == null ? 0 : terrain.getPbrSpriteCount(); }
+    int pbrTextureCount() { return terrain == null ? 0 : terrain.getPbrTextureCount(); }
+    long pbrUpdateCount() { return terrain == null ? 0 : terrain.getPbrUpdateCount(); }
+    int pbrSkippedCount() { return terrain == null ? 0 : terrain.getPbrSkippedCount(); }
     int terrainRadius() { return terrain == null ? 0 : terrain.getRadius(); }
     int terrainColumnCount() { return terrain == null ? 0 : terrain.getColumnCount(); }
     int terrainCapturedColumnCount() { return terrain == null ? 0 : terrain.getCapturedColumnCount(); }
@@ -206,6 +233,9 @@ final class PrototypeRenderer {
                 + "; tile parts=" + capturedTileParts()
                 + "; items=" + capturedItemCount() + "; particle quads=" + particleQuads()
                 + "; weather quads=" + weatherQuads()
+                + "; cloud triangles=" + cloudTriangles() + "; custom sky triangles=" + customSkyTriangles()
+                + (customSkyUncaptured() ? "; custom sky handler has no supported draws" : "")
+                + "; PBR sprites=" + pbrSpriteCount() + "; PBR maps=" + pbrTextureCount()
                 + "; omitted effect quads=" + effectSkippedQuads()
                 + "; underwater=" + cameraMediumUnderwater()
                 + "; glass vertices=" + terrainClearGlassVertexCount() + "/" + terrainStainedGlassVertexCount()
@@ -217,6 +247,7 @@ final class PrototypeRenderer {
         EntityCaptureHooks.discard();
         ItemCaptureHooks.discard();
         EffectCaptureHooks.discard();
+        CloudCaptureHooks.discard();
         releaseScene();
     }
 
@@ -242,6 +273,8 @@ final class PrototypeRenderer {
         try { if (entities != null) { entities.close(); entities = null; } }
         catch (RuntimeException | LinkageError ex) { failure = append(failure, ex); }
         try { if (sky != null) { sky.close(); sky = null; } }
+        catch (RuntimeException | LinkageError ex) { failure = append(failure, ex); }
+        try { if (clouds != null) { clouds.close(); clouds = null; } }
         catch (RuntimeException | LinkageError ex) { failure = append(failure, ex); }
         if (failure == null) world = null;
         rethrow(failure);

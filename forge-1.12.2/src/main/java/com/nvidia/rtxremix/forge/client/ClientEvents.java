@@ -8,6 +8,7 @@ import com.nvidia.rtxremix.forge.RemixForgeMod;
 import com.nvidia.rtxremix.forge.entity.EntityCaptureHooks;
 import com.nvidia.rtxremix.forge.item.ItemCaptureHooks;
 import com.nvidia.rtxremix.forge.effect.EffectCaptureHooks;
+import com.nvidia.rtxremix.forge.cloud.CloudCaptureHooks;
 import java.util.UUID;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.resources.IReloadableResourceManager;
@@ -68,6 +69,7 @@ public final class ClientEvents {
             EntityCaptureHooks.beginFrame(enabled && mc.world != null);
             ItemCaptureHooks.beginFrame(enabled && mc.world != null);
             EffectCaptureHooks.beginFrame(enabled && mc.world != null);
+            CloudCaptureHooks.beginFrame(enabled && mc.world != null);
         } else {
             discardCaptures();
         }
@@ -85,8 +87,9 @@ public final class ClientEvents {
                 renderer.refreshTextures();
                 textureReloadRequested = false;
             }
+            EntityCaptureHooks.captureOffscreen(event.getPartialTicks());
             renderer.render(event.getPartialTicks(), EntityCaptureHooks.finishFrame(),
-                    ItemCaptureHooks.finishFrame(), EffectCaptureHooks.finishFrame());
+                    ItemCaptureHooks.finishFrame(), EffectCaptureHooks.finishFrame(), CloudCaptureHooks.finishFrame());
         } catch (RuntimeException | LinkageError ex) {
             failure = ex.getClass().getSimpleName() + ": " + ex.getMessage();
             RemixForgeMod.LOG.error("RTX Remix rendering disabled after failure", ex);
@@ -113,10 +116,27 @@ public final class ClientEvents {
 
     private static void discardCaptures() {
         EntityCaptureHooks.discard(); ItemCaptureHooks.discard(); EffectCaptureHooks.discard();
+        CloudCaptureHooks.discard();
     }
 
     long renderedFrames() { return renderer.frameCount(); }
     boolean isEnabled() { return enabled; }
+    int cloudTriangles() { return renderer.cloudTriangles(); }
+    int customSkyTriangles() { return renderer.customSkyTriangles(); }
+    int cloudResourceCount() { return renderer.cloudResourceCount(); }
+    long cloudMeshUploads() { return renderer.cloudMeshUploads(); }
+    long cloudRetainedBytes() { return renderer.cloudRetainedBytes(); }
+    long cloudSkippedDraws() { return renderer.cloudSkippedDraws(); }
+    int cloudMeshCount() { return renderer.cloudMeshCount(); }
+    long cloudGeometryHash() { return renderer.cloudGeometryHash(); }
+    long cloudPlacementHash() { return renderer.cloudPlacementHash(); }
+    long cloudTextureSnapshots() { return renderer.cloudTextureSnapshots(); }
+    boolean customSkyHandlerActive() { return renderer.customSkyHandlerActive(); }
+    boolean customSkyUncaptured() { return renderer.customSkyUncaptured(); }
+    int pbrSpriteCount() { return renderer.pbrSpriteCount(); }
+    int pbrTextureCount() { return renderer.pbrTextureCount(); }
+    long pbrUpdateCount() { return renderer.pbrUpdateCount(); }
+    int pbrSkippedCount() { return renderer.pbrSkippedCount(); }
     String failureMessage() { return failure; }
     boolean entityCaptured(UUID id) { return renderer.entityCaptured(id); }
     int trianglePartCount(UUID id) { return renderer.trianglePartCount(id); }
