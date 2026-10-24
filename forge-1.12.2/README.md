@@ -146,7 +146,7 @@ resource-pack priority are preserved; no external shader pack is required.
 
 | Map/channel | Supported interpretation |
 | --- | --- |
-| `_n` red/green | Tangent-space normal X/Y; reconstruct positive Z, using the Remix DirectX normal convention. |
+| `_n` red/green | Tangent-space normal X/Y; reconstruct positive Z with +Y down the image, then encode to the pinned runtime's two-channel octahedral format. |
 | `_s` red | Smoothness; convert to roughness as `(1 - red / 255)^2`. |
 | `_s` green | Values 230–255 classify metal; lower values classify dielectric. Individual metal optical constants are not reproduced. |
 | `_s` alpha | 0–254 scale emission using albedo color; 255 means no emission. |
@@ -171,7 +171,10 @@ An animated frame may contain at most 256 × 256 pixels.
 
 The atlas observer mirrors successful mip-zero animation uploads from CPU data.
 It publishes up to 64 rectangles and 4 MiB per frame, with a coalescing cache of
-4,096 rectangles/32 MiB. PBR updates accompany the matching albedo frames.
+4,096 rectangles/32 MiB. Albedo creation and patches use the same sRGB format.
+PBR updates accompany the matching albedo frames. Normal maps use `RG8_UNORM`
+with `NORMAL_OTH` for both initial uploads and patches: the runtime cannot
+partially update textures created with its `NORMAL_DX`/`NORMAL_OGL` conversion.
 Reload or world release detaches observers and releases material consumers before
 their atlas handles. Custom uploads outside the observed atlas animation contract
 need a separate adapter.
@@ -471,19 +474,34 @@ The complete dragon/Maka/Rahovart cohort passed animation, movement, offscreen
 capture, texture reload, and retirement (`085423`); screenshots confirmed the
 opaque-base correction for Rahovart. Full RLCraft multiplayer also passed both
 authenticated sessions with verified server fixtures and zero client resources
-after each disconnect (`090034`). The 1,808-second RLCraft streaming soak
-(`091402`) passed 71 travel cycles, 18 resource reloads, and 17 disable/re-enable
-cycles, followed by zero-resource world unload. Every completed stop converged
-against actually loaded columns without a capacity failure. Sampled peak Java
-heap use was 2.25 GiB and captured terrain memory was 40.05 MiB. This flat Creative
-fixture does not establish leak freedom or long-session natural survival coverage.
+after each disconnect (`090034`). The first 1,808-second RLCraft streaming soak
+(`091402`) passed its capture and lifecycle checks, but failed native texture
+validation: the runtime rejected animated albedo patches because their format
+differed from the sRGB atlas. Atlas creation and patches now explicitly use the
+same format. The GPU bridge regression also verifies a retained sRGB texture
+actually changes rendered pixels after an update, without replacing the material,
+mesh, or instance. Java update counters alone do not prove native application.
+The same GPU check compares the runtime's converted DirectX normal texture with
+the two-channel normal encoding, then verifies that patching the retained normal
+texture changes the lighting. Animated normals use that updateable format.
+
+The corrected RLCraft run (`102535`) passed 1,800 seconds of streaming, with 71
+travel cycles, 18 resource reloads, and 17 disable/re-enable cycles. Its native
+log contained no rejected texture updates. Every completed stop converged against
+actually loaded columns without a capacity failure. Final pose restoration
+queued terrain recapture, followed by a successful zero-resource world unload
+and normal process exit. Passive process-memory samples did not show sustained
+growth after warmup. This flat Creative fixture does not establish leak freedom
+or long-session natural survival coverage.
 
 A fresh instance containing only the self-contained package passed extraction,
-rendering, toggles, and unload (`090133`); its second launch passed preservation
-checks (`090247`). All 189 native payload files matched their inventory hashes,
-and both authored-file sentinels remained unchanged. The shared bridge also
-passed the root Fabric demo-world launch, rendered-image check, and normal
-shutdown with 211 retained terrain pages (`090831`).
+materials/PBR, block entities, effects, toggles, and unload (`102119`); its second
+launch passed rendering and preservation checks (`102337`). Neither launch
+reported a rejected native texture update. All 189 native payload files matched
+their inventory hashes after each launch, and both authored-file sentinels
+remained unchanged. The shared bridge also passed the root Fabric demo-world
+launch, rendered-image check, and normal shutdown with 211 retained terrain pages
+(`090831`).
 
 The pinned runtime reports 42 undisposed common device objects at process exit
 in both the Forge and Fabric clients. Both clients finish shutdown, but this
