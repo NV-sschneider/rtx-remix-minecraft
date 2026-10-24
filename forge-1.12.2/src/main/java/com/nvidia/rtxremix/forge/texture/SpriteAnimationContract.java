@@ -14,7 +14,7 @@ import java.security.NoSuchAlgorithmException;
 import net.minecraft.client.renderer.texture.TextureAtlasSprite;
 
 /** Recognizes optional sprites whose CPU uploads and vanilla animation fields share one clock. */
-final class SpriteAnimationContract {
+public final class SpriteAnimationContract {
     static final String FOAMFIX = "pl.asie.foamfix.client.FastTextureAtlasSprite";
     // The 0.10.15 release's annotation reports @VERSION@; authenticate its original class resource.
     static final String FOAMFIX_SHA256 = "6ef144e981602abdd7a91ea903d44d9f7574f97e8c2bccf3d66fc37a1c5d4436";
@@ -36,7 +36,17 @@ final class SpriteAnimationContract {
 
     private SpriteAnimationContract() { }
 
-    static String unsupported(TextureAtlasSprite sprite) {
+    /** Null only when inherited CPU frame data describes the sprite's uploads. */
+    public static String unsupportedPixels(TextureAtlasSprite sprite) {
+        if (sprite.getClass() == TextureAtlasSprite.class) return null;
+        Contract contract = CONTRACTS.get(sprite.getClass());
+        if (contract.reason != null) return contract.reason;
+        // FoamFix reports static sprites as GPU-stored too; they still have the
+        // original CPU frame. Only its animated copy-image path bypasses uploads.
+        return sprite.hasAnimationMetadata() ? unsupported(sprite) : null;
+    }
+
+    public static String unsupported(TextureAtlasSprite sprite) {
         if (sprite.getClass() == TextureAtlasSprite.class) return null;
         Contract contract = CONTRACTS.get(sprite.getClass());
         if (contract.reason != null) return contract.reason;

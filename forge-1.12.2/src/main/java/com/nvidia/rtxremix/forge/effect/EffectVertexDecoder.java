@@ -11,7 +11,9 @@ import org.lwjgl.util.vector.Matrix4f;
 /** Copies completed fixed-function primitives, retaining UV/RGBA and omitting lightmaps. */
 final class EffectVertexDecoder {
     private final float[] positions = new float[12], uv = new float[8];
+    private final float[] normals = new float[12];
     private final int[] colors = new int[4];
+    private final Matrix4f inverse = new Matrix4f();
 
     int append(ByteBuffer source, int vertices, int stride, int uvOffset, int colorOffset,
                int fallbackColor, Matrix4f transform, int allowedQuads, CapturedEffectBatch target) {
@@ -20,10 +22,20 @@ final class EffectVertexDecoder {
 
     int append(ByteBuffer source, int vertices, int mode, int stride, int uvOffset, int colorOffset,
                int fallbackColor, Matrix4f transform, int allowedQuads, CapturedEffectBatch target) {
+        return append(source, vertices, mode, stride, uvOffset, colorOffset, -1, false,
+                null, fallbackColor, transform, allowedQuads, target);
+    }
+
+    int append(ByteBuffer source, int vertices, int mode, int stride, int uvOffset, int colorOffset,
+               int normalOffset, boolean floatNormal, int[] unlitColors, int fallbackColor,
+               Matrix4f transform, int allowedQuads, CapturedEffectBatch target) {
         int primitives = primitiveCount(mode, vertices), corners = mode == 7 ? 4 : 3;
         if (primitives < 0 || target.triangles != (mode != 7) || stride < 20 || uvOffset < 12
                 || uvOffset + 8 > stride || colorOffset < -1 || colorOffset + 4 > stride
+                || normalOffset < -1 || normalOffset >= 0 && normalOffset + (floatNormal ? 12 : 3) > stride
+                || unlitColors != null && unlitColors.length < vertices
                 || (long) vertices * stride > source.limit()) throw new IllegalArgumentException("Invalid effect vertex buffer");
+        boolean suppliedNormals = normalOffset >= 0 && Matrix4f.invert(transform, inverse) != null;
         int count = Math.min(primitives, Math.min(Math.max(0, allowedQuads), CapturedEffectBatch.MAX_QUADS - target.quads));
         target.ensure(count);
         int startQuads = target.quads;
@@ -47,8 +59,24 @@ final class EffectVertexDecoder {
                     uv[v * 2] = u; uv[v * 2 + 1] = t;
                     minU = Math.min(minU, u); minV = Math.min(minV, t); maxU = Math.max(maxU, u); maxV = Math.max(maxV, t);
                     int c = offset + colorOffset;
-                    colors[v] = colorOffset < 0 ? fallbackColor : (source.get(c + 3) & 255) << 24
+                    colors[v] = unlitColors != null ? unlitColors[vertex(mode, quad, v)]
+                            : colorOffset < 0 ? fallbackColor : (source.get(c + 3) & 255) << 24
                             | (source.get(c) & 255) << 16 | (source.get(c + 1) & 255) << 8 | source.get(c + 2) & 255;
+                    int n = v * 3;
+                    normals[n] = normals[n + 1] = normals[n + 2] = 0;
+                    if (suppliedNormals) {
+                        int at = offset + normalOffset;
+                        float nx = floatNormal ? source.getFloat(at) : Math.max(-1, source.get(at) / 127f);
+                        float ny = floatNormal ? source.getFloat(at + 4) : Math.max(-1, source.get(at + 1) / 127f);
+                        float nz = floatNormal ? source.getFloat(at + 8) : Math.max(-1, source.get(at + 2) / 127f);
+                        // Inverse transpose retains supplied smooth/rotated normals
+                        // under nonuniform scale. Translation is never a direction.
+                        normals[n] = inverse.m00 * nx + inverse.m01 * ny + inverse.m02 * nz;
+                        normals[n + 1] = inverse.m10 * nx + inverse.m11 * ny + inverse.m12 * nz;
+                        normals[n + 2] = inverse.m20 * nx + inverse.m21 * ny + inverse.m22 * nz;
+                        if (!Float.isFinite(normals[n]) || !Float.isFinite(normals[n + 1])
+                                || !Float.isFinite(normals[n + 2])) { valid = false; break; }
+                    }
                 }
                 if (!valid) {
                     // Vanilla precipitation's center column normalizes (0,0), producing
@@ -63,8 +91,13 @@ final class EffectVertexDecoder {
                 nx /= length; ny /= length; nz /= length;
                 int minimum = HardcodedVertex.packHalf2x16(minU, minV), maximum = HardcodedVertex.packHalf2x16(maxU, maxV);
                 for (int v = 0; v < corners; v++) {
+                    int n = v * 3;
+                    float vx = normals[n], vy = normals[n + 1], vz = normals[n + 2];
+                    float size = (float) Math.sqrt(vx * vx + vy * vy + vz * vz);
+                    if (size > 0.000001f) { vx /= size; vy /= size; vz /= size; }
+                    else { vx = nx; vy = ny; vz = nz; }
                     target.vertices.putFloat(positions[v * 3]).putFloat(positions[v * 3 + 1]).putFloat(positions[v * 3 + 2]);
-                    target.vertices.putFloat(nx).putFloat(ny).putFloat(nz);
+                    target.vertices.putFloat(vx).putFloat(vy).putFloat(vz);
                     target.vertices.putFloat(uv[v * 2]).putFloat(uv[v * 2 + 1]).putInt(colors[v]);
                     target.vertices.putInt(minimum).putInt(maximum);
                     for (int pad = 0; pad < 5; pad++) target.vertices.putInt(0);
@@ -73,6 +106,9 @@ final class EffectVertexDecoder {
                     target.contentHash = CapturedEffectBatch.mix(target.contentHash, Float.floatToIntBits(uv[v * 2]));
                     target.contentHash = CapturedEffectBatch.mix(target.contentHash, Float.floatToIntBits(uv[v * 2 + 1]));
                     target.contentHash = CapturedEffectBatch.mix(target.contentHash, colors[v]);
+                    target.contentHash = CapturedEffectBatch.mix(target.contentHash, Float.floatToIntBits(vx));
+                    target.contentHash = CapturedEffectBatch.mix(target.contentHash, Float.floatToIntBits(vy));
+                    target.contentHash = CapturedEffectBatch.mix(target.contentHash, Float.floatToIntBits(vz));
                 }
                 target.quads++;
             }

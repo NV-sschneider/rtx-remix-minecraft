@@ -13,6 +13,7 @@ import com.nvidia.rtxremix.MeshInfoSurfaceTriangles;
 import com.nvidia.rtxremix.RemixAPI;
 import com.nvidia.rtxremix.RemixBridge;
 import com.nvidia.rtxremix.TextureFromMemoryInfo;
+import com.nvidia.rtxremix.TextureFormat;
 import com.nvidia.rtxremix.forge.texture.TextureUpdates;
 import java.nio.ByteBuffer;
 import java.util.List;
@@ -49,6 +50,7 @@ public final class EffectScene implements AutoCloseable {
         default long textureUpdateBytes() { return 0; }
         default long textureDroppedUpdates() { return 0; }
         default int dirtyTextures() { return 0; }
+        default DamageAtlas damageAtlas() { return DamageAtlas.load(); }
     }
     private final Backend api;
     private final Thread renderThread = Thread.currentThread();
@@ -63,6 +65,7 @@ public final class EffectScene implements AutoCloseable {
     private long particleHash, weatherHash, particleFrames, weatherFrames, textureSnapshots;
     private int batches, particles, precipitation, damage, snapshots, additive, triangles;
     private long damageHash, frame;
+    private DamageAtlas damageAtlas;
     private boolean closed;
 
     public EffectScene(RemixAPI api) { this(backend(api)); }
@@ -102,6 +105,12 @@ public final class EffectScene implements AutoCloseable {
             if (batch.quads == 0) continue;
             if (batches == draws.length || batch.quads < 0 || batch.quads > CapturedEffectBatch.MAX_QUADS
                     || batch.quads > EffectCaptureHooks.MAX_QUADS - total) { omit(batch.quads); continue; }
+            ByteBuffer capturedVertices = batch.vertices;
+            if (batch.damage) {
+                if (damageAtlas == null) damageAtlas = api.damageAtlas();
+                capturedVertices = damageAtlas.remap(batch);
+                if (capturedVertices == null) { omit(batch.quads); continue; }
+            }
             Texture texture = texture(batch, blockAtlasTexture);
             if (texture == null) { omit(batch.quads); continue; }
             texture.requested = frame;
@@ -116,9 +125,9 @@ public final class EffectScene implements AutoCloseable {
             }
             int vertices = batch.quads * batch.verticesPerPrimitive(), indexCount = batch.quads * batch.indicesPerPrimitive();
             ByteBuffer indexBuffer = batch.triangles ? triangleIndices : indices;
-            batch.vertices.limit(vertices * HardcodedVertex.STRIDE).position(0);
+            capturedVertices.limit(vertices * HardcodedVertex.STRIDE).position(0);
             indexBuffer.limit(indexCount * 4).position(0);
-            surface.vertexBuffer = batch.vertices; surface.vertexCount = vertices;
+            surface.vertexBuffer = capturedVertices; surface.vertexCount = vertices;
             surface.indexBuffer = indexBuffer; surface.indexCount = indexCount;
             surface.material = emissive ? texture.emissiveMaterial : texture.material;
             surface.flags = batch.weather ? 0 : MeshInfoSurfaceTriangles.TEXCOORD_BOUNDS;
@@ -154,6 +163,7 @@ public final class EffectScene implements AutoCloseable {
         for (int i = 0; i < textures.length; i++) {
             Texture texture = textures[i];
             if (texture == null) { if (free < 0) free = i; continue; }
+            if (texture.damage != batch.damage) continue;
             if (texture.identity == batch.textureIdentity && texture.glId == batch.textureId) return texture;
             if (texture.glId == batch.textureId) {
                 // A recycled GL id cannot inherit an old object's CPU revision binding.
@@ -162,12 +172,22 @@ public final class EffectScene implements AutoCloseable {
             }
         }
         if (free < 0 || batch.blockAtlas && blockAtlasTexture == 0) return null;
+        if (batch.damage && (long) damageAtlas.width * damageAtlas.height * 4 > MAX_TEXTURE_BYTES - textureBytes) return null;
         // Bound first-use GPU readbacks as well as retained texture memory.
         if (!batch.blockAtlas && (snapshots != 0 || !api.readTexture(batch.textureId, MAX_TEXTURE_BYTES - textureBytes, reader))) return null;
-        Texture texture = new Texture(batch.textureIdentity, batch.textureId);
+        Texture texture = new Texture(batch.textureIdentity, batch.textureId, batch.damage);
         textures[free] = texture;
         texture.requested = frame;
-        if (batch.blockAtlas) {
+        if (batch.damage) {
+            atlas = blockAtlasTexture;
+            texture.handle = api.createTextureFromMemory(TextureFromMemoryInfo.builder().hash(HASHES.incrementAndGet())
+                    .pixelData(damageAtlas.pixels).size(damageAtlas.width, damageAtlas.height)
+                    .format(TextureFormat.RGBA8_SRGB).build());
+            texture.owned = true;
+            texture.bytes = (long) damageAtlas.width * damageAtlas.height * 4;
+            textureBytes += texture.bytes;
+            texture.wrapU = texture.wrapV = MaterialInfo.WRAP_MODE_CLAMP;
+        } else if (batch.blockAtlas) {
             atlas = blockAtlasTexture;
             texture.handle = blockAtlasTexture;
         } else {
@@ -226,7 +246,8 @@ public final class EffectScene implements AutoCloseable {
     public long damageGeometryHash() { return damageHash; }
     public long skippedBatchCount() { return skippedBatches; }
     public long skippedQuadCount() { return skippedQuads; }
-    public long retainedBytes() { return textureBytes + meshBytes + api.textureUpdateBytes(); }
+    public long retainedBytes() { return textureBytes + meshBytes + api.textureUpdateBytes()
+            + (damageAtlas == null ? 0 : damageAtlas.retainedBytes()); }
     public long textureUpdateCount() { return api.textureUpdates(); }
     public long texturePatchCount() { return api.texturePatches(); }
     public long textureDroppedUpdateCount() { return api.textureDroppedUpdates(); }
@@ -264,6 +285,7 @@ public final class EffectScene implements AutoCloseable {
         }
         if (failure != null) throw failure;
         api.closeTextures();
+        damageAtlas = null;
         closed = true; atlas = 0; batches = particles = precipitation = damage = additive = triangles = 0;
         damageHash = 0;
         particleHash = weatherHash = 0;
@@ -326,10 +348,11 @@ public final class EffectScene implements AutoCloseable {
     private static final class Texture {
         final Object identity;
         final int glId;
+        final boolean damage;
         long handle, material, emissiveMaterial, bytes, requested;
         Object revision;
         byte wrapU = MaterialInfo.WRAP_MODE_REPEAT, wrapV = MaterialInfo.WRAP_MODE_REPEAT, filter;
         boolean owned;
-        Texture(Object identity, int glId) { this.identity = identity; this.glId = glId; }
+        Texture(Object identity, int glId, boolean damage) { this.identity = identity; this.glId = glId; this.damage = damage; }
     }
 }

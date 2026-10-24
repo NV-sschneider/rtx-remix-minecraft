@@ -27,11 +27,13 @@ public final class EffectCaptureTransformer implements IClassTransformer {
     private static final String DAMAGE = "net.minecraft.client.renderer.RenderGlobal";
     private static final String UPLOADER = "net.minecraft.client.renderer.WorldVertexBufferUploader";
     private static final String TEXTURES = "net.minecraft.client.renderer.texture.TextureManager";
+    private static final String PLACEMENT = "com.TominoCZ.FBP.particle.FBPParticleBlock";
     private static final String HOOKS = "com/nvidia/rtxremix/forge/effect/EffectCaptureHooks";
 
     @Override public byte[] transform(String name, String transformedName, byte[] bytes) {
         if (bytes == null || !(PARTICLES.equals(transformedName) || WEATHER.equals(transformedName)
-                || DAMAGE.equals(transformedName) || UPLOADER.equals(transformedName) || TEXTURES.equals(transformedName))) return bytes;
+                || DAMAGE.equals(transformedName) || UPLOADER.equals(transformedName) || TEXTURES.equals(transformedName)
+                || PLACEMENT.equals(transformedName))) return bytes;
         ClassReader reader = new ClassReader(bytes);
         ClassNode type = new ClassNode(Opcodes.ASM5);
         reader.accept(type, 0);
@@ -50,11 +52,32 @@ public final class EffectCaptureTransformer implements IClassTransformer {
                     && named(method.name, "draw", "func_181679_a")) changed |= observe(method, "drawBuffer", true);
             else if (TEXTURES.equals(transformedName) && "(Lnet/minecraft/util/ResourceLocation;)V".equals(method.desc)
                     && named(method.name, "bindTexture", "func_110577_a")) changed |= observe(method, "boundTexture", false);
+            else if (PLACEMENT.equals(transformedName)
+                    && "(Lnet/minecraft/client/renderer/BufferBuilder;Lnet/minecraft/entity/Entity;FFFFFF)V".equals(method.desc)
+                    && named(method.name, "renderParticle", "func_180434_a")) changed |= placement(method);
         }
         if (!changed) return bytes;
         ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
         type.accept(writer);
         return writer.toByteArray();
+    }
+
+    private static boolean placement(MethodNode method) {
+        boolean changed = false;
+        String renderer = "net/minecraft/client/renderer/BlockModelRenderer";
+        String descriptor = "(Lnet/minecraft/world/IBlockAccess;Lnet/minecraft/client/renderer/block/model/IBakedModel;"
+                + "Lnet/minecraft/block/state/IBlockState;Lnet/minecraft/util/math/BlockPos;Lnet/minecraft/client/renderer/BufferBuilder;ZJ)Z";
+        for (AbstractInsnNode instruction : method.instructions.toArray()) {
+            if (!(instruction instanceof MethodInsnNode)) continue;
+            MethodInsnNode call = (MethodInsnNode) instruction;
+            if (call.getOpcode() != Opcodes.INVOKEVIRTUAL || !renderer.equals(call.owner) || !descriptor.equals(call.desc)) continue;
+            boolean smooth = named(call.name, "renderModelSmooth", "func_187498_b");
+            if (!smooth && !named(call.name, "renderModelFlat", "func_187497_c")) continue;
+            method.instructions.set(call, hook(smooth ? "renderPlacedSmooth" : "renderPlacedFlat",
+                    "(L" + renderer + ";" + descriptor.substring(1)));
+            changed = true;
+        }
+        return changed;
     }
 
     private static boolean scope(MethodNode method, boolean weather) {

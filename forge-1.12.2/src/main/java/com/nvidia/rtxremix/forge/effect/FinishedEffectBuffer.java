@@ -9,6 +9,7 @@ import java.nio.ByteOrder;
 import net.minecraft.client.renderer.BufferBuilder;
 import net.minecraft.client.renderer.vertex.DefaultVertexFormats;
 import net.minecraft.client.renderer.vertex.VertexFormat;
+import net.minecraft.client.renderer.vertex.VertexFormatElement;
 import org.lwjgl.util.vector.Matrix4f;
 
 /** Adapts the completed BufferBuilder contract at WorldVertexBufferUploader's entry. */
@@ -23,6 +24,11 @@ final class FinishedEffectBuffer {
     private FinishedEffectBuffer() {}
 
     static int append(EffectVertexDecoder decoder, BufferBuilder buffer, int fallbackColor,
+                      Matrix4f transform, int allowed, CapturedEffectBatch target) {
+        return append(decoder, buffer, null, fallbackColor, transform, allowed, target);
+    }
+
+    static int append(EffectVertexDecoder decoder, BufferBuilder buffer, int[] unlitColors, int fallbackColor,
                       Matrix4f transform, int allowed, CapturedEffectBatch target) {
         ByteBuffer source = buffer.getByteBuffer();
         VertexFormat format = buffer.getVertexFormat();
@@ -39,8 +45,20 @@ final class FinishedEffectBuffer {
         // that exact completed-buffer shape; arbitrary truncated inputs stay invalid.
         if (expanded) source.limit((int) extent);
         try {
+            int normalOffset = -1;
+            boolean floatNormal = false;
+            for (int i = 0; i < format.getElementCount(); i++) {
+                VertexFormatElement element = format.getElement(i);
+                if (element.getUsage() != VertexFormatElement.EnumUsage.NORMAL) continue;
+                if (element.getElementCount() != 3 || element.getType() != VertexFormatElement.EnumType.BYTE
+                        && element.getType() != VertexFormatElement.EnumType.FLOAT)
+                    throw new IllegalArgumentException("Unsupported effect normal format");
+                normalOffset = format.getOffset(i);
+                floatNormal = element.getType() == VertexFormatElement.EnumType.FLOAT;
+            }
             return decoder.append(source, vertices, buffer.getDrawMode(), stride, format.getUvOffsetById(0),
-                    format.hasColor() ? format.getColorOffset() : -1, fallbackColor, transform, allowed, target);
+                    format.hasColor() ? format.getColorOffset() : -1, normalOffset, floatNormal,
+                    unlitColors, fallbackColor, transform, allowed, target);
         } finally {
             if (expanded) { source.limit(limit); source.position(position); }
         }

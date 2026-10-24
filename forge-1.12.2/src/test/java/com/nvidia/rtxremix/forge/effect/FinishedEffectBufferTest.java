@@ -14,6 +14,54 @@ import org.lwjgl.util.vector.Matrix4f;
 import static org.junit.Assert.*;
 
 public class FinishedEffectBufferTest {
+    @Test public void suppliedCubeNormalsSurviveOppositeWindingAndNonuniformScale() {
+        BufferBuilder source = cube();
+        // The second face's geometric cross points -Z, whereas its supplied
+        // normal points +Z. Never substitute winding for a renderer's normal.
+        Matrix4f transform = new Matrix4f();
+        transform.m00 = 2; transform.m11 = 3; transform.m22 = 4; transform.m30 = 99;
+        CapturedEffectBatch target = new CapturedEffectBatch();
+        FinishedEffectBuffer.append(new EffectVertexDecoder(), source, -1, transform, 6, target);
+        for (int v = 0; v < 24; v++) {
+            int at = v * HardcodedVertex.STRIDE;
+            assertEquals(0, target.vertices.getFloat(at + 12), 0);
+            assertEquals(0, target.vertices.getFloat(at + 16), 0);
+            assertEquals(1, target.vertices.getFloat(at + 20), 0);
+            assertEquals(0x78123456, target.vertices.getInt(at + 32));
+        }
+    }
+
+    @Test public void floatNormalsUseInverseTransposeAndZeroNormalsUseGeometricFallback() {
+        BufferBuilder source = new BufferBuilder(256);
+        source.begin(7, new VertexFormat().addElement(DefaultVertexFormats.POSITION_3F)
+                .addElement(DefaultVertexFormats.TEX_2F).addElement(DefaultVertexFormats.COLOR_4UB)
+                .addElement(new net.minecraft.client.renderer.vertex.VertexFormatElement(0,
+                        net.minecraft.client.renderer.vertex.VertexFormatElement.EnumType.FLOAT,
+                        net.minecraft.client.renderer.vertex.VertexFormatElement.EnumUsage.NORMAL, 3)));
+        float[] xy = {0,0, 1,0, 1,1, 0,1};
+        for (int v = 0; v < 4; v++) source.pos(xy[v * 2], xy[v * 2 + 1], 0).tex(0, 0)
+                .color(8, 16, 24, 255).normal(v == 0 ? 0 : 1, v == 0 ? 0 : 1, 0).endVertex();
+        source.finishDrawing();
+        Matrix4f matrix = new Matrix4f(); matrix.m00 = 2;
+        CapturedEffectBatch target = new CapturedEffectBatch();
+        FinishedEffectBuffer.append(new EffectVertexDecoder(), source, -1, matrix, 1, target);
+        assertEquals(1, target.vertices.getFloat(20), 0);
+        assertEquals((float) (1 / Math.sqrt(5)), target.vertices.getFloat(HardcodedVertex.STRIDE + 12), 0.00001f);
+        assertEquals((float) (2 / Math.sqrt(5)), target.vertices.getFloat(HardcodedVertex.STRIDE + 16), 0.00001f);
+        assertEquals(0xff081018, target.vertices.getInt(HardcodedVertex.STRIDE + 32));
+    }
+
+    @Test public void observedAlbedoReplacesOnlyCapturedColorsAndNeverMutatesTheLitDraw() {
+        BufferBuilder source = cube();
+        byte[] before = payload(source.getByteBuffer(), 24 * 31);
+        int[] albedo = new int[24]; java.util.Arrays.fill(albedo, 0x7f408020);
+        CapturedEffectBatch target = new CapturedEffectBatch();
+        FinishedEffectBuffer.append(new EffectVertexDecoder(), source, albedo, -1, new Matrix4f(), 6, target);
+        for (int v = 0; v < 24; v++) assertEquals(0x7f408020, target.vertices.getInt(v * HardcodedVertex.STRIDE + 32));
+        assertArrayEquals(before, payload(source.getByteBuffer(), 24 * 31));
+        assertEquals(24 * 28, source.getByteBuffer().limit());
+    }
+
     @Test public void completedUnpaddedCubeKeepsAllSixFacesAndOriginalBufferState() {
         BufferBuilder source = cube();
         ByteBuffer bytes = source.getByteBuffer();

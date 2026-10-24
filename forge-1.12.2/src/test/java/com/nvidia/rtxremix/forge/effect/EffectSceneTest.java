@@ -17,10 +17,9 @@ import static org.junit.Assert.*;
 
 public class EffectSceneTest {
     @Test public void damageIsAStaticDecalAndDisappearsOnTheFirstEmptyFrame() {
-        Fake api = new Fake();
+        Damage api = new Damage();
         EffectScene scene = new EffectScene(api);
-        CapturedEffectBatch batch = batch();
-        batch.damage = true;
+        CapturedEffectBatch batch = DamageAtlasTest.damage(0, 0, 1, 1);
         scene.sync(Collections.singletonList(batch), 42);
         assertEquals(com.nvidia.rtxremix.InstanceCategoryBit.DECAL_STATIC, api.category);
         assertEquals(1, scene.damageQuads());
@@ -32,6 +31,25 @@ public class EffectSceneTest {
         assertTrue(api.meshes.isEmpty());
         scene.close();
         assertEquals(0, scene.resourceCount());
+        assertEquals(0, scene.retainedBytes());
+        assertTrue(api.textures.isEmpty());
+    }
+
+    @Test public void damageOwnsOnlyItsDerivedTextureAndSharesNeitherMaterialNorUvsWithOrdinaryAtlas() {
+        Damage api = new Damage(); EffectScene scene = new EffectScene(api);
+        CapturedEffectBatch ordinary = batch(), damage = DamageAtlasTest.damage(0, 0, 1, 1);
+        damage.textureIdentity = ordinary.textureIdentity;
+        scene.sync(Arrays.asList(ordinary, damage), 42);
+        assertEquals(2, scene.batchCount()); assertEquals(1, scene.damageQuads()); assertEquals(1, scene.particleQuads());
+        assertEquals(2, api.materials.size()); assertEquals(1, api.textures.size()); assertEquals(1, api.loads);
+        scene.sync(Arrays.asList(damage, ordinary), 42);
+        assertEquals(2, scene.batchCount()); assertEquals(1, api.loads);
+        assertEquals(0, damage.vertices.getFloat(24), 0);
+        for (int i = 0; i < 121; i++) scene.sync(Collections.<CapturedEffectBatch>emptyList(), 42);
+        assertTrue(api.textures.isEmpty());
+        scene.sync(Collections.singletonList(damage), 42);
+        assertEquals(1, api.loads); assertEquals(1, api.textures.size());
+        scene.close(); assertEquals(0, scene.retainedBytes());
     }
     @Test public void replacesTransientMeshesButNeverOwnsTheBorrowedAtlas() {
         Fake api = new Fake();
@@ -156,6 +174,21 @@ public class EffectSceneTest {
         public void freeBlend(long handle) { assertTrue(blends.remove(handle)); }
     }
     private static final class Binding { boolean current = true, deleted; }
+    private static final class Damage extends Fake {
+        final Set<Long> textures = new HashSet<Long>();
+        int loads;
+        @Override public DamageAtlas damageAtlas() { loads++; return DamageAtlasTest.full(); }
+        @Override public long createTextureFromMemory(TextureFromMemoryInfo info) {
+            assertEquals(com.nvidia.rtxremix.TextureFormat.RGBA8_SRGB, info.format);
+            assertTrue(info.pixelData.isDirect());
+            long handle = next++; textures.add(handle); return handle;
+        }
+        @Override public void destroyTexture(long handle) { assertTrue(meshes.isEmpty()); assertTrue(textures.remove(handle)); }
+        @Override public long createMaterial(MaterialInfo info) {
+            assertTrue(info.albedoTexture == 42 || textures.contains(info.albedoTexture));
+            long handle = next++; materials.add(handle); return handle;
+        }
+    }
     private static final class Owned extends Fake {
         final Set<Long> textures = new HashSet<Long>();
         int reads, observed, released; boolean closed; Binding binding;

@@ -25,15 +25,18 @@ import org.objectweb.asm.tree.FieldInsnNode;
 import org.objectweb.asm.tree.FieldNode;
 import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
+import org.objectweb.asm.tree.JumpInsnNode;
 import static org.junit.Assert.*;
 
 public class SpriteAnimationContractTest {
     @Test public void ordinaryAnimationIsAcceptedButUnknownAnimationAndRotationAreDistinct() throws Exception {
         TextureAtlasSprite vanilla = Sprite.vanilla();
+        assertNull(SpriteAnimationContract.unsupportedPixels(vanilla));
         animated(vanilla);
         assertNull(SpriteMaterial.unsupportedReason(vanilla));
         Sprite custom = new Sprite();
         assertNull(SpriteMaterial.unsupportedReason(custom));
+        assertNotNull(SpriteAnimationContract.unsupportedPixels(custom));
         animated(custom);
         assertTrue(SpriteMaterial.unsupportedReason(custom).contains("unsupported animated sprite class"));
         vanilla.initSprite(16, 16, 0, 0, true);
@@ -75,6 +78,13 @@ public class SpriteAnimationContractTest {
             assertTrue((storage.access & Opcodes.ACC_PUBLIC) != 0);
             assertTrue(field(storage, "textureId", Opcodes.GETFIELD));
             assertTrue(call(storage, name, "func_130098_m"));
+            for (AbstractInsnNode node : storage.instructions.toArray()) if (node instanceof MethodInsnNode
+                    && "func_130098_m".equals(((MethodInsnNode) node).name)) {
+                AbstractInsnNode branch = next(node);
+                assertEquals(Opcodes.IFNE, branch.getOpcode());
+                assertEquals("Static sprites also report GPU storage", Opcodes.ICONST_1, next(branch).getOpcode());
+                assertEquals(Opcodes.ICONST_0, next(((JumpInsnNode) branch).label).getOpcode());
+            }
         }
     }
 
@@ -96,6 +106,10 @@ public class SpriteAnimationContractTest {
         for (AbstractInsnNode instruction : method.instructions.toArray()) if (instruction instanceof MethodInsnNode
                 && owner.equals(((MethodInsnNode) instruction).owner) && name.equals(((MethodInsnNode) instruction).name)) return true;
         return false;
+    }
+    private static AbstractInsnNode next(AbstractInsnNode node) {
+        do { node = node.getNext(); } while (node != null && node.getOpcode() < 0);
+        return node;
     }
     private static final class Sprite extends TextureAtlasSprite {
         Sprite() { super("test:custom"); setIconWidth(1); setIconHeight(1); }
