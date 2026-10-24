@@ -32,6 +32,10 @@ public final class GlInteropSmokeTest {
             interop = new LegacyGlInterop(api.dxvkGetInteropInfo());
             interop.validateContext();
             System.out.println("GPU: external timeline semaphores imported");
+            if (Boolean.getBoolean("rlcraftremix.gpuRetainedAlphaOnly")) {
+                verifyRetainedAlpha(api, interop, framebuffer, hwnd);
+                return;
+            }
             if (Boolean.getBoolean("rlcraftremix.gpuViewModelReplacementOnly")) {
                 verifyViewModelReplacement(api, interop, framebuffer, hwnd);
                 return;
@@ -192,6 +196,189 @@ public final class GlInteropSmokeTest {
         for (int i = 0; i < 4; i++) pixels.put((byte) red).put((byte) green).put((byte) blue).put((byte) 255);
         pixels.flip();
         return pixels;
+    }
+
+    /** Compares ordinary world blending at the same pixels, with a visible fractional-alpha control. */
+    private static void verifyRetainedAlpha(RemixAPI api, LegacyGlInterop interop, int framebuffer, long hwnd) throws Exception {
+        long texture = 0, light = 0;
+        long[] materials = new long[3], meshes = new long[3], instances = new long[3], blends = new long[3];
+        CameraInfo camera = CameraInfo.builder().parameterizedExt(CameraInfoParameterizedEXT.builder()
+                .aspect(320f / 240f).fovYInDegrees(60).nearPlane(0.1f).farPlane(100).build()).build();
+        float[] transform = Transform.identity().matrix;
+        try {
+            System.out.println("GPU RETAINED ALPHA: gpuResidentScene=" + api.getConfigVariableResolved("rtx.gpuResidentScene")
+                    + ", sceneScale=" + api.getConfigVariableResolved("rtx.sceneScale")
+                    + ", ordinary category=0, nonemissive rough foreground, white distant light, volumetricRadianceScale=1");
+            // The 78 authored fractional texels are outside every foreground UV.
+            // Interior body samples remain far from them at the tested ray footprint.
+            texture = api.createTextureFromMemory(TextureFromMemoryInfo.builder().hash(0x12340600L)
+                    .pixelData(alphaPixels(255)).size(512, 512)
+                    .format(TextureFormat.RGBA8_SRGB).purpose(TexturePurpose.COLOR).build());
+            MaterialInfo foreground = MaterialInfo.builder().hash(0x12340601L).albedoTexture(texture)
+                    .opaqueExt(MaterialInfoOpaqueEXT.builder().albedoConstant(1, 1, 1)
+                            .roughnessConstant(1).metallicConstant(0).useDrawCallAlphaState(true).build()).build();
+            foreground.filterMode = 0;
+            foreground.wrapModeU = foreground.wrapModeV = MaterialInfo.WRAP_MODE_CLAMP;
+            materials[0] = api.createMaterial(foreground);
+            for (int half = 0; half < 2; half++) {
+                materials[half + 1] = api.createMaterial(MaterialInfo.builder().hash(0x12340602L + half)
+                        .emissiveIntensity(1).emissiveColorConstant(0, half == 0 ? 1 : 0, half == 0 ? 0 : 1)
+                        .opaqueExt(MaterialInfoOpaqueEXT.builder().albedoConstant(0, 0, 0)
+                                .roughnessConstant(1).metallicConstant(0).build()).build());
+                meshes[half + 1] = alphaQuad(api, materials[half + 1], 0x12340610L + half,
+                        -4, 4, half == 0 ? -4 : 0, half == 0 ? 0 : 4, 5, 0, 1);
+                instances[half + 1] = api.sceneInstanceAdd(meshes[half + 1], transform, 0, 1, 0);
+            }
+            // Match SkyScene's sun: blended lighting may sample the volumetric
+            // radiance cache even though this surface has no particle category.
+            light = api.createLight(LightInfo.builder().hash(0x12340620L).radiance(1, 1, 1)
+                    .distantExt(LightInfoDistantEXT.builder().direction(0, 0, 1)
+                            .angularDiameterDegrees(0.5f).volumetricRadianceScale(1).build()).build());
+            byte[] background = alphaImage(api, interop, framebuffer, hwnd, camera, light, "background");
+            meshes[0] = alphaQuad(api, materials[0], 0x12340612L, -1.1f, 1.1f, -1.2f, 1.2f, 3, 0.125f, 0.375f);
+            blends[0] = InstanceInfoBlendEXT.textureTimesVertexColor().allocNative(0);
+            blends[1] = InstanceInfoBlendEXT.textureTimesVertexColorAlphaTest(26).allocNative(0);
+            blends[2] = InstanceInfoBlendEXT.textureTimesVertexColorAlphaBlend(26).allocNative(0);
+            instances[0] = api.sceneInstanceAdd(meshes[0], transform, 0, 1, blends[0]);
+            byte[] opaque = alphaImage(api, interop, framebuffer, hwnd, camera, light, "opaque");
+            api.sceneInstanceUpdate(instances[0], meshes[0], transform, 0, 1, blends[1]);
+            byte[] cutout = alphaImage(api, interop, framebuffer, hwnd, camera, light, "cutout");
+            api.sceneInstanceUpdate(instances[0], meshes[0], transform, 0, 1, blends[2]);
+            byte[] blended = alphaImage(api, interop, framebuffer, hwnd, camera, light, "blended-body");
+            alphaPatch(api, texture, 128);
+            byte[] fractional = alphaImage(api, interop, framebuffer, hwnd, camera, light, "fractional");
+            alphaPatch(api, texture, 255);
+            byte[] restored = alphaImage(api, interop, framebuffer, hwnd, camera, light, "blended-restored");
+            double backgroundContrast = colorDistance(alphaRegion(background, 0), alphaRegion(background, 1));
+            double blendedHorizonContrast = colorDistance(alphaRegion(blended, 0), alphaRegion(blended, 1));
+            boolean controlPass = backgroundContrast >= 80;
+            // The uniformly lit plane must hide the colored boundary. Blended
+            // surfaces can use approximate lighting, so opaque BRDF equality is
+            // not an opacity contract; use the measured blended endpoint instead.
+            boolean blendPass = blendedHorizonContrast <= 12 && blendedHorizonContrast <= backgroundContrast * 0.1;
+            boolean fractionalPass = true, restoredPass = true;
+            System.out.println("GPU RETAINED ALPHA: backgroundHorizonContrast=" + backgroundContrast
+                    + ", blendedHorizonContrast=" + blendedHorizonContrast
+                    + ", blendedHorizonLeak=" + blendedHorizonContrast / backgroundContrast);
+            for (int half = 0; half < 2; half++) {
+                double[] bg = alphaRegion(background, half), solid = alphaRegion(opaque, half);
+                double[] clipped = alphaRegion(cutout, half), blend = alphaRegion(blended, half);
+                double[] partial = alphaRegion(fractional, half), again = alphaRegion(restored, half);
+                double contrast = colorDistance(bg, solid), cutoutError = colorDistance(solid, clipped);
+                double blendLightingDifference = colorDistance(solid, blend), restoredError = colorDistance(blend, again);
+                double fraction = backgroundFraction(blend, bg, partial);
+                controlPass &= contrast >= 40 && cutoutError <= 12;
+                blendPass &= blend[0] >= 60 && blend[0] - Math.max(blend[1], blend[2]) >= 40
+                        && colorDistance(blend, bg) >= 40;
+                // Projection alone can place a black or neutral image between
+                // colored endpoints. Require both foreground and background hues.
+                int backgroundChannel = half == 0 ? 1 : 2, unusedChannel = half == 0 ? 2 : 1;
+                fractionalPass &= colorDistance(partial, blend) >= 15 && colorDistance(partial, bg) >= 15
+                        && partial[0] - partial[unusedChannel] >= 30
+                        && partial[backgroundChannel] - partial[unusedChannel] >= 30
+                        && fraction > 0.08 && fraction < 0.92;
+                restoredPass &= restoredError <= 12;
+                System.out.println("GPU RETAINED ALPHA: region=" + (half == 0 ? "lower-green" : "upper-blue")
+                        + ", background=" + java.util.Arrays.toString(bg) + ", opaque=" + java.util.Arrays.toString(solid)
+                        + ", cutout=" + java.util.Arrays.toString(clipped) + ", blended=" + java.util.Arrays.toString(blend)
+                        + ", fractional=" + java.util.Arrays.toString(partial) + ", restored=" + java.util.Arrays.toString(again)
+                        + ", contrast=" + contrast + ", cutoutError=" + cutoutError + ", blendLightingDifference=" + blendLightingDifference
+                        + ", restoredBlendError=" + restoredError
+                        + ", fractionalBackgroundFraction=" + fraction);
+            }
+            BridgeContractTest.check(controlPass, "Opaque/cutout controls must agree and occlude both colored backgrounds");
+            BridgeContractTest.check(fractionalPass, "Alpha128 must reveal a measurable partial background in both regions; black/frozen/opaque controls fail");
+            BridgeContractTest.check(blendPass && restoredPass,
+                    "Alpha255 body samples must remain solid with ordinary retained blending, including after a same-handle fractional texture patch");
+            System.out.println("PASS: ordinary retained alpha255 body stays solid above/below the background horizon; fractional alpha remains visible.");
+        } finally {
+            for (long instance : instances) if (instance != 0) api.sceneInstanceRemove(instance);
+            for (long mesh : meshes) if (mesh != 0) api.destroyMesh(mesh);
+            for (long blend : blends) if (blend != 0) RemixBridge.freeExt(blend);
+            for (long material : materials) if (material != 0) api.destroyMaterial(material);
+            if (texture != 0) api.destroyTexture(texture);
+            if (light != 0) api.destroyLight(light);
+        }
+    }
+
+    private static ByteBuffer alphaPixels(int bodyAlpha) {
+        ByteBuffer pixels = ByteBuffer.allocateDirect(512 * 512 * 4).order(ByteOrder.LITTLE_ENDIAN);
+        for (int y = 0; y < 512; y++) for (int x = 0; x < 512; x++) {
+            int alpha = x == 510 && y < 78 ? 128 : bodyAlpha;
+            pixels.put((byte) 210).put((byte) 70).put((byte) 30).put((byte) alpha);
+        }
+        pixels.flip();
+        return pixels;
+    }
+
+    private static void alphaPatch(RemixAPI api, long texture, int alpha) {
+        TexturePatch patch = new TexturePatch();
+        patch.width = patch.height = 512; patch.rowPitch = 512 * 4;
+        patch.format = TextureFormat.RGBA8_SRGB; patch.pixelData = alphaPixels(alpha);
+        TextureBatchEntry entry = new TextureBatchEntry(); entry.handle = texture; entry.patches = new TexturePatch[] {patch};
+        TexturePatchInfo update = new TexturePatchInfo(); update.entries = new TextureBatchEntry[] {entry};
+        api.updateTextureFromMemory(update);
+    }
+
+    private static long alphaQuad(RemixAPI api, long material, long hash,
+            float left, float right, float bottom, float top, float depth, float uvMin, float uvMax) {
+        MeshInfoSurfaceTriangles surface = new MeshInfoSurfaceTriangles();
+        surface.vertexBuffer = ByteBuffer.allocateDirect(4 * HardcodedVertex.STRIDE).order(ByteOrder.LITTLE_ENDIAN);
+        HardcodedVertex.create(left, bottom, depth, 0, 0, -1, uvMin, uvMin, 0xffffffff).writeTo(surface.vertexBuffer);
+        HardcodedVertex.create(right, bottom, depth, 0, 0, -1, uvMax, uvMin, 0xffffffff).writeTo(surface.vertexBuffer);
+        HardcodedVertex.create(right, top, depth, 0, 0, -1, uvMax, uvMax, 0xffffffff).writeTo(surface.vertexBuffer);
+        HardcodedVertex.create(left, top, depth, 0, 0, -1, uvMin, uvMax, 0xffffffff).writeTo(surface.vertexBuffer);
+        surface.vertexBuffer.flip();
+        surface.indexBuffer = ByteBuffer.allocateDirect(6 * 4).order(ByteOrder.LITTLE_ENDIAN);
+        // Both geometric and interpolated normals face the camera at -Z.
+        surface.indexBuffer.putInt(0).putInt(2).putInt(1).putInt(0).putInt(3).putInt(2).flip();
+        surface.vertexCount = 4; surface.indexCount = 6; surface.material = material;
+        MeshInfo mesh = new MeshInfo(); mesh.hash = hash; mesh.surfaces = new MeshInfoSurfaceTriangles[] {surface};
+        return api.createMesh(mesh);
+    }
+
+    private static byte[] alphaImage(RemixAPI api, LegacyGlInterop interop, int framebuffer,
+            long hwnd, CameraInfo camera, long light, String name) throws Exception {
+        long first = 0, last = 0;
+        for (int frame = 0; frame < 30; frame++) {
+            api.setupCamera(camera); api.drawLightInstance(light); api.submit(null);
+            InteropInfo info = api.dxvkGetInteropInfo();
+            last = info.dxvkDoneSemaphore_ValueToWait;
+            if (frame == 0) first = last;
+            long done = interop.copyToFramebuffer(info, framebuffer, 320, 240, true);
+            PresentInfo present = new PresentInfo(); present.hwndOverride = hwnd;
+            present.skipVulkanSwapchain = 1; present.clientDoneSemaphore_ValueToWait = done; api.present(present);
+        }
+        byte[] pixels = readImageAndVerifyState();
+        saveImage(pixels, "gpu-retained-alpha-" + name + ".png");
+        System.out.println("GPU RETAINED ALPHA: stage=" + name + ", timeline=" + first + ".." + last);
+        BridgeContractTest.check(last > first, "Retained alpha diagnostic must advance native frames: " + name);
+        return pixels;
+    }
+
+    private static double[] alphaRegion(byte[] pixels, int half) {
+        double[] mean = new double[3];
+        int firstY = half == 0 ? 88 : 136;
+        for (int y = firstY; y < firstY + 16; y++) for (int x = 148; x < 172; x++) {
+            int at = (y * 320 + x) * 4;
+            for (int channel = 0; channel < 3; channel++) mean[channel] += pixels[at + channel] & 255;
+        }
+        for (int channel = 0; channel < 3; channel++) mean[channel] /= 16 * 24;
+        return mean;
+    }
+
+    private static double colorDistance(double[] first, double[] second) {
+        return (Math.abs(first[0] - second[0]) + Math.abs(first[1] - second[1]) + Math.abs(first[2] - second[2])) / 3;
+    }
+
+    /** Contrast along the measured opaque-to-background axis, independent of tone-mapped saturation. */
+    private static double backgroundFraction(double[] opaque, double[] background, double[] sample) {
+        double dot = 0, length = 0;
+        for (int channel = 0; channel < 3; channel++) {
+            double delta = background[channel] - opaque[channel];
+            dot += (sample[channel] - opaque[channel]) * delta; length += delta * delta;
+        }
+        return length == 0 ? Double.NaN : dot / length;
     }
 
     /** Matches ItemScene's create/update/retire order while changing local vertices every frame. */

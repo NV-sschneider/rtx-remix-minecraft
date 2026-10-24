@@ -585,10 +585,12 @@ unchanged.
 Native first-person probes under the Forge runtime configuration pass at the
 origin and at positive/negative 15,000-block coordinates, including rotated
 cameras and per-frame replacement of opaque, cutout, and alpha-blended meshes.
-The live empty hand is visible. The settled sword/bow image check remains pending
-an active Windows desktop: earlier captures reached the newly selected item while
-its equip animation was still lowered. The fixture now waits for both vanilla
-equip-progress samples before applying its strict sword-pixel check. Optional
+The windowed RLCraft run `20261024-171909-a0f028f4` passed the settled sword image
+check, swing/bow-use/FOV checks, hand/body visibility transitions, reload, and held
+lights at X=15,662; sword and drawn-bow screenshots were inspected. Earlier
+captures reached the newly selected item while its equip animation was still
+lowered. The fixture now waits for both vanilla equip-progress samples before
+applying its strict sword-pixel check. Optional
 `-Drlcraftremix.viewModelDiagnostics=true` records bounded pose/projection details
 and captures a vanilla control if that image check fails.
 
@@ -596,6 +598,24 @@ The default Arisaur's binary-alpha body now renders as solid geometry. Flowersau
 contains authored fractional alpha, so it retains blending; its raised tail's
 visibility at the horizon remains unresolved. The user's exact reported creature
 is not yet identified, and still screenshots do not establish temporal ghosting.
+The same-camera comparison (`20261024-173301-2b173457`) confirms that the tail is
+visible with Remix disabled. Add
+`-Drlcraftremix.compatibilityVanillaComparison=true` to the compatibility fixture
+to capture this pair: it verifies the same client entities and root positions,
+waits 40 client ticks while disabled, then restores and settles the complete native
+cohort before continuing the animation/reload/removal checks. Idle animation
+continues between captures, so the comparison is not pixel-aligned.
+Separate diagnostic runs with `rtx.nativeMipBias = -16` (`173526`) and
+`rtx.resolveOpaquenessThreshold = 0.5` (`173727`) still show the tail defect; the
+native logs confirm each setting was loaded. Both overrides were removed after
+testing. These results do not establish the cause or justify forcing fractional
+materials opaque.
+
+The isolated native retained-alpha probe passes with Forge settings and ordinary
+world geometry: alpha-255 samples occlude contrasting backgrounds, alpha-128
+samples reveal them, and a same-handle texture patch restores coverage. This
+rules out a blanket inability to render opaque pixels on a blended surface; it
+does not reproduce Flowersaur's mesh, texture footprint, or temporal behavior.
 
 ## RLCraft test instance
 

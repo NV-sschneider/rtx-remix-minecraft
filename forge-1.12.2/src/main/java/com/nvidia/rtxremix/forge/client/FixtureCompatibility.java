@@ -22,7 +22,7 @@ import net.minecraft.world.WorldServer;
 
 /** Actual installed dragons, animated custom mobs, alpha cutouts, and a boss in the dedicated smoke save. */
 final class FixtureCompatibility implements AutoCloseable {
-    private enum Phase { ARRIVE, VISIBLE, ANIMATE_ACTION, ANIMATE, MOVE_ACTION, MOVED, OFFSCREEN,
+    private enum Phase { ARRIVE, VISIBLE, VANILLA_COMPARISON, COMPARISON_REENABLED, ANIMATE_ACTION, ANIMATE, MOVE_ACTION, MOVED, OFFSCREEN,
         VISIBLE_AGAIN, RELOAD, REMOVE_ACTION, REMOVED, RETURN, DONE }
     private final Minecraft mc;
     private final ClientEvents events;
@@ -41,10 +41,15 @@ final class FixtureCompatibility implements AutoCloseable {
     private final long[] transforms = new long[FixtureCompatibilityEntities.NAMES.length];
     private final boolean[] movedNative = new boolean[FixtureCompatibilityEntities.NAMES.length];
     private final boolean[] spoke = new boolean[2];
+    private final boolean vanillaComparison = Boolean.getBoolean("rlcraftremix.compatibilityVanillaComparison");
+    private final Entity[] comparisonEntities = new Entity[FixtureCompatibilityEntities.NAMES.length];
+    private final double[] comparisonPositions = new double[FixtureCompatibilityEntities.NAMES.length * 3];
     private Phase phase = Phase.ARRIVE;
     private Future<?> action;
     private long since = System.nanoTime(), progress = since, frame = -1, reloadBaseline, failureBaseline;
     private boolean cleanupQueued, serverFlying, settingsChanged, difficultyLocked;
+    private boolean comparisonSuspended;
+    private int comparisonTicks;
     private EnumDifficulty difficulty;
     private String griefing, fireTick;
     private float yaw = 180;
@@ -105,8 +110,9 @@ final class FixtureCompatibility implements AutoCloseable {
     }
 
     boolean tick() throws Exception {
+        boolean vanilla = phase == Phase.VANILLA_COMPARISON && comparisonSuspended;
         if (mc.getIntegratedServer() != server || mc.world != clientWorld || mc.player == null
-                || !events.isEnabled() || events.failureMessage() != null)
+                || events.isEnabled() == vanilla || events.failureMessage() != null)
             throw new IllegalStateException("Compatibility fixture renderer/world unavailable");
         if (EntityCaptureHooks.offscreenFailureCount() != failureBaseline)
             throw new IllegalStateException("A compatibility renderer failed supplementary capture: " + status());
@@ -122,13 +128,28 @@ final class FixtureCompatibility implements AutoCloseable {
                 break;
             case VISIBLE:
                 if (settled(captured() && normal(true), 45)) {
-                    capture("compatibility-dragons-maka-rahovart-arisaurs"); log("VISIBLE_PASS"); baseline();
-                    action = server.callFromMainThread(() -> {
-                        requireWorld();
-                        for (int i = 0; i < 2; i++) FixtureCompatibilityEntities.animate(ownedEntity(i));
-                        return null;
-                    });
-                    transition(Phase.ANIMATE_ACTION);
+                    snapshotComparisonEntities();
+                    capture("compatibility-dragons-maka-rahovart-arisaurs"); log("VISIBLE_PASS");
+                    if (vanillaComparison) {
+                        log("COMPARISON_NATIVE");
+                        comparisonSuspended = true;
+                        events.setEnabled(false);
+                        transition(Phase.VANILLA_COMPARISON);
+                    } else beginAnimation();
+                }
+                break;
+            case VANILLA_COMPARISON:
+                // Native frame counters stop while disabled. Count actual client ticks;
+                // the same no-AI cohort and held camera remain in this owned scene.
+                if (++comparisonTicks >= 40) {
+                    captureVanillaComparison();
+                    transition(Phase.COMPARISON_REENABLED);
+                }
+                break;
+            case COMPARISON_REENABLED:
+                if (settled(captured() && normal(true), 45)) {
+                    requireComparisonEntities(); log("COMPARISON_REENABLED_PASS");
+                    beginAnimation();
                 }
                 break;
             case ANIMATE_ACTION:
@@ -189,6 +210,59 @@ final class FixtureCompatibility implements AutoCloseable {
             default: break;
         }
         return phase == Phase.DONE;
+    }
+
+    private void beginAnimation() {
+        // Disabling destroys native owners, so take the original animation baselines
+        // only after the comparison has restored and settled the complete cohort.
+        baseline();
+        action = server.callFromMainThread(() -> {
+            requireWorld();
+            for (int i = 0; i < 2; i++) FixtureCompatibilityEntities.animate(ownedEntity(i));
+            return null;
+        });
+        transition(Phase.ANIMATE_ACTION);
+    }
+    private void snapshotComparisonEntities() {
+        if (!vanillaComparison) return;
+        for (int i = 0; i < layout.ids.length; i++) {
+            Entity entity = clientEntity(layout.ids[i]);
+            if (entity == null) throw new IllegalStateException("Compatibility comparison entity is unavailable");
+            comparisonEntities[i] = entity;
+            comparisonPositions[i * 3] = entity.posX;
+            comparisonPositions[i * 3 + 1] = entity.posY;
+            comparisonPositions[i * 3 + 2] = entity.posZ;
+        }
+    }
+    private void requireComparisonEntities() {
+        for (int i = 0; i < layout.ids.length; i++) {
+            Entity entity = clientEntity(layout.ids[i]);
+            if (entity != comparisonEntities[i] || entity == null
+                    || Math.abs(entity.posX - comparisonPositions[i * 3]) > 0.01
+                    || Math.abs(entity.posY - comparisonPositions[i * 3 + 1]) > 0.01
+                    || Math.abs(entity.posZ - comparisonPositions[i * 3 + 2]) > 0.01)
+                throw new IllegalStateException("Compatibility comparison cohort moved or was replaced: " + i);
+        }
+    }
+    private void captureVanillaComparison() throws Exception {
+        Throwable failure = null;
+        try {
+            requireComparisonEntities();
+            capture("compatibility-vanilla-dragons-maka-rahovart-arisaurs");
+            log("COMPARISON_VANILLA");
+        } catch (Exception | Error error) {
+            failure = error; throw error;
+        } finally {
+            try { restoreComparisonRenderer(); }
+            catch (RuntimeException | Error cleanup) {
+                if (failure != null) failure.addSuppressed(cleanup); else throw cleanup;
+            }
+        }
+    }
+    private void restoreComparisonRenderer() {
+        if (!comparisonSuspended) return;
+        if (!events.isEnabled() && events.failureMessage() == null) events.setEnabled(true);
+        comparisonSuspended = false;
     }
 
     private void observeAnimation() throws Exception {
@@ -305,10 +379,14 @@ final class FixtureCompatibility implements AutoCloseable {
                     .append(",updates=").append(id == null ? 0 : events.entityTransformUpdates(id)).append('}');
         }
         return result.append(" spoke=").append(spoke[0]).append(',').append(spoke[1])
+                .append(" comparison=").append(vanillaComparison).append(" comparisonTicks=").append(comparisonTicks)
                 .append(" supplementary=").append(EntityCaptureHooks.offscreenEntityCount())
                 .append(" failures=").append(EntityCaptureHooks.offscreenFailureCount()).toString();
     }
-    @Override public void close() { restoreClient(); if (!cleanupQueued) { cleanupQueued = true; restoreServer(); } }
+    @Override public void close() {
+        try { restoreComparisonRenderer(); }
+        finally { restoreClient(); if (!cleanupQueued) { cleanupQueued = true; restoreServer(); } }
+    }
 
     static final class Layout {
         final int x, y, z;

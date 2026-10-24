@@ -57,6 +57,24 @@ untouched reference. Its three images use the `gpu-smoke-normal-` prefix.
 The window is shown offscreen because the runtime skips rendering invisible
 windows. The test does not launch Minecraft or prove in-game rendering.
 
+Three opt-in `GlInteropSmokeTest` JVM modes isolate rendering contracts:
+`-Drlcraftremix.gpuViewModelOnly=true` checks camera-local precision,
+`-Drlcraftremix.gpuViewModelReplacementOnly=true` checks animated mesh replacement,
+and `-Drlcraftremix.gpuRetainedAlphaOnly=true` checks ordinary world alpha coverage.
+Run one mode per process with the compiled test classpath and the same three DLL
+arguments used by `build-bridge.ps1`. To exercise Forge defaults, copy
+`forge-1.12.2/config/rtx.conf` into the test working directory before running;
+the build script's ordinary GPU smoke uses the root Fabric configuration.
+
+The retained-alpha probe keeps one foreground material, mesh, and instance while
+switching opaque/cutout/blended draw state, then patches the retained texture to
+half alpha and back. A uniformly lit foreground must hide two differently colored
+backgrounds at full alpha and reveal them partially at half alpha. Its comparison
+uses the blended surface's own lighting baseline because the runtime's approximate
+blend lighting need not match its opaque BRDF. The probe includes fractional
+texels outside the sampled body region; it does not reproduce a complete mob,
+animation, or every mip footprint. Images use the `gpu-retained-alpha-` prefix.
+
 Before the repository layout migration, the GPU test passed with Java 8,
 an RTX 5090, driver 621.1.0 and the pinned runtime
 `remix-main+71a581da`. Runtime shutdown completed and the JVM exited successfully.
