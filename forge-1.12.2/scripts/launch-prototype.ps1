@@ -12,8 +12,21 @@ param(
     [switch]$CloudSmokeTest,
     [switch]$PbrSmokeTest,
     [switch]$FirstPersonSmokeTest,
+    [switch]$HeldLightSmokeTest,
+    [switch]$GlintSmokeTest,
+    [switch]$FoliageSmokeTest,
     [switch]$TileSmokeTest,
+    [switch]$CompatibilitySmokeTest,
+    [switch]$SurvivalSmokeTest,
+    [switch]$DimensionSmokeTest,
     [switch]$WindowSmokeTest,
+    [switch]$WindowMinimizeSmokeTest,
+    [switch]$TerrainOptimizationSmokeTest,
+    [switch]$SoakSmokeTest,
+    [ValidateRange(60, 7200)][int]$SoakSeconds = 1800,
+    [switch]$MultiplayerSmokeTest,
+    [ValidateRange(1024, 65535)][int]$MultiplayerPort = 25565,
+    [string]$MultiplayerFixtureId,
     [switch]$TerrainSmokeTest,
     [switch]$TerrainNaturalSmokeTest,
     [ValidateRange(4, 32)]
@@ -49,8 +62,31 @@ if ($CombatSmokeTest -and -not $SmokeTest) { throw '-CombatSmokeTest requires -S
 if ($CloudSmokeTest -and -not $SmokeTest) { throw '-CloudSmokeTest requires -SmokeTest.' }
 if ($PbrSmokeTest -and -not $SmokeTest) { throw '-PbrSmokeTest requires -SmokeTest.' }
 if ($FirstPersonSmokeTest -and -not $SmokeTest) { throw '-FirstPersonSmokeTest requires -SmokeTest.' }
+if ($GlintSmokeTest -and -not $SmokeTest) { throw '-GlintSmokeTest requires -SmokeTest.' }
+if ($HeldLightSmokeTest -and -not $SmokeTest) { throw '-HeldLightSmokeTest requires -SmokeTest.' }
+if ($FoliageSmokeTest -and -not $SmokeTest) { throw '-FoliageSmokeTest requires -SmokeTest.' }
 if ($TileSmokeTest -and -not $SmokeTest) { throw '-TileSmokeTest requires -SmokeTest.' }
+if ($CompatibilitySmokeTest -and -not $SmokeTest) { throw '-CompatibilitySmokeTest requires -SmokeTest.' }
+if ($SurvivalSmokeTest -and -not $SmokeTest) { throw '-SurvivalSmokeTest requires -SmokeTest.' }
+if ($DimensionSmokeTest -and -not $SmokeTest) { throw '-DimensionSmokeTest requires -SmokeTest.' }
+if ($WindowMinimizeSmokeTest -and -not $WindowSmokeTest) { throw '-WindowMinimizeSmokeTest requires -WindowSmokeTest and its external owned-window helper.' }
 if ($WindowSmokeTest -and -not $SmokeTest) { throw '-WindowSmokeTest requires -SmokeTest.' }
+if ($TerrainOptimizationSmokeTest -and -not $SmokeTest) { throw '-TerrainOptimizationSmokeTest requires -SmokeTest.' }
+if ($SoakSmokeTest -and -not $SmokeTest) { throw '-SoakSmokeTest requires -SmokeTest.' }
+if ($PSBoundParameters.ContainsKey('SoakSeconds') -and -not $SoakSmokeTest) { throw '-SoakSeconds requires -SoakSmokeTest.' }
+if ($MultiplayerSmokeTest) {
+    if (-not $SmokeTest -or $MultiplayerFixtureId -notmatch '^[a-zA-Z0-9][a-zA-Z0-9-]{0,47}$') {
+        throw '-MultiplayerSmokeTest requires -SmokeTest and a fixture ID from the prepared local server.'
+    }
+    if ($EntitySmokeTest -or $SkySmokeTest -or $MaterialSmokeTest -or $ObjectSmokeTest -or $EffectSmokeTest -or
+        $CombatSmokeTest -or $CloudSmokeTest -or $PbrSmokeTest -or $FirstPersonSmokeTest -or $HeldLightSmokeTest -or
+        $GlintSmokeTest -or $FoliageSmokeTest -or $TileSmokeTest -or $CompatibilitySmokeTest -or $DimensionSmokeTest -or
+        $WindowSmokeTest -or $WindowMinimizeSmokeTest -or $TerrainOptimizationSmokeTest -or $SoakSmokeTest -or $TerrainSmokeTest -or $SurvivalSmokeTest) {
+        throw 'Multiplayer smoke runs separately from integrated-world fixtures.'
+    }
+} elseif ($PSBoundParameters.ContainsKey('MultiplayerPort') -or $PSBoundParameters.ContainsKey('MultiplayerFixtureId')) {
+    throw '-MultiplayerPort and -MultiplayerFixtureId require -MultiplayerSmokeTest.'
+}
 if ($TerrainSmokeTest -and -not $SmokeTest) { throw '-TerrainSmokeTest requires -SmokeTest.' }
 if ($TerrainNaturalSmokeTest -and -not $TerrainSmokeTest) { throw '-TerrainNaturalSmokeTest requires -TerrainSmokeTest.' }
 if ($PSBoundParameters.ContainsKey('TerrainSmokeRadius') -and -not $TerrainSmokeTest) {
@@ -112,7 +148,7 @@ for ($i = $generalStart + 1; $i -lt $lines.Length; $i++) {
 $general = @($lines[($generalStart + 1)..($generalEnd - 1)])
 $argsLine = $general | Where-Object { $_ -match '^JvmArgs=' } | Select-Object -First 1
 $jvmArgs = if ($argsLine) { $argsLine.Substring(8).Trim('"') } else { '' }
-$jvmArgs = ($jvmArgs -replace '(?:^|\s)-Drlcraftremix\.smoke(?:\.(?:exit|entities|sky|materials|objects|effects|combat|clouds|pbr|firstperson|tiles|window|terrain|terrainNatural|terrainRadius))?=\S+', '').Trim()
+$jvmArgs = ($jvmArgs -replace '(?:^|\s)-Drlcraftremix\.smoke(?:\.(?:exit|entities|sky|materials|objects|effects|combat|clouds|pbr|firstperson|heldlights|glint|foliage|tiles|compatibility|survival|dimensions|window|windowMinimize|terrain|terrainOptimization|soak|soakSeconds|terrainNatural|terrainRadius|multiplayer|multiplayerPort|multiplayerFixtureId))?=\S+', '').Trim()
 if ($SmokeTest) { $jvmArgs = "$jvmArgs -Drlcraftremix.smoke=true".Trim() }
 if ($ExitAfterSmoke) { $jvmArgs += ' -Drlcraftremix.smoke.exit=true' }
 if ($EntitySmokeTest) { $jvmArgs += ' -Drlcraftremix.smoke.entities=true' }
@@ -124,8 +160,18 @@ if ($CombatSmokeTest) { $jvmArgs += ' -Drlcraftremix.smoke.combat=true' }
 if ($CloudSmokeTest) { $jvmArgs += ' -Drlcraftremix.smoke.clouds=true' }
 if ($PbrSmokeTest) { $jvmArgs += ' -Drlcraftremix.smoke.pbr=true' }
 if ($FirstPersonSmokeTest) { $jvmArgs += ' -Drlcraftremix.smoke.firstperson=true' }
+if ($GlintSmokeTest) { $jvmArgs += ' -Drlcraftremix.smoke.glint=true' }
+if ($HeldLightSmokeTest) { $jvmArgs += ' -Drlcraftremix.smoke.heldlights=true' }
+if ($FoliageSmokeTest) { $jvmArgs += ' -Drlcraftremix.smoke.foliage=true' }
 if ($TileSmokeTest) { $jvmArgs += ' -Drlcraftremix.smoke.tiles=true' }
+if ($CompatibilitySmokeTest) { $jvmArgs += ' -Drlcraftremix.smoke.compatibility=true' }
+if ($SurvivalSmokeTest) { $jvmArgs += ' -Drlcraftremix.smoke.survival=true' }
+if ($DimensionSmokeTest) { $jvmArgs += ' -Drlcraftremix.smoke.dimensions=true' }
+if ($WindowMinimizeSmokeTest) { $jvmArgs += ' -Drlcraftremix.smoke.windowMinimize=true' }
 if ($WindowSmokeTest) { $jvmArgs += ' -Drlcraftremix.smoke.window=true' }
+if ($TerrainOptimizationSmokeTest) { $jvmArgs += ' -Drlcraftremix.smoke.terrainOptimization=true' }
+if ($SoakSmokeTest) { $jvmArgs += " -Drlcraftremix.smoke.soak=true -Drlcraftremix.smoke.soakSeconds=$SoakSeconds" }
+if ($MultiplayerSmokeTest) { $jvmArgs += " -Drlcraftremix.smoke.multiplayer=true -Drlcraftremix.smoke.multiplayerPort=$MultiplayerPort -Drlcraftremix.smoke.multiplayerFixtureId=$MultiplayerFixtureId" }
 if ($TerrainSmokeTest) { $jvmArgs += " -Drlcraftremix.smoke.terrain=true -Drlcraftremix.smoke.terrainRadius=$TerrainSmokeRadius" }
 if ($TerrainNaturalSmokeTest) { $jvmArgs += ' -Drlcraftremix.smoke.terrainNatural=true' }
 $general = @($general | Where-Object { $_ -notmatch '^(JvmArgs|OverrideJavaArgs)=' })
