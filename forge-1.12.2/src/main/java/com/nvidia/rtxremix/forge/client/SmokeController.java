@@ -65,7 +65,7 @@ final class SmokeController {
 
     private enum State {
         INACTIVE, WAIT_MENU, WAIT_WORLD, BUILD_SCENE, SETTLE, REMIX, VANILLA,
-        REENABLE, MATERIALS, GLASS, OBJECTS, EFFECTS, COMBAT, CLOUDS, PBR, TERRAIN,
+        REENABLE, MATERIALS, GLASS, OBJECTS, EFFECTS, COMBAT, CLOUDS, PBR, FIRSTPERSON, TILES, WINDOW, TERRAIN,
         SKY_APPLY, SKY_CAPTURE, RESTORE_RULES, DISCONNECT, UNLOAD, EXIT, DONE
     }
 
@@ -86,7 +86,7 @@ final class SmokeController {
     private final boolean includeMaterials;
     private final boolean includeObjects;
     private final boolean includeEffects;
-    private final boolean includeCombat, includeClouds, includePbr;
+    private final boolean includeCombat, includeClouds, includePbr, includeFirstPerson, includeTiles, includeWindow;
     private final String id;
     private State state;
     private long stateSince;
@@ -141,6 +141,11 @@ final class SmokeController {
     private FixtureClouds cloudFixture;
     private FixturePbr pbrFixture;
     private volatile FixturePbr.Layout pbrLayout;
+    private FixtureFirstPerson firstPersonFixture;
+    private volatile FixtureFirstPerson.Layout firstPersonLayout;
+    private FixtureTiles tileFixture;
+    private volatile FixtureTiles.Layout tileLayout;
+    private FixtureWindowOverlay windowFixture;
     private GuiScreen initializedMainMenu;
     private long lastImageProbeNanos;
     private long lastImageProbeFrame;
@@ -164,6 +169,9 @@ final class SmokeController {
         this.includeCombat = requested && Boolean.getBoolean("rlcraftremix.smoke.combat");
         this.includeClouds = requested && Boolean.getBoolean("rlcraftremix.smoke.clouds");
         this.includePbr = requested && Boolean.getBoolean("rlcraftremix.smoke.pbr");
+        this.includeFirstPerson = requested && Boolean.getBoolean("rlcraftremix.smoke.firstperson");
+        this.includeTiles = requested && Boolean.getBoolean("rlcraftremix.smoke.tiles");
+        this.includeWindow = requested && Boolean.getBoolean("rlcraftremix.smoke.window");
         this.id = requested
                 ? DateTimeFormatter.ofPattern("uuuuMMdd-HHmmss").withZone(ZoneOffset.UTC).format(Instant.now())
                         + "-" + UUID.randomUUID().toString().substring(0, 8)
@@ -174,6 +182,7 @@ final class SmokeController {
                 + " sky=" + includeSky + " terrain=" + includeTerrain + " naturalTerrain=" + naturalTerrain
                 + " materials=" + includeMaterials + " objects=" + includeObjects + " effects=" + includeEffects
                 + " combat=" + includeCombat + " clouds=" + includeClouds + " pbr=" + includePbr
+                + " firstperson=" + includeFirstPerson + " tiles=" + includeTiles + " window=" + includeWindow
                 + " validation=capture_and_lifecycle pixelValidation=nonblank_fixture");
     }
 
@@ -375,6 +384,21 @@ final class SmokeController {
                     if (!fixtureReady()) break;
                     lastFrames = events.renderedFrames();
                     if (pbrFixture.tick()) beginAfterPbr();
+                    break;
+                case FIRSTPERSON:
+                    if (!fixtureReady()) break;
+                    lastFrames = events.renderedFrames();
+                    if (firstPersonFixture.tick()) beginAfterFirstPerson();
+                    break;
+                case TILES:
+                    if (!fixtureReady()) break;
+                    lastFrames = events.renderedFrames();
+                    if (tileFixture.tick()) beginAfterTiles();
+                    break;
+                case WINDOW:
+                    if (!fixtureReady()) break;
+                    lastFrames = events.renderedFrames();
+                    if (windowFixture.tick()) beginAfterWindow();
                     break;
                 case TERRAIN:
                     if (!fixtureReady()) break;
@@ -601,6 +625,8 @@ final class SmokeController {
         if (includeEffects) effectLayout = FixtureEffects.build(world, cx, floorY, cz + 40);
         if (includeCombat) combatLayout = FixtureCombat.build(world, cx, floorY, cz - 40);
         if (includePbr) pbrLayout = FixturePbr.build(world, cx + 32, floorY, cz + 40);
+        if (includeFirstPerson) firstPersonLayout = FixtureFirstPerson.build(world, cx - 32, floorY, cz - 40);
+        if (includeTiles) tileLayout = FixtureTiles.build(world, cx + 128, floorY, cz);
         Pose result = new Pose(cx + 0.5, floorY + 4.0, cz + 17.5, 180f, 16f, creatures);
         world.setSpawnPoint(new BlockPos(cx, floorY + 1, cz + 12));
         player.setGameType(GameType.CREATIVE);
@@ -620,6 +646,9 @@ final class SmokeController {
         if (combatFixture != null) combatFixture.close();
         if (cloudFixture != null) cloudFixture.close();
         if (pbrFixture != null) pbrFixture.close();
+        if (firstPersonFixture != null) firstPersonFixture.close();
+        if (tileFixture != null) tileFixture.close();
+        if (windowFixture != null) windowFixture.close();
         restoreForSuccess = success;
         pendingFailure = failureFields;
         transition(State.RESTORE_RULES);
@@ -743,6 +772,30 @@ final class SmokeController {
     }
 
     private void beginAfterPbr() {
+        if (includeFirstPerson) {
+            firstPersonFixture = new FixtureFirstPerson(mc, events, fixtureServer, fixtureServerWorld,
+                    saveName, firstPersonLayout, pose.x, pose.y, pose.z, pose.yaw, pose.pitch, fixtureOutput());
+            transition(State.FIRSTPERSON);
+        } else beginAfterFirstPerson();
+    }
+
+    private void beginAfterFirstPerson() {
+        if (includeTiles) {
+            tileFixture = new FixtureTiles(mc, events, fixtureServer, fixtureServerWorld,
+                    saveName, tileLayout, pose.x, pose.y, pose.z, pose.yaw, pose.pitch, fixtureOutput());
+            transition(State.TILES);
+        } else beginAfterTiles();
+    }
+
+    private void beginAfterTiles() {
+        if (includeWindow) {
+            windowFixture = new FixtureWindowOverlay(mc, events, fixtureServer, fixtureServerWorld,
+                    saveName, fixtureOutput());
+            transition(State.WINDOW);
+        } else beginAfterWindow();
+    }
+
+    private void beginAfterWindow() {
         if (includeTerrain) beginTerrainFixture();
         else if (includeSky) beginSkyPhase(SkyPhase.DAY);
         else beginRuleRestoration(true, null);
@@ -1040,7 +1093,9 @@ final class SmokeController {
     private long timeoutForState() {
         // Terrain owns a bounded deadline for each independent readiness phase.
         if (state == State.TERRAIN || state == State.MATERIALS || state == State.GLASS
-                || state == State.OBJECTS || state == State.EFFECTS)
+                || state == State.OBJECTS || state == State.EFFECTS || state == State.COMBAT
+                || state == State.CLOUDS || state == State.PBR || state == State.FIRSTPERSON
+                || state == State.TILES || state == State.WINDOW)
             return NATIVE_TIMEOUT * 10;
         if (state == State.REMIX || state == State.REENABLE || state == State.SKY_CAPTURE) return NATIVE_TIMEOUT;
         if (state == State.SETTLE || state == State.VANILLA || state == State.RESTORE_RULES || state == State.DISCONNECT
@@ -1076,6 +1131,9 @@ final class SmokeController {
                 + (combatFixture == null ? "" : " " + combatFixture.status())
                 + (cloudFixture == null ? "" : " " + cloudFixture.status())
                 + (pbrFixture == null ? "" : " " + pbrFixture.status())
+                + (firstPersonFixture == null ? "" : " " + firstPersonFixture.status())
+                + (tileFixture == null ? "" : " " + tileFixture.status())
+                + (windowFixture == null ? "" : " " + windowFixture.status())
                 + (imageReadiness == null ? "" : " " + imageReadiness.describe()));
     }
 
@@ -1094,6 +1152,9 @@ final class SmokeController {
         if (combatFixture != null) combatFixture.close();
         if (cloudFixture != null) cloudFixture.close();
         if (pbrFixture != null) pbrFixture.close();
+        if (firstPersonFixture != null) firstPersonFixture.close();
+        if (tileFixture != null) tileFixture.close();
+        if (windowFixture != null) windowFixture.close();
         events.setEnabled(false);
         if (settingsSaved) {
             mc.gameSettings.pauseOnLostFocus = previousPauseOnLostFocus;
@@ -1125,6 +1186,11 @@ final class SmokeController {
             cloudFixture = null;
             pbrFixture = null;
             pbrLayout = null;
+            firstPersonFixture = null;
+            firstPersonLayout = null;
+            tileFixture = null;
+            tileLayout = null;
+            windowFixture = null;
             clientRules = null;
             serverRules = null;
             clientEnvironment = null;

@@ -22,6 +22,7 @@ import net.minecraft.entity.projectile.EntityTippedArrow;
 import net.minecraft.init.Blocks;
 import net.minecraft.server.integrated.IntegratedServer;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.AxisAlignedBB;
 import net.minecraft.world.WorldServer;
 
 /** Server-owned projectiles and camera turns distinguish normal draws from supplementary capture. */
@@ -46,6 +47,7 @@ final class FixtureCombat implements AutoCloseable {
     private float yaw = 180;
     private GuiScreen ownedScreen;
     private boolean cleanupQueued;
+    private int stationaryFireballRepairs;
 
     FixtureCombat(Minecraft mc, ClientEvents events, IntegratedServer server, WorldServer world,
             String save, Layout layout, double x, double y, double z, float yaw, float pitch,
@@ -71,6 +73,7 @@ final class FixtureCombat implements AutoCloseable {
             log("PROGRESS"); lastProgress = System.nanoTime();
         }
         if (phase != Phase.RETURN && phase != Phase.DONE) holdPose();
+        repairStationaryFireball();
         switch (phase) {
             case ARRIVE:
                 if (complete()) transition(Phase.READY);
@@ -129,7 +132,7 @@ final class FixtureCombat implements AutoCloseable {
             case INVENTORY:
                 if (settled(mc.currentScreen == ownedScreen && ready(false), 30)) {
                     capture("combat-inventory"); log("INVENTORY_PASS");
-                    mc.displayGuiScreen(null); ownedScreen = null;
+                    mc.player.closeScreen(); ownedScreen = null;
                     action = server.callFromMainThread(() -> { requireWorld(); removeEntities(); return null; });
                     transition(Phase.REMOVE);
                 }
@@ -177,6 +180,7 @@ final class FixtureCombat implements AutoCloseable {
         layout.arrow = arrow.getUniqueID(); layout.snowball = snowball.getUniqueID();
         layout.fireball = fireball.getUniqueID(); layout.cow = cow.getUniqueID();
         layout.arrowEntityId = arrow.getEntityId();
+        layout.fireballEntityId = fireball.getEntityId();
         return layout;
     }
 
@@ -214,6 +218,30 @@ final class FixtureCombat implements AutoCloseable {
         mc.player.prevRotationYaw = yaw; mc.player.prevRotationPitch = 20;
         mc.player.motionX = mc.player.motionY = mc.player.motionZ = 0; mc.player.capabilities.isFlying = true;
     }
+    private void repairStationaryFireball() {
+        Entity entity = mc.world.getEntityByID(layout.fireballEntityId);
+        if (!(entity instanceof EntitySmallFireball) || !layout.fireball.equals(entity.getUniqueID())) return;
+        EntitySmallFireball fireball = (EntitySmallFireball) entity;
+        AxisAlignedBB box = fireball.getEntityBoundingBox();
+        if (Double.isFinite(fireball.accelerationX) && Double.isFinite(fireball.accelerationY) && Double.isFinite(fireball.accelerationZ)
+                && Double.isFinite(fireball.motionX) && Double.isFinite(fireball.motionY) && Double.isFinite(fireball.motionZ)
+                && Double.isFinite(box.minX) && Double.isFinite(box.minY) && Double.isFinite(box.minZ)
+                && Double.isFinite(box.maxX) && Double.isFinite(box.maxY) && Double.isFinite(box.maxZ)) return;
+        // The vanilla spawn-packet constructor normalizes its acceleration vector,
+        // so this deliberately stationary fixture's zero vector becomes 0/0 on
+        // the client. World.updateEntity repairs positions but not that NaN AABB.
+        // Repair only this UUID-owned specimen; no gameplay renderer or culling
+        // setting changes, and the normal/offscreen assertions remain mandatory.
+        fireball.accelerationX = fireball.accelerationY = fireball.accelerationZ = 0;
+        fireball.motionX = fireball.motionY = fireball.motionZ = 0;
+        double x = layout.x + 4.5, y = layout.y + 2.8, z = layout.z + 10.5;
+        fireball.setPositionAndRotation(x, y, z, 0, 0);
+        fireball.prevPosX = fireball.lastTickPosX = x; fireball.prevPosY = fireball.lastTickPosY = y;
+        fireball.prevPosZ = fireball.lastTickPosZ = z;
+        fireball.prevRotationYaw = fireball.prevRotationPitch = 0;
+        stationaryFireballRepairs++;
+        log("STATIONARY_FIREBALL_REPAIRED");
+    }
     private void removeEntities() {
         for (UUID id : new UUID[] {layout.arrow, layout.snowball, layout.fireball, layout.cow}) {
             Entity entity = world.getEntityFromUuid(id); if (entity != null) entity.setDead();
@@ -241,11 +269,12 @@ final class FixtureCombat implements AutoCloseable {
                 + " fireballNormal=" + EntityCaptureHooks.normallyRendered(layout.fireball)
                 + " cowNormal=" + EntityCaptureHooks.normallyRendered(layout.cow)
                 + " supplementary=" + EntityCaptureHooks.offscreenEntityCount()
+                + " fireballRepairs=" + stationaryFireballRepairs
                 + " failures=" + EntityCaptureHooks.offscreenFailureCount()
                 + " buffers=" + EntityCaptureHooks.nonlivingBufferCount();
     }
     @Override public void close() {
-        if (ownedScreen != null && mc.currentScreen == ownedScreen) mc.displayGuiScreen(null);
+        if (ownedScreen != null && mc.currentScreen == ownedScreen && mc.player != null) mc.player.closeScreen();
         ownedScreen = null;
         if (!cleanupQueued) {
             cleanupQueued = true;
@@ -255,7 +284,7 @@ final class FixtureCombat implements AutoCloseable {
     static final class Layout {
         final int x, y, z;
         UUID arrow, snowball, fireball, cow;
-        int arrowEntityId;
+        int arrowEntityId, fireballEntityId;
         Layout(int x, int y, int z) { this.x = x; this.y = y; this.z = z; }
     }
 }

@@ -9,6 +9,7 @@ import com.nvidia.rtxremix.forge.RemixForgeMod;
 import com.nvidia.rtxremix.forge.entity.CapturedEntityPart;
 import com.nvidia.rtxremix.forge.entity.EntityCaptureHooks;
 import com.nvidia.rtxremix.forge.entity.EntityScene;
+import com.nvidia.rtxremix.forge.entity.FastTileCaptureHooks;
 import com.nvidia.rtxremix.forge.item.CapturedItem;
 import com.nvidia.rtxremix.forge.item.ItemCaptureHooks;
 import com.nvidia.rtxremix.forge.item.ItemScene;
@@ -22,6 +23,8 @@ import com.nvidia.rtxremix.forge.runtime.ForgeRuntime;
 import com.nvidia.rtxremix.forge.cloud.CapturedCloudBatch;
 import com.nvidia.rtxremix.forge.cloud.CloudCaptureHooks;
 import com.nvidia.rtxremix.forge.cloud.CloudScene;
+import com.nvidia.rtxremix.forge.overlay.OverlayFrame;
+import com.nvidia.rtxremix.forge.overlay.OverlayHooks;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.WorldClient;
 
@@ -34,6 +37,10 @@ import java.util.UUID;
 final class PrototypeRenderer {
     private final Minecraft mc;
     private final CameraCapture camera = new CameraCapture();
+    private final CameraInfo viewModelCamera = new CameraInfo();
+    private final OverlayFrame overlayFrame = new OverlayFrame();
+    private CameraInfo preparedCamera;
+    private WorldClient preparedWorld;
     private RemixAPI api;
     private LegacyGlInterop interop;
     private TerrainCapture terrain;
@@ -47,11 +54,22 @@ final class PrototypeRenderer {
     private long hwnd;
     private long frames;
     private long textureReloads;
+    private long windowChanges;
     private boolean windowClosing;
     private boolean initialized;
+    private boolean nativeFramePending;
     private final PresentInfo present = new PresentInfo();
 
-    PrototypeRenderer(Minecraft mc) { this.mc = mc; }
+    PrototypeRenderer(Minecraft mc) {
+        this.mc = mc;
+        viewModelCamera.type = CameraType.VIEW_MODEL;
+    }
+
+    /** The hand pass replaces GL matrices, so retain the world camera before it starts. */
+    void prepareWorld(float partialTicks) {
+        preparedCamera = camera.capture(mc, partialTicks);
+        preparedWorld = mc.world;
+    }
 
     void render(float partialTicks, List<CapturedEntityPart> capturedParts,
             List<CapturedItem> capturedItems, List<CapturedEffectBatch> capturedEffects,
@@ -59,9 +77,7 @@ final class PrototypeRenderer {
         if (windowClosing) { return; }
         if (api == null) { initialize(); }
         if (!initialized) { throw new IllegalStateException("Native initialization failed; restart Minecraft before retrying."); }
-        if (hwnd != LegacyGlInterop.currentWindowHandle()) {
-            throw new IllegalStateException("Minecraft's window changed; restart the game before enabling Remix again.");
-        }
+        followWindow();
         if (world != mc.world) {
             releaseScene();
             world = mc.world;
@@ -77,19 +93,22 @@ final class PrototypeRenderer {
         entities.sync(capturedParts);
         items.sync(capturedItems, terrain.getAtlasTexture());
         effects.sync(capturedEffects, terrain.getAtlasTexture());
-        CameraInfo captured = camera.capture(mc, partialTicks);
+        if (preparedWorld != mc.world || preparedCamera == null) {
+            throw new IllegalStateException("No camera was prepared for this world frame");
+        }
+        CameraInfo captured = preparedCamera;
         api.setupCamera(captured);
+        viewModelCamera.parameterizedExt = captured.parameterizedExt;
+        api.setupCamera(viewModelCamera);
         clouds.sync(capturedClouds);
         medium.update(world, captured.parameterizedExt.position);
         terrain.updateLights(captured.parameterizedExt.position);
         sky.update(world, partialTicks, captured.parameterizedExt.position);
         api.submit(null);
-        long done = interop.copyToFramebuffer(api.dxvkGetInteropInfo(), mc.getFramebuffer().framebufferObject,
+        nativeFramePending = true;
+        interop.acquireToFramebuffer(api.dxvkGetInteropInfo(), mc.getFramebuffer().framebufferObject,
                 mc.displayWidth, mc.displayHeight, true);
-        present.skipVulkanSwapchain = 1;
-        present.hwndOverride = hwnd;
-        present.clientDoneSemaphore_ValueToWait = done;
-        api.present(present);
+        overlayFrame.capture(mc.getFramebuffer().framebufferObject, mc.displayWidth, mc.displayHeight);
         if (++frames == 1) {
             RemixForgeMod.LOG.info("RTX Remix Forge: first native frame submitted and copied into Minecraft's framebuffer.");
         }
@@ -107,12 +126,27 @@ final class PrototypeRenderer {
                 "--username", "--accessToken", "--uuid", "--xuid", "--clientId"));
         api = RemixAPI.load(runtime.getAbsolutePath());
         hwnd = LegacyGlInterop.currentWindowHandle();
-        api.startup(StartupInfo.builder().hwnd(hwnd).forceNoVkSwapchain(true).interopImage(true).build());
+        api.startup(StartupInfo.builder().hwnd(hwnd).forceNoVkSwapchain(false).interopImage(true)
+                .combineGuiInFinalColor(true).build());
         interop = new LegacyGlInterop(api.dxvkGetInteropInfo());
         initialized = true;
         frames = 0;
         RemixForgeMod.LOG.info("RTX Remix Forge: native renderer initialized (API {}.{}.{}, HWND {}).",
                 RemixAPI.VERSION_MAJOR, RemixAPI.VERSION_MINOR, RemixAPI.VERSION_PATCH, Long.toHexString(hwnd));
+    }
+
+    private void followWindow() {
+        long current = LegacyGlInterop.currentWindowHandle();
+        if (current == hwnd) return;
+        if (current == 0) throw new IllegalStateException("Minecraft has no current OpenGL window");
+        // LWJGL 2 replaces the HWND for display-mode changes while retaining its GL context.
+        // Keep the imported semaphores and their monotonically increasing timeline alive.
+        interop.validateContext();
+        OverlayHooks.releaseSession();
+        overlayFrame.close();
+        hwnd = current;
+        windowChanges++;
+        RemixForgeMod.LOG.info("RTX Remix Forge: following recreated window {}", Long.toHexString(hwnd));
     }
 
     void refreshTextures() {
@@ -141,6 +175,49 @@ final class PrototypeRenderer {
         textureReloads++;
     }
     long frameCount() { return api == null ? 0 : frames; }
+    long windowChanges() { return windowChanges; }
+    int entityCategoryCount(int flags) { return entities == null ? 0 : entities.categoryCount(flags); }
+    int itemCategoryCount(int flags) { return items == null ? 0 : items.categoryCount(flags); }
+    int tileTrianglePartCount(net.minecraft.util.math.BlockPos pos) { return entities == null ? 0 : entities.tileTrianglePartCount(pos); }
+    long tileGeometryUpdates(net.minecraft.util.math.BlockPos pos) { return entities == null ? 0 : entities.tileGeometryUpdates(pos); }
+    boolean menuAvailable() { return initialized && api != null && world != null && !windowClosing; }
+    void writeConfig(String name, String value) { api.setConfigVariable(name, value); }
+    int readConfig(String name, byte[] value) { return api.getConfigVariableResolved(name, value); }
+    void finishOverlay() { overlayFrame.restore(mc.getFramebuffer().framebufferObject, mc.displayWidth, mc.displayHeight); }
+    boolean ownsSwapchain() { return initialized && !windowClosing; }
+
+    /** Minecraft's final UI is complete. Return the shared image before the runtime draws its GUI. */
+    Throwable presentFrame() {
+        followWindow();
+        long done = 0;
+        Throwable copyFailure = null;
+        try {
+            if (!nativeFramePending) {
+                // Disabled rendering and menus still use the native swapchain once initialized.
+                // Acquire without replacing the vanilla frame that Minecraft already drew.
+                api.submit(null);
+                nativeFramePending = true;
+                interop.acquire(api.dxvkGetInteropInfo());
+            }
+            if (interop.hasAcquiredFrame()) {
+                done = interop.finishFromFramebuffer(mc.getFramebuffer().framebufferObject,
+                        mc.displayWidth, mc.displayHeight, true);
+            } else done = interop.releaseAcquired();
+        } catch (RuntimeException | LinkageError failure) {
+            done = interop.releaseAcquired();
+            copyFailure = failure;
+        }
+        if (!nativeFramePending) throw new IllegalStateException("Native frame submission failed", copyFailure);
+        present.skipVulkanSwapchain = 0;
+        present.hwndOverride = hwnd;
+        present.clientDoneSemaphore_ValueToWait = done;
+        present.interopFlipY = 0;
+        // Complete a successful Submit even when the GL copy failed. Never submit twice
+        // before Present, and report recoverable copy failure only after releasing ownership.
+        try { api.present(present); }
+        finally { nativeFramePending = false; }
+        return copyFailure;
+    }
     boolean entityCaptured(UUID id) { return entities != null && entities.contains(id); }
     int trianglePartCount(UUID id) { return entities == null ? 0 : entities.trianglePartCount(id); }
     long entityTransformUpdates(UUID id) { return entities == null ? 0 : entities.transformUpdates(id); }
@@ -244,11 +321,20 @@ final class PrototypeRenderer {
 
     /** Toggle/world changes retain the runtime and its monotonically increasing GL timeline. */
     void releaseWorld() {
+        OverlayHooks.releaseSession();
+        preparedWorld = null;
+        preparedCamera = null;
         EntityCaptureHooks.discard();
+        FastTileCaptureHooks.discard();
         ItemCaptureHooks.discard();
         EffectCaptureHooks.discard();
         CloudCaptureHooks.discard();
-        releaseScene();
+        try { releaseScene(); } finally { overlayFrame.close(); }
+    }
+
+    /** A delayed unload must never release a newer world session. */
+    void releaseWorld(net.minecraft.world.World expected) {
+        if (world == expected) releaseWorld();
     }
 
     private void closeAtlasBorrowers() {

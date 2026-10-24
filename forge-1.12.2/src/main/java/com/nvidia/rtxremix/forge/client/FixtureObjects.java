@@ -160,7 +160,7 @@ final class FixtureObjects implements AutoCloseable {
             case PAUSE:
                 if (settled(mc.currentScreen == ownedScreen && objectsReady(), 40)) {
                     capture("objects-pause"); log("PAUSE_PASS");
-                    mc.displayGuiScreen(null); ownedScreen = null;
+                    mc.player.closeScreen(); ownedScreen = null;
                     if (Display.isFullscreen()) throw new IllegalStateException("Window fixture requires windowed mode");
                     originalWidth = Display.getWidth(); originalHeight = Display.getHeight();
                     changedMode = true;
@@ -335,7 +335,7 @@ final class FixtureObjects implements AutoCloseable {
                 + ",position=" + entity.posX + "," + entity.posY + "," + entity.posZ;
     }
     @Override public void close() {
-        if (ownedScreen != null && mc.currentScreen == ownedScreen) mc.displayGuiScreen(null);
+        if (ownedScreen != null && mc.currentScreen == ownedScreen && mc.player != null) mc.player.closeScreen();
         ownedScreen = null;
         if (!containerCleanupQueued && ownedContainer != null) {
             containerCleanupQueued = true;

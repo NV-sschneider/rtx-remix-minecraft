@@ -6,9 +6,14 @@ package com.nvidia.rtxremix.forge.client;
 
 import com.nvidia.rtxremix.forge.RemixForgeMod;
 import com.nvidia.rtxremix.forge.entity.EntityCaptureHooks;
+import com.nvidia.rtxremix.forge.entity.FirstPersonCapture;
+import com.nvidia.rtxremix.forge.entity.FastTileCaptureHooks;
 import com.nvidia.rtxremix.forge.item.ItemCaptureHooks;
 import com.nvidia.rtxremix.forge.effect.EffectCaptureHooks;
 import com.nvidia.rtxremix.forge.cloud.CloudCaptureHooks;
+import com.nvidia.rtxremix.forge.overlay.OverlayHooks;
+import com.nvidia.rtxremix.forge.overlay.OverlayInputGate;
+import com.nvidia.rtxremix.forge.overlay.PresentationHooks;
 import java.util.UUID;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.resources.IReloadableResourceManager;
@@ -29,6 +34,8 @@ public final class ClientEvents {
     private final Minecraft mc = Minecraft.getMinecraft();
     private final PrototypeRenderer renderer = new PrototypeRenderer(mc);
     private final SmokeController smoke = new SmokeController(mc, this);
+    private final FrameSubmission submission = new FrameSubmission();
+    private final CapturedParts capturedParts = new CapturedParts();
     private final KeyBinding toggle = new KeyBinding("key.rlcraftremix.toggle", Keyboard.KEY_NONE, "key.categories.rlcraftremix");
     private boolean enabled;
     private boolean resetRequested;
@@ -37,6 +44,20 @@ public final class ClientEvents {
 
     public void register() {
         RendererLifecycle.attach(renderer);
+        FirstPersonCapture.setSubmitCallback(this::submitCapturedFrame);
+        OverlayHooks.setPresentCallback(this::finishOverlay);
+        PresentationHooks.attach(new PresentationHooks.Backend() {
+            @Override public boolean ownsSwapchain() { return renderer.ownsSwapchain(); }
+            @Override public void presentFrame() {
+                Throwable failure = renderer.presentFrame();
+                if (failure != null) renderingFailed(failure);
+            }
+        });
+        OverlayHooks.attach(new OverlayHooks.Backend() {
+            @Override public boolean available() { return enabled && mc.world != null && renderer.menuAvailable(); }
+            @Override public void write(String name, String value) { renderer.writeConfig(name, value); }
+            @Override public int read(String name, byte[] value) { return renderer.readConfig(name, value); }
+        });
         ClientRegistry.registerKeyBinding(toggle);
         ClientCommandHandler.instance.registerCommand(new RemixCommand(this));
         ((IReloadableResourceManager) mc.getResourceManager()).registerReloadListener(manager -> textureReloadRequested = true);
@@ -66,11 +87,14 @@ public final class ClientEvents {
     @SubscribeEvent
     public void renderTick(TickEvent.RenderTickEvent event) {
         if (event.phase == TickEvent.Phase.START) {
+            submission.clear();
             EntityCaptureHooks.beginFrame(enabled && mc.world != null);
+            FastTileCaptureHooks.beginFrame(enabled && mc.world != null);
             ItemCaptureHooks.beginFrame(enabled && mc.world != null);
             EffectCaptureHooks.beginFrame(enabled && mc.world != null);
             CloudCaptureHooks.beginFrame(enabled && mc.world != null);
         } else {
+            submission.clear();
             discardCaptures();
         }
     }
@@ -88,38 +112,77 @@ public final class ClientEvents {
                 textureReloadRequested = false;
             }
             EntityCaptureHooks.captureOffscreen(event.getPartialTicks());
-            renderer.render(event.getPartialTicks(), EntityCaptureHooks.finishFrame(),
-                    ItemCaptureHooks.finishFrame(), EffectCaptureHooks.finishFrame(), CloudCaptureHooks.finishFrame());
-        } catch (RuntimeException | LinkageError ex) {
-            failure = ex.getClass().getSimpleName() + ": " + ex.getMessage();
-            RemixForgeMod.LOG.error("RTX Remix rendering disabled after failure", ex);
-            enabled = false;
-            resetRequested = true;
-            discardCaptures();
-            message("Renderer stopped: " + failure + ". See logs/latest.log.");
+            renderer.prepareWorld(event.getPartialTicks());
+            FirstPersonCapture.prepareWorld(event.getPartialTicks());
+            submission.prepare(mc.world, event.getPartialTicks());
+        } catch (RuntimeException | LinkageError ex) { renderingFailed(ex); }
+    }
+
+    private void submitCapturedFrame() {
+        if (!submission.consume(mc.world)) return;
+        if (!enabled || !Display.isVisible() || mc.displayWidth <= 0 || mc.displayHeight <= 0) {
+            discardCaptures(); return;
         }
+        try {
+            renderer.render(submission.partialTicks(),
+                    capturedParts.set(EntityCaptureHooks.finishFrame(), FastTileCaptureHooks.finishFrame()),
+                    ItemCaptureHooks.finishFrame(), EffectCaptureHooks.finishFrame(), CloudCaptureHooks.finishFrame());
+        } catch (RuntimeException | LinkageError ex) { renderingFailed(ex); }
+    }
+
+    private void finishOverlay() {
+        try { renderer.finishOverlay(); }
+        catch (RuntimeException | LinkageError ex) { renderingFailed(ex); }
+    }
+
+    private void renderingFailed(Throwable ex) {
+        submission.clear();
+        failure = ex.getClass().getSimpleName() + ": " + ex.getMessage();
+        RemixForgeMod.LOG.error("RTX Remix rendering disabled after failure", ex);
+        OverlayHooks.releaseSession();
+        enabled = false;
+        resetRequested = true;
+        discardCaptures();
+        message("Renderer stopped: " + failure + ". See logs/latest.log.");
     }
 
     @SubscribeEvent
     public void worldUnload(WorldEvent.Unload event) {
-        if (event.getWorld().isRemote) { resetRequested = true; }
+        if (event.getWorld().isRemote) {
+            mc.addScheduledTask(() -> renderer.releaseWorld(event.getWorld()));
+        }
     }
 
     void setEnabled(boolean value) {
+        if (!value) OverlayHooks.releaseSession();
         enabled = value;
         failure = null;
-        if (!value) { discardCaptures(); }
+        if (!value) { submission.clear(); discardCaptures(); }
         message(value ? "Remix prototype enabled. Use /mrtx off to restore vanilla rendering." : "Vanilla rendering enabled.");
     }
 
     void reload() { textureReloadRequested = true; }
+    void openSettings() {
+        if (!OverlayHooks.requestMenu(OverlayInputGate.Menu.GRAPHICS_SETTINGS)) {
+            message("Enable Remix in a world before opening its graphics settings.");
+        }
+    }
+
+    int fixtureReadConfig(String name, byte[] value) { return renderer.readConfig(name, value); }
+    void fixtureWriteConfig(String name, String value) { renderer.writeConfig(name, value); }
 
     private static void discardCaptures() {
         EntityCaptureHooks.discard(); ItemCaptureHooks.discard(); EffectCaptureHooks.discard();
+        FastTileCaptureHooks.discard();
         CloudCaptureHooks.discard();
     }
 
     long renderedFrames() { return renderer.frameCount(); }
+    long windowChanges() { return renderer.windowChanges(); }
+    int entityCategoryCount(int flags) { return renderer.entityCategoryCount(flags); }
+    int itemCategoryCount(int flags) { return renderer.itemCategoryCount(flags); }
+    int tileTrianglePartCount(net.minecraft.util.math.BlockPos pos) { return renderer.tileTrianglePartCount(pos); }
+    long tileGeometryUpdates(net.minecraft.util.math.BlockPos pos) { return renderer.tileGeometryUpdates(pos); }
     boolean isEnabled() { return enabled; }
     int cloudTriangles() { return renderer.cloudTriangles(); }
     int customSkyTriangles() { return renderer.customSkyTriangles(); }

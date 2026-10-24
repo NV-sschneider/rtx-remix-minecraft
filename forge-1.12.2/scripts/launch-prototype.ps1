@@ -11,6 +11,9 @@ param(
     [switch]$CombatSmokeTest,
     [switch]$CloudSmokeTest,
     [switch]$PbrSmokeTest,
+    [switch]$FirstPersonSmokeTest,
+    [switch]$TileSmokeTest,
+    [switch]$WindowSmokeTest,
     [switch]$TerrainSmokeTest,
     [switch]$TerrainNaturalSmokeTest,
     [ValidateRange(4, 32)]
@@ -45,6 +48,9 @@ if ($EffectSmokeTest -and -not $SmokeTest) { throw '-EffectSmokeTest requires -S
 if ($CombatSmokeTest -and -not $SmokeTest) { throw '-CombatSmokeTest requires -SmokeTest.' }
 if ($CloudSmokeTest -and -not $SmokeTest) { throw '-CloudSmokeTest requires -SmokeTest.' }
 if ($PbrSmokeTest -and -not $SmokeTest) { throw '-PbrSmokeTest requires -SmokeTest.' }
+if ($FirstPersonSmokeTest -and -not $SmokeTest) { throw '-FirstPersonSmokeTest requires -SmokeTest.' }
+if ($TileSmokeTest -and -not $SmokeTest) { throw '-TileSmokeTest requires -SmokeTest.' }
+if ($WindowSmokeTest -and -not $SmokeTest) { throw '-WindowSmokeTest requires -SmokeTest.' }
 if ($TerrainSmokeTest -and -not $SmokeTest) { throw '-TerrainSmokeTest requires -SmokeTest.' }
 if ($TerrainNaturalSmokeTest -and -not $TerrainSmokeTest) { throw '-TerrainNaturalSmokeTest requires -TerrainSmokeTest.' }
 if ($PSBoundParameters.ContainsKey('TerrainSmokeRadius') -and -not $TerrainSmokeTest) {
@@ -106,7 +112,7 @@ for ($i = $generalStart + 1; $i -lt $lines.Length; $i++) {
 $general = @($lines[($generalStart + 1)..($generalEnd - 1)])
 $argsLine = $general | Where-Object { $_ -match '^JvmArgs=' } | Select-Object -First 1
 $jvmArgs = if ($argsLine) { $argsLine.Substring(8).Trim('"') } else { '' }
-$jvmArgs = ($jvmArgs -replace '(?:^|\s)-Drlcraftremix\.smoke(?:\.(?:exit|entities|sky|materials|objects|effects|combat|clouds|pbr|terrain|terrainNatural|terrainRadius))?=\S+', '').Trim()
+$jvmArgs = ($jvmArgs -replace '(?:^|\s)-Drlcraftremix\.smoke(?:\.(?:exit|entities|sky|materials|objects|effects|combat|clouds|pbr|firstperson|tiles|window|terrain|terrainNatural|terrainRadius))?=\S+', '').Trim()
 if ($SmokeTest) { $jvmArgs = "$jvmArgs -Drlcraftremix.smoke=true".Trim() }
 if ($ExitAfterSmoke) { $jvmArgs += ' -Drlcraftremix.smoke.exit=true' }
 if ($EntitySmokeTest) { $jvmArgs += ' -Drlcraftremix.smoke.entities=true' }
@@ -117,6 +123,9 @@ if ($EffectSmokeTest) { $jvmArgs += ' -Drlcraftremix.smoke.effects=true' }
 if ($CombatSmokeTest) { $jvmArgs += ' -Drlcraftremix.smoke.combat=true' }
 if ($CloudSmokeTest) { $jvmArgs += ' -Drlcraftremix.smoke.clouds=true' }
 if ($PbrSmokeTest) { $jvmArgs += ' -Drlcraftremix.smoke.pbr=true' }
+if ($FirstPersonSmokeTest) { $jvmArgs += ' -Drlcraftremix.smoke.firstperson=true' }
+if ($TileSmokeTest) { $jvmArgs += ' -Drlcraftremix.smoke.tiles=true' }
+if ($WindowSmokeTest) { $jvmArgs += ' -Drlcraftremix.smoke.window=true' }
 if ($TerrainSmokeTest) { $jvmArgs += " -Drlcraftremix.smoke.terrain=true -Drlcraftremix.smoke.terrainRadius=$TerrainSmokeRadius" }
 if ($TerrainNaturalSmokeTest) { $jvmArgs += ' -Drlcraftremix.smoke.terrainNatural=true' }
 $general = @($general | Where-Object { $_ -notmatch '^(JvmArgs|OverrideJavaArgs)=' })
