@@ -6,6 +6,7 @@ param(
     [string]$RuntimeDirectory
 )
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'runtime-payload.ps1')
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $repositoryRoot = Split-Path -Parent $projectRoot
 if (-not $GameDirectory) {
@@ -20,15 +21,21 @@ foreach ($required in @($gameDirectory, $bridge, $jar, (Join-Path $runtimeSource
     if (-not (Test-Path -LiteralPath $required)) { throw "Missing prerequisite: $required" }
 }
 $mods = Join-Path $gameDirectory 'mods'
-$runtimeTarget = Join-Path $gameDirectory 'remix-sdk'
-New-Item -ItemType Directory -Force -Path $mods,$runtimeTarget | Out-Null
-# The Packman source is read-only. Copy to the game before layering the local bridge.
-Get-ChildItem -LiteralPath $runtimeSource -Force | ForEach-Object {
-    Copy-Item -LiteralPath $_.FullName -Destination $runtimeTarget -Recurse -Force
-}
-Copy-Item -LiteralPath $bridge -Destination (Join-Path $runtimeTarget 'remixbridge.dll') -Force
-Copy-Item -LiteralPath $jar -Destination (Join-Path $mods (Split-Path $jar -Leaf)) -Force
 $configTarget = Join-Path $gameDirectory 'rtx.conf'
+$jarTarget = Join-Path $mods (Split-Path $jar -Leaf)
+if (-not (Test-Path -LiteralPath $mods -PathType Container) -and
+    -not (Test-Path -LiteralPath (Join-Path $gameDirectory 'options.txt') -PathType Leaf)) {
+    throw 'Select an existing Minecraft game directory with mods or options.txt.'
+}
+foreach ($target in @($mods, $configTarget, $jarTarget)) {
+    [void](Assert-ForgeOwnedPath -GameDirectory $gameDirectory -Path $target)
+}
+$idle = { Assert-ForgeInstanceIdle -GameDirectory $gameDirectory }
+& $idle
+Install-ForgeRuntime -GameDirectory $gameDirectory -RuntimeDirectory $runtimeSource -Bridge $bridge -AssertIdle $idle
+& $idle
+[void][IO.Directory]::CreateDirectory($mods)
+Copy-Item -LiteralPath $jar -Destination $jarTarget -Force
 if (-not (Test-Path -LiteralPath $configTarget)) {
     Copy-Item -LiteralPath (Join-Path $projectRoot 'config/rtx.conf') -Destination $configTarget
 }
