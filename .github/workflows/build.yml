@@ -39,3 +39,9 @@ jobs:
       # Unit tests do not load JNI or require a GPU or Minecraft account.
       - name: Build and test Forge 1.12.2
         run: '& "$env:GITHUB_WORKSPACE\forge-1.12.2\scripts\build.ps1" -JdkPath $env:JAVA_HOME -Tasks build,test'
+      - name: Check Forge runtime staging
+        shell: powershell
+        run: '& "$env:GITHUB_WORKSPACE\forge-1.12.2\scripts\test-runtime-payload.ps1"'
+      - name: Check owned window fixture parsing
+        shell: powershell
+        run: '& "$env:GITHUB_WORKSPACE\forge-1.12.2\scripts\test-window-fixture.ps1"'

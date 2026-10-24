@@ -27,3 +27,5 @@ jobs:
         env:
           PUBLIC_COMMIT_RANGE: ${{ github.event_name == 'pull_request' && format('{0}..{1}', github.event.pull_request.base.sha, github.event.pull_request.head.sha) || '' }}
         run: '& "$env:GITHUB_WORKSPACE\tools\rtx.bat" check --tests'
+      - name: Check authenticated local server fixture
+        run: 'uv run --no-project --python 3.12 python "$env:GITHUB_WORKSPACE\forge-1.12.2\scripts\test-multiplayer-server.py"'
