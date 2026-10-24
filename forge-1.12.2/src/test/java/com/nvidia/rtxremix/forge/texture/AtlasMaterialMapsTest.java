@@ -37,7 +37,10 @@ public class AtlasMaterialMapsTest {
             maps.upload(albedo(), 2, 1);
             assertEquals(1, maps.spriteCount());
             assertEquals(4, maps.resourceCount());
-            assertEquals(Arrays.asList(TexturePurpose.NORMAL_DX, TexturePurpose.DATA, TexturePurpose.DATA, TexturePurpose.COLOR), backend.purposes);
+            assertEquals(Arrays.asList(TexturePurpose.NORMAL_OTH, TexturePurpose.DATA, TexturePurpose.DATA, TexturePurpose.COLOR), backend.purposes);
+            assertEquals(Arrays.asList(TextureFormat.RG8_UNORM, TextureFormat.R8_UNORM,
+                    TextureFormat.R8_UNORM, TextureFormat.RGBA8_SRGB), backend.formats);
+            assertArrayEquals(new byte[] {(byte) 128, (byte) 128, (byte) 128, (byte) 128}, backend.images.get(0));
             assertEquals(255, backend.images.get(1)[0] & 255);
             assertEquals(0, backend.images.get(1)[1] & 255);
             assertEquals(0, backend.images.get(2)[0] & 255);
@@ -108,9 +111,14 @@ public class AtlasMaterialMapsTest {
         ReflectionHelper.findField(TextureAtlasSprite.class, new String[] {"animationMetadata", "field_110982_k"})
                 .set(sprite, new AnimationMetadataSection(Arrays.asList(new AnimationFrame(1, 4), new AnimationFrame(0, 4)), 1, 1, 4, true));
         try (AtlasMaterialMaps maps = new AtlasMaterialMaps(backend)) {
-            maps.addSprite(new SpriteMaterial(sprite, new MaterialImage(1, 1, 1, new int[] {0xff8080ff}),
+            maps.addSprite(new SpriteMaterial(sprite, new MaterialImage(1, 1, 2, new int[] {0xffff8000, 0xff80ff00}),
                     new MaterialImage(1, 1, 2, new int[] {0x00000000, 0xfeffe600})));
             maps.upload(albedo(), 2, 1);
+            assertEquals(TexturePurpose.NORMAL_OTH, (int) backend.purposes.get(0));
+            assertEquals(TextureFormat.RG8_UNORM, (int) backend.formats.get(0));
+            // The first authored frame is index 1, a +Y normal, not index 0.
+            assertEquals(128, backend.images.get(0)[2] & 255);
+            assertEquals(255, backend.images.get(0)[3] & 255);
             final int[] calls = {0};
             try (AtlasAnimations animations = new AtlasAnimations(info -> {
                 calls[0]++;
@@ -123,6 +131,13 @@ public class AtlasMaterialMapsTest {
                         assertEquals((int) backend.formats.get(channel), patch.format);
                 }
                 assertEquals(0x80, info.entries[0].patches[0].pixelData.get(0) & 255);
+                TexturePatch normal = info.entries[1].patches[0];
+                assertEquals(1, normal.dstX); assertEquals(0, normal.dstY);
+                assertEquals(1, normal.width); assertEquals(1, normal.height);
+                assertEquals(2, normal.rowPitch);
+                assertEquals(2, normal.pixelData.remaining());
+                assertEquals(165, normal.pixelData.get(0) & 255);
+                assertEquals(165, normal.pixelData.get(1) & 255);
                 assertEquals(127, info.entries[2].patches[0].pixelData.get(0) & 255);
                 assertEquals(127, info.entries[3].patches[0].pixelData.get(0) & 255);
                 assertEquals(92, info.entries[4].patches[0].pixelData.get(0) & 255);

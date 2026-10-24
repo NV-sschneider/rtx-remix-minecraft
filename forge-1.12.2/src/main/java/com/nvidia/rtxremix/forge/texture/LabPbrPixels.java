@@ -9,7 +9,7 @@ import java.nio.ByteBuffer;
 /** LabPBR 1.3 normal, smoothness, metal classification and emission conversion. */
 final class LabPbrPixels {
     static final int NORMAL = 0, ROUGHNESS = 1, METALLIC = 2, EMISSIVE = 3;
-    static final int[] STRIDES = {4, 1, 1, 4};
+    static final int[] STRIDES = {2, 1, 1, 4};
     private static final byte[] EMISSION_COLORS = emissionColors();
     private LabPbrPixels() { }
 
@@ -33,8 +33,13 @@ final class LabPbrPixels {
             int green = blend((first >>> 8) & 255, (second >>> 8) & 255, mix);
             double nx = red / 127.5 - 1, ny = green / 127.5 - 1;
             double nz = Math.sqrt(Math.max(0, 1 - nx * nx - ny * ny));
-            target.put(offset, (byte) red).put(offset + 1, (byte) green)
-                    .put(offset + 2, (byte) (127.5 * (nz + 1))).put(offset + 3, (byte) 255);
+            // The pinned API 0.16 runtime's NORMAL_OTH takes ordinary octahedral
+            // XY/L1, as checked against NORMAL_DX by GlInteropSmokeTest. LabPBR
+            // reconstructs positive Z, so no lower-face fold is needed here.
+            // Preserve the DirectX tangent convention (+Y down the image).
+            double length = Math.abs(nx) + Math.abs(ny) + nz;
+            target.put(offset, (byte) Math.round(127.5 * (nx / length + 1)))
+                    .put(offset + 1, (byte) Math.round(127.5 * (ny / length + 1)));
         } else if (channel == ROUGHNESS) {
             target.put(offset, (byte) blend(roughness(first), roughness(second), mix));
         } else if (channel == METALLIC) {
@@ -65,7 +70,7 @@ final class LabPbrPixels {
     static void defaults(ByteBuffer target, int channel) {
         target.position(0);
         while (target.hasRemaining()) {
-            if (channel == NORMAL) target.put((byte) 128).put((byte) 128).put((byte) 255).put((byte) 255);
+            if (channel == NORMAL) target.put((byte) 128).put((byte) 128);
             else if (channel == EMISSIVE) target.put((byte) 0).put((byte) 0).put((byte) 0).put((byte) 255);
             else target.put(channel == ROUGHNESS ? (byte) 255 : (byte) 0);
         }

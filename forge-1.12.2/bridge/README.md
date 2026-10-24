@@ -50,6 +50,10 @@ checks the same interior pixels changed color, framebuffer copies, preserved GL
 state, and native shutdown. The before/after images are saved as
 `forge-1.12.2/bridge/build/gpu-smoke/gpu-smoke.png` and
 `forge-1.12.2/bridge/build/gpu-smoke/gpu-smoke-texture-patched.png`.
+The normal-map stage compares two identically lit surfaces, first with matching
+runtime-converted normals and then with one pre-encoded `NORMAL_OTH` texture.
+It patches that retained texture and checks the lighting changes relative to the
+untouched reference. Its three images use the `gpu-smoke-normal-` prefix.
 The window is shown offscreen because the runtime skips rendering invisible
 windows. The test does not launch Minecraft or prove in-game rendering.
 

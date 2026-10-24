@@ -38,9 +38,9 @@ import org.apache.logging.log4j.Logger;
  * must be destroyed before close. Sidecars resolve through the active resource packs.
  */
 public final class AtlasMaterialMaps implements AutoCloseable {
-    static final int[] FORMATS = {TextureFormat.RGBA8_UNORM, TextureFormat.R8_UNORM,
+    static final int[] FORMATS = {TextureFormat.RG8_UNORM, TextureFormat.R8_UNORM,
             TextureFormat.R8_UNORM, TextureFormat.RGBA8_SRGB};
-    private static final int[] PURPOSES = {TexturePurpose.NORMAL_DX, TexturePurpose.DATA,
+    private static final int[] PURPOSES = {TexturePurpose.NORMAL_OTH, TexturePurpose.DATA,
             TexturePurpose.DATA, TexturePurpose.COLOR};
     private static final long MAX_ATLAS_BYTES = 128L * 1024 * 1024;
     private static final long MAX_SOURCE_BYTES = 64L * 1024 * 1024;
@@ -123,7 +123,9 @@ public final class AtlasMaterialMaps implements AutoCloseable {
     boolean addSprite(SpriteMaterial material) {
         TextureAtlasSprite sprite = material.sprite;
         long bytes = material.bytes();
-        long patchSize = (long) sprite.getIconWidth() * sprite.getIconHeight() * 10;
+        int pixelBytes = 0;
+        for (int stride : LabPbrPixels.STRIDES) pixelBytes += stride;
+        long patchSize = (long) sprite.getIconWidth() * sprite.getIconHeight() * pixelBytes;
         if (sprites.size() == MAX_SPRITES || bytes > MAX_SOURCE_BYTES - sourceBytes
                 || sprite.hasAnimationMetadata() && ((long) sprite.getIconWidth() * sprite.getIconHeight() > MAX_ANIMATED_PIXELS
                 || patchSize > MAX_PATCH_BYTES - patchBytes)) return false;
