@@ -18,6 +18,7 @@ public final class CapturedEntityPart {
     int vertexCount;
     long geometryFingerprint;
     public int occurrence;
+    public int categoryFlags;
     public float scale;
     public int textureId;
     public Object textureIdentity;
@@ -33,5 +34,6 @@ public final class CapturedEntityPart {
         triangles = null;
         triangleGroup = null;
         textureIdentity = null;
+        categoryFlags = 0;
     }
 }

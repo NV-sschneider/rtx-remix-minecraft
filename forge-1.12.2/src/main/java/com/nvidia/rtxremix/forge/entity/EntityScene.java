@@ -11,7 +11,6 @@ import com.nvidia.rtxremix.RemixBridge;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
-import java.util.IdentityHashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -24,7 +23,7 @@ import net.minecraft.util.math.BlockPos;
 
 /** Render-thread ownership of bounded rigid entity meshes and their retained scene occurrences. */
 public final class EntityScene implements AutoCloseable {
-    private static final int MAX_PARTS = 1024;
+    private static final int MAX_PARTS = EntityCaptureHooks.MAX_PARTS;
     private static final int MAX_OWNER_PARTS = 256;
     private static final int MAX_MESHES = 512;
     private static final int MAX_TEXTURES = 64;
@@ -34,8 +33,8 @@ public final class EntityScene implements AutoCloseable {
     interface Backend {
         long createMesh(MeshInfo mesh);
         void destroyMesh(long handle);
-        long createInstance(long mesh, float[] transform, long blend);
-        void updateInstance(long instance, long mesh, float[] transform, long blend);
+        long createInstance(long mesh, float[] transform, int category, long blend);
+        void updateInstance(long instance, long mesh, float[] transform, int category, long blend);
         void removeInstance(long handle);
         long createBlend(InstanceInfoBlendEXT blend);
         void freeBlend(long handle);
@@ -45,7 +44,8 @@ public final class EntityScene implements AutoCloseable {
     }
     private final Backend api;
     private final Thread renderThread = Thread.currentThread();
-    private final IdentityHashMap<Object, Owner> owners = new IdentityHashMap<Object, Owner>();
+    private final Map<CaptureOwnerKey, Owner> owners = new HashMap<>();
+    private final CaptureOwnerKey ownerProbe = new CaptureOwnerKey();
     private final Map<MeshKey, MeshAsset> meshes = new HashMap<MeshKey, MeshAsset>();
     private final List<EntityTextures.Asset> textures = new ArrayList<EntityTextures.Asset>();
     private final EntityMesh geometry = new EntityMesh();
@@ -75,7 +75,7 @@ public final class EntityScene implements AutoCloseable {
         for (int i = 0; i < count; i++) {
             CapturedEntityPart captured = parts.get(i);
             if (!valid(captured)) continue;
-            Owner owner = owners.get(captured.owner);
+            Owner owner = owners.get(ownerProbe.set(captured.owner, captured.categoryFlags));
             Part part = owner == null ? null : owner.parts[captured.occurrence];
             if (part != null) part.requested = frame;
         }
@@ -86,7 +86,7 @@ public final class EntityScene implements AutoCloseable {
         for (int i = 0; i < count; i++) {
             CapturedEntityPart captured = parts.get((first + i) % count);
             if (!valid(captured)) continue;
-            Owner owner = owners.get(captured.owner);
+            Owner owner = owners.get(ownerProbe.set(captured.owner, captured.categoryFlags));
             Part part = owner == null ? null : owner.parts[captured.occurrence];
             if (part != null && part.lastSeen == frame) continue;
             EntityTextures.Asset texture = texture(captured.textureIdentity, captured.textureId);
@@ -96,7 +96,7 @@ public final class EntityScene implements AutoCloseable {
             if (owner == null) {
                 owner = new Owner(captured.owner instanceof Entity
                         ? ((Entity) captured.owner).getUniqueID() : null);
-                owners.put(captured.owner, owner);
+                owners.put(new CaptureOwnerKey().set(captured.owner, captured.categoryFlags), owner);
             }
             if (part == null) {
                 part = new Part();
@@ -115,6 +115,15 @@ public final class EntityScene implements AutoCloseable {
     public int trianglePartCount() { checkThread(); return trianglePartCount; }
     public long triangleUploadCount() { checkThread(); return triangleUploads; }
     public int deferredTriangleUploadCount() { checkThread(); return deferredTriangleUploads; }
+    public int categoryCount(int category) {
+        checkThread();
+        int count = 0;
+        for (Map.Entry<CaptureOwnerKey, Owner> entry : owners.entrySet()) {
+            if (entry.getKey().category() != category) continue;
+            for (Part part : entry.getValue().parts) if (part != null && part.instance != 0) count++;
+        }
+        return count;
+    }
 
     public int trianglePartCount(UUID ownerId) {
         checkThread();
@@ -149,19 +158,40 @@ public final class EntityScene implements AutoCloseable {
 
     public boolean containsTile(BlockPos position) {
         checkThread();
-        for (Object owner : owners.keySet()) {
-            if (owner instanceof TileEntity && ((TileEntity) owner).getPos().equals(position)) return true;
+        for (CaptureOwnerKey key : owners.keySet()) {
+            if (key.owner instanceof TileEntity && ((TileEntity) key.owner).getPos().equals(position)) return true;
         }
         return false;
     }
 
     public long tileTransformUpdates(BlockPos position) {
         checkThread();
-        for (Map.Entry<Object, Owner> entry : owners.entrySet()) {
-            if (entry.getKey() instanceof TileEntity
-                    && ((TileEntity) entry.getKey()).getPos().equals(position)) return entry.getValue().transformUpdates;
+        for (Map.Entry<CaptureOwnerKey, Owner> entry : owners.entrySet()) {
+            if (entry.getKey().owner instanceof TileEntity
+                    && ((TileEntity) entry.getKey().owner).getPos().equals(position)) return entry.getValue().transformUpdates;
         }
         return 0;
+    }
+
+    public int tileTrianglePartCount(BlockPos position) {
+        checkThread();
+        int count = 0;
+        for (Map.Entry<CaptureOwnerKey, Owner> entry : owners.entrySet()) {
+            if (!(entry.getKey().owner instanceof TileEntity)
+                    || !((TileEntity) entry.getKey().owner).getPos().equals(position)) continue;
+            for (Part part : entry.getValue().parts) if (part != null && part.instance != 0 && part.mesh.triangles) count++;
+        }
+        return count;
+    }
+
+    public long tileGeometryUpdates(BlockPos position) {
+        checkThread();
+        long count = 0;
+        for (Map.Entry<CaptureOwnerKey, Owner> entry : owners.entrySet()) {
+            if (entry.getKey().owner instanceof TileEntity
+                    && ((TileEntity) entry.getKey().owner).getPos().equals(position)) count += entry.getValue().geometryUpdates;
+        }
+        return count;
     }
 
     public boolean contains(UUID ownerId) {
@@ -246,12 +276,12 @@ public final class EntityScene implements AutoCloseable {
                 captured.alphaCompare, captured.alphaReference, mesh.triangles)) : part.blend;
         try {
             if (first) {
-                part.instance = api.createInstance(mesh.handle, captured.transform, blend);
+                part.instance = api.createInstance(mesh.handle, captured.transform, captured.categoryFlags, blend);
                 partCount++;
                 part.tileEntity = captured.owner instanceof TileEntity;
                 if (part.tileEntity) tilePartCount++;
             } else {
-                api.updateInstance(part.instance, mesh.handle, captured.transform, blend);
+                api.updateInstance(part.instance, mesh.handle, captured.transform, captured.categoryFlags, blend);
                 if (transformChanged) owner.transformUpdates++;
             }
         } catch (RuntimeException | LinkageError failure) {
@@ -411,11 +441,11 @@ public final class EntityScene implements AutoCloseable {
             private final EntityTextures reader = new EntityTextures();
             public long createMesh(MeshInfo info) { return remix.createMesh(info); }
             public void destroyMesh(long handle) { remix.destroyMesh(handle); }
-            public long createInstance(long mesh, float[] transform, long blend) {
-                return remix.sceneInstanceAdd(mesh, transform, 0, 1, blend);
+            public long createInstance(long mesh, float[] transform, int category, long blend) {
+                return remix.sceneInstanceAdd(mesh, transform, category, 1, blend);
             }
-            public void updateInstance(long instance, long mesh, float[] transform, long blend) {
-                remix.sceneInstanceUpdate(instance, mesh, transform, 0, 1, blend);
+            public void updateInstance(long instance, long mesh, float[] transform, int category, long blend) {
+                remix.sceneInstanceUpdate(instance, mesh, transform, category, 1, blend);
             }
             public void removeInstance(long handle) { remix.sceneInstanceRemove(handle); }
             public long createBlend(InstanceInfoBlendEXT blend) { return blend.allocNative(0); }

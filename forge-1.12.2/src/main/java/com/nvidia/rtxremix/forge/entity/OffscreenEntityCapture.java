@@ -4,6 +4,7 @@
  */
 package com.nvidia.rtxremix.forge.entity;
 
+import com.nvidia.rtxremix.forge.item.ItemCaptureHooks;
 import java.util.IdentityHashMap;
 import java.util.UUID;
 import net.minecraft.client.Minecraft;
@@ -65,6 +66,7 @@ final class OffscreenEntityCapture {
                 Entity entity = closest.get(i);
                 boolean rendered = false;
                 EntityCaptureHooks.beginSupplementary();
+                ItemCaptureHooks.beginSupplementary();
                 try {
                     for (int renderPass = 0; renderPass <= 1; renderPass++) {
                         if (!entity.shouldRenderInPass(renderPass)) continue;
@@ -74,6 +76,7 @@ final class OffscreenEntityCapture {
                     }
                 } catch (RuntimeException | LinkageError error) {
                     EntityCaptureHooks.discardSupplementary();
+                    ItemCaptureHooks.discardSupplementary();
                     unsupported.put(entity.getClass(), Boolean.TRUE);
                     failures++;
                     LOGGER.warn("Supplementary entity rendering omitted {} after {}", entity.getClass().getName(), error.getClass().getSimpleName());
@@ -87,6 +90,34 @@ final class OffscreenEntityCapture {
             supplementary = false;
             ForgeHooksClient.setRenderPass(pass);
             try { state.end(); } finally { closest.clear(); }
+        }
+    }
+
+    /** A first-person camera still needs the local player's body for shadows and reflections. */
+    void captureLocalPlayer(float partialTicks) {
+        Minecraft mc = Minecraft.getMinecraft();
+        Entity player = mc.player;
+        if (player == null || observed.containsKey(player) || unsupported.containsKey(player.getClass())) return;
+        if (state == null) state = new EntityRenderState();
+        int pass = MinecraftForgeClient.getRenderPass();
+        state.begin();
+        supplementary = true;
+        EntityCaptureHooks.beginSupplementary();
+        ItemCaptureHooks.beginSupplementary();
+        try {
+            ForgeHooksClient.setRenderPass(0);
+            mc.getRenderManager().renderEntityStatic(player, partialTicks, true);
+            captured++;
+        } catch (RuntimeException | LinkageError error) {
+            EntityCaptureHooks.discardSupplementary();
+            ItemCaptureHooks.discardSupplementary();
+            unsupported.put(player.getClass(), Boolean.TRUE);
+            failures++;
+            LOGGER.warn("Local player shadow rendering omitted after {}", error.getClass().getSimpleName());
+        } finally {
+            supplementary = false;
+            ForgeHooksClient.setRenderPass(pass);
+            state.end();
         }
     }
 

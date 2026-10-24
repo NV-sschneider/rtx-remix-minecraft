@@ -9,24 +9,24 @@ import com.nvidia.rtxremix.MaterialInfo;
 import com.nvidia.rtxremix.MaterialInfoOpaqueEXT;
 import com.nvidia.rtxremix.RemixAPI;
 import com.nvidia.rtxremix.RemixBridge;
+import com.nvidia.rtxremix.forge.entity.CaptureOwnerKey;
 import java.util.Arrays;
 import java.util.HashMap;
-import java.util.IdentityHashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
-import net.minecraft.entity.item.EntityItem;
 
-/** Retained dropped-item occurrences borrowing the terrain's live animated atlas. */
+/** Retained dropped and held items borrowing the terrain's live animated atlas. */
 public final class ItemScene implements AutoCloseable {
     private static final int MAX_MESHES = 256;
     private static final long MAX_MESH_BYTES = 32L * 1024 * 1024;
     private static final AtomicLong HASHES = new AtomicLong(0x524C4954454D0000L);
     private final RemixAPI api;
     private final Thread renderThread = Thread.currentThread();
-    private final IdentityHashMap<EntityItem, Owner> owners = new IdentityHashMap<>();
+    private final Map<CaptureOwnerKey, Owner> owners = new HashMap<>();
+    private final CaptureOwnerKey ownerProbe = new CaptureOwnerKey();
     private final Map<MeshKey, Mesh> meshes = new HashMap<>();
     private final MeshKey probe = new MeshKey();
     private long frame, atlas, material, meshBytes;
@@ -58,7 +58,7 @@ public final class ItemScene implements AutoCloseable {
         for (int i = 0; i < limit; i++) {
             CapturedItem item = captured.get(i);
             if (!valid(item)) continue;
-            Owner owner = owners.get(item.owner);
+            Owner owner = owners.get(ownerProbe.set(item.owner, item.categoryFlags));
             if (owner != null && owner.parts[item.occurrence] != null) owner.parts[item.occurrence].requested = frame;
             probe.set(item);
             Mesh mesh = meshes.get(probe);
@@ -73,8 +73,11 @@ public final class ItemScene implements AutoCloseable {
             if (!valid(item)) continue;
             Mesh mesh = mesh(item);
             if (mesh == null) continue;
-            Owner owner = owners.get(item.owner);
-            if (owner == null) { owner = new Owner(item.owner.getUniqueID()); owners.put(item.owner, owner); }
+            Owner owner = owners.get(ownerProbe.set(item.owner, item.categoryFlags));
+            if (owner == null) {
+                owner = new Owner(item.owner.getUniqueID());
+                owners.put(new CaptureOwnerKey().set(item.owner, item.categoryFlags), owner);
+            }
             Part part = owner.parts[item.occurrence];
             if (part == null) { part = new Part(); owner.parts[item.occurrence] = part; }
             if (part.lastSeen == frame) continue;
@@ -87,6 +90,15 @@ public final class ItemScene implements AutoCloseable {
     }
 
     public int count() { checkThread(); return count; }
+    public int categoryCount(int category) {
+        checkThread();
+        int count = 0;
+        for (Map.Entry<CaptureOwnerKey, Owner> entry : owners.entrySet()) {
+            if (entry.getKey().category() != category) continue;
+            for (Part part : entry.getValue().parts) if (part != null && part.instance != 0) count++;
+        }
+        return count;
+    }
     public int meshCount() { checkThread(); return meshes.size(); }
     public long meshBytes() { checkThread(); return meshBytes; }
     public int resourceCount() {
@@ -128,8 +140,8 @@ public final class ItemScene implements AutoCloseable {
         if (!first && !moved && !changedBlend && part.mesh == mesh) return;
         long blend = changedBlend ? blend(item).allocNative(0) : part.blend;
         try {
-            if (first) { part.instance = api.sceneInstanceAdd(mesh.handle, item.transform, 0, 1, blend); count++; }
-            else { api.sceneInstanceUpdate(part.instance, mesh.handle, item.transform, 0, 1, blend); if (moved) owner.updates++; }
+            if (first) { part.instance = api.sceneInstanceAdd(mesh.handle, item.transform, item.categoryFlags, 1, blend); count++; }
+            else { api.sceneInstanceUpdate(part.instance, mesh.handle, item.transform, item.categoryFlags, 1, blend); if (moved) owner.updates++; }
         } catch (RuntimeException | LinkageError ex) {
             if (changedBlend) RemixBridge.freeExt(blend);
             throw ex;

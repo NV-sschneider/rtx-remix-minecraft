@@ -46,17 +46,26 @@ final class EntityTriangles {
     /** Converts completed fixed-function quads or triangles into the shared bounded arena. */
     boolean appendPrimitives(ByteBuffer source, int vertexCount, int primitiveSize, int stride,
             int uvOffset, int colorOffset, int normalOffset, int argb, Matrix4f texture) {
-        if (primitiveSize != 3 && primitiveSize != 4 || vertexCount <= 0 || vertexCount % primitiveSize != 0
+        return appendPrimitivesRange(source, 0, vertexCount, primitiveSize, stride,
+                uvOffset, colorOffset, normalOffset, argb, texture);
+    }
+
+    /** Copies one completed owner range from a shared batch without slicing or changing its cursor. */
+    boolean appendPrimitivesRange(ByteBuffer source, int firstVertex, int vertexCount, int primitiveSize, int stride,
+            int uvOffset, int colorOffset, int normalOffset, int argb, Matrix4f texture) {
+        if (primitiveSize != 3 && primitiveSize != 4 || firstVertex < 0 || firstVertex % primitiveSize != 0
+                || vertexCount <= 0 || vertexCount % primitiveSize != 0
                 || stride < 12 || uvOffset < 12 || uvOffset + 8 > stride
                 || colorOffset != -1 && (colorOffset < 12 || colorOffset + 4 > stride)
                 || normalOffset != -1 && (normalOffset < 12 || normalOffset + 3 > stride)
-                || (long) vertexCount * stride > source.limit()) return false;
+                || ((long) firstVertex + vertexCount) * stride > source.limit()) return false;
         long outputCount = (long) vertexCount / primitiveSize * (primitiveSize == 4 ? 6 : 3);
         if (outputCount > MAX_GROUP_VERTICES || outputCount > MAX_FRAME_VERTICES - count) return false;
         if (vertices == null) vertices = EntityMesh.direct(MAX_FRAME_VERTICES * HardcodedVertex.STRIDE);
         int checkpoint = count * HardcodedVertex.STRIDE;
         vertices.position(checkpoint);
-        for (int primitive = 0; primitive < vertexCount; primitive += primitiveSize) {
+        int endVertex = firstVertex + vertexCount;
+        for (int primitive = firstVertex; primitive < endVertex; primitive += primitiveSize) {
             int a = primitive * stride, b = a + stride, c = b + stride;
             float abx = source.getFloat(b) - source.getFloat(a), aby = source.getFloat(b + 4) - source.getFloat(a + 4);
             float abz = source.getFloat(b + 8) - source.getFloat(a + 8);

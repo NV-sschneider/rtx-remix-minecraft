@@ -5,6 +5,7 @@
 package com.nvidia.rtxremix.forge.entity;
 
 import com.nvidia.rtxremix.InstanceInfoBlendEXT;
+import com.nvidia.rtxremix.InstanceCategoryBit;
 import com.nvidia.rtxremix.MeshInfo;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
@@ -22,6 +23,33 @@ import sun.reflect.ReflectionFactory;
 import static org.junit.Assert.*;
 
 public class EntitySceneTest {
+    @Test public void bodyAndHandsRetainSeparateInstancesAndRetireIndependently() {
+        Fake api = new Fake();
+        EntityScene scene = new EntityScene(api);
+        List<CapturedEntityPart> parts = parts(2);
+        CapturedEntityPart body = parts.get(0), hand = parts.get(1);
+        body.categoryFlags = FirstPersonCapture.SHADOW_CATEGORY;
+        hand.categoryFlags = InstanceCategoryBit.VIEW_MODEL;
+        hand.occurrence = body.occurrence;
+        hand.triangleGroup = body.triangleGroup;
+        hand.transform[3] = 0.1f;
+        scene.sync(parts);
+        assertEquals(2, scene.partCount());
+        assertEquals(1, api.meshCreates);
+        assertEquals(1, scene.categoryCount(body.categoryFlags));
+        assertEquals(1, scene.categoryCount(hand.categoryFlags));
+        assertTrue(api.categories.containsValue(body.categoryFlags));
+        assertTrue(api.categories.containsValue(hand.categoryFlags));
+        long bodyInstance = 0;
+        for (Map.Entry<Long, Integer> entry : api.categories.entrySet()) if (entry.getValue() == body.categoryFlags) bodyInstance = entry.getKey();
+        scene.sync(parts);
+        assertEquals("unchanged retained instances are not resubmitted", 2, api.instanceUpdates);
+        parts.remove(hand); scene.sync(parts);
+        assertEquals(1, scene.partCount());
+        assertTrue(api.instances.containsKey(bodyInstance));
+        assertEquals(0, scene.categoryCount(InstanceCategoryBit.VIEW_MODEL));
+        scene.close(); api.assertEmpty();
+    }
     @Test public void nonlivingOwnersRetainIdentityPoseAndRetireWhenAbsent() throws Exception {
         Fake api = new Fake();
         EntityScene scene = new EntityScene(api);
@@ -138,9 +166,10 @@ public class EntitySceneTest {
     private static final class Fake implements EntityScene.Backend {
         final Map<Long, Long> meshes = new HashMap<>(), instances = new HashMap<>(), materials = new HashMap<>();
         final Map<Long, Float> positions = new HashMap<>();
+        final Map<Long, Integer> categories = new HashMap<>();
         final Set<Long> textures = new HashSet<>(), blends = new HashSet<>();
         long next = 1, failMesh, failBlend;
-        int meshCreates;
+        int meshCreates, instanceUpdates;
         boolean failMaterialCreation;
         public long createMesh(MeshInfo mesh) {
             long handle = next++; meshes.put(handle, mesh.surfaces[0].material); meshCreates++; return handle;
@@ -150,14 +179,15 @@ public class EntitySceneTest {
             if (handle == failMesh) { failMesh = 0; throw new IllegalStateException("mesh release"); }
             assertNotNull(meshes.remove(handle));
         }
-        public long createInstance(long mesh, float[] transform, long blend) {
-            long handle = next++; updateInstance(handle, mesh, transform, blend); return handle;
+        public long createInstance(long mesh, float[] transform, int category, long blend) {
+            long handle = next++; updateInstance(handle, mesh, transform, category, blend); return handle;
         }
-        public void updateInstance(long instance, long mesh, float[] transform, long blend) {
+        public void updateInstance(long instance, long mesh, float[] transform, int category, long blend) {
             assertTrue(meshes.containsKey(mesh)); assertTrue(blends.contains(blend));
             instances.put(instance, mesh); positions.put(instance, transform[3]);
+            categories.put(instance, category); instanceUpdates++;
         }
-        public void removeInstance(long handle) { assertNotNull(instances.remove(handle)); positions.remove(handle); }
+        public void removeInstance(long handle) { assertNotNull(instances.remove(handle)); positions.remove(handle); categories.remove(handle); }
         public long createBlend(InstanceInfoBlendEXT blend) { long handle = next++; blends.add(handle); return handle; }
         public void freeBlend(long handle) {
             if (handle == failBlend) { failBlend = 0; throw new IllegalStateException("blend release"); }

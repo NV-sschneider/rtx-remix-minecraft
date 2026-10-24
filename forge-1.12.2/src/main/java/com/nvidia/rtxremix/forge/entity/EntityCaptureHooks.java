@@ -4,6 +4,7 @@
  */
 package com.nvidia.rtxremix.forge.entity;
 
+import com.nvidia.rtxremix.forge.item.ItemCaptureHooks;
 import java.nio.FloatBuffer;
 import java.nio.ByteBuffer;
 import java.lang.reflect.Field;
@@ -38,7 +39,8 @@ import org.lwjgl.util.vector.Matrix4f;
 
 /** Observes existing model draws. All entry points run on the client render thread. */
 public final class EntityCaptureHooks {
-    private static final int MAX_PARTS = 1024;
+    static final int MAX_PARTS = 1280;
+    private static final int MAX_WORLD_PARTS = 1024;
     private static final int MAX_OWNER_PARTS = 256;
     private static final Field ORIGIN_X = ReflectionHelper.findField(RenderManager.class, new String[] {"renderPosX", "field_78725_b"});
     private static final Field ORIGIN_Y = ReflectionHelper.findField(RenderManager.class, new String[] {"renderPosY", "field_78726_c"});
@@ -87,7 +89,7 @@ public final class EntityCaptureHooks {
         armed = capture;
     }
 
-    /** Stops observing before first-person rendering and GUI previews. */
+    /** Stops observing after the world and hand draws, before screen overlays and GUI previews. */
     public static List<CapturedEntityPart> finishFrame() {
         armed = false;
         SCOPE.clear();
@@ -109,6 +111,7 @@ public final class EntityCaptureHooks {
         unsupportedTriangles = rejectedTriangles = 0;
         managedDepth = nameDepth = 0;
         observedTriangleBuffer = null;
+        FirstPersonCapture.reset();
     }
 
     /** Runs before finishFrame, with entity/item observers still armed and the world view intact. */
@@ -119,6 +122,23 @@ public final class EntityCaptureHooks {
     public static long offscreenFailureCount() { return OFFSCREEN.failureCount(); }
     public static long nonlivingBufferCount() { return nonlivingBuffers; }
     public static boolean normallyRendered(UUID id) { return OFFSCREEN.normallyRendered(id); }
+    static boolean isArmed() { return armed && failure == null; }
+    static void captureLocalPlayer(float partialTicks) { if (isArmed() && !SCOPE.isOpen()) OFFSCREEN.captureLocalPlayer(partialTicks); }
+
+    static void beginFirstPerson(Entity player) {
+        if (!isArmed() || !SCOPE.enter(player, true)) return;
+        ownerStart = PARTS.size(); ownerTriangleStart = TRIANGLES.count(); occurrence = 0;
+        texture = null; observedTriangleBuffer = null;
+    }
+    static void endFirstPerson() { endScope(); }
+
+    /** The item observer borrows its holder's exact pose and category, including the hidden body. */
+    public static Object activeOwner() { return isArmed() && nameDepth == 0 ? SCOPE.owner() : null; }
+    public static int activeCategory() { return FirstPersonCapture.category(); }
+    public static void currentTransform(Matrix4f modelView, Matrix4f scratch, float[] destination) {
+        if (FirstPersonCapture.hand()) FirstPersonCapture.transform(modelView, scratch, destination);
+        else EntityTransform.world(INVERSE, modelView, scratch, originX, originY, originZ, destination);
+    }
     static void beginSupplementary() { ownerStart = PARTS.size(); ownerTriangleStart = TRIANGLES.count(); }
     static void discardSupplementary() {
         for (int i = PARTS.size() - 1; i >= ownerStart; i--) PARTS.remove(i).clear();
@@ -295,11 +315,12 @@ public final class EntityCaptureHooks {
         } catch (RuntimeException | LinkageError ex) { fail(ex); }
     }
 
-    /** Observes completed CPU geometry only inside a nonliving entity's primary draw. */
+    /** Observes completed CPU geometry in a validated entity, hand, or ordinary TESR draw. */
     public static void captureEntityBuffer(Object completed) {
         Object owner = SCOPE.owner();
-        if (!armed || failure != null || nameDepth != 0 || !(owner instanceof Entity)
-                || owner instanceof EntityLivingBase || owner instanceof EntityItem || texture == null) return;
+        if (!armed || failure != null || nameDepth != 0 || !(owner instanceof Entity || owner instanceof TileEntity)
+                || owner instanceof EntityLivingBase && !FirstPersonCapture.hand()
+                || owner instanceof EntityItem || texture == null || ItemCaptureHooks.modelScopeOpen()) return;
         if (completed == observedTriangleBuffer) { observedTriangleBuffer = null; return; }
         try {
             BufferBuilder buffer = (BufferBuilder) completed;
@@ -454,7 +475,8 @@ public final class EntityCaptureHooks {
         if (!vertexColors && BUFFER.get(3) < 0.999f) { return null; }
         int argb = vertexColors ? 0xffffffff : channel(BUFFER.get(3)) << 24 | channel(BUFFER.get(0)) << 16
                 | channel(BUFFER.get(1)) << 8 | channel(BUFFER.get(2));
-        if (PARTS.size() == MAX_PARTS || occurrence == MAX_OWNER_PARTS) {
+        int limit = FirstPersonCapture.hand() ? MAX_PARTS : MAX_WORLD_PARTS;
+        if (PARTS.size() >= limit || occurrence == MAX_OWNER_PARTS) {
             rejectOwner();
             return null;
         }
@@ -471,6 +493,7 @@ public final class EntityCaptureHooks {
         part.clear();
         part.owner = SCOPE.owner();
         part.occurrence = occurrence;
+        part.categoryFlags = FirstPersonCapture.category();
         part.textureId = textureId;
         part.textureIdentity = texture;
         part.argb = argb;
@@ -479,7 +502,7 @@ public final class EntityCaptureHooks {
                 ? GL11.glGetInteger(GL11.GL_ALPHA_TEST_FUNC) - GL11.GL_NEVER : 7;
         part.alphaReference = (int) (GL11.glGetFloat(GL11.GL_ALPHA_TEST_REF) * 255);
         readView(PART_VIEW);
-        EntityTransform.world(INVERSE, PART_VIEW, WORLD, originX, originY, originZ, part.transform);
+        currentTransform(PART_VIEW, WORLD, part.transform);
         return part;
     }
 
@@ -491,7 +514,7 @@ public final class EntityCaptureHooks {
         destination.load(BUFFER);
     }
 
-    private static void fail(Throwable error) {
+    static void fail(Throwable error) {
         failure = error;
         SCOPE.reject();
         texture = null;

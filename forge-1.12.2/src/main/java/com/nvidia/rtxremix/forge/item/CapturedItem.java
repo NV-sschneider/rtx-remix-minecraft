@@ -4,15 +4,16 @@
  */
 package com.nvidia.rtxremix.forge.item;
 
-import net.minecraft.entity.item.EntityItem;
+import net.minecraft.entity.Entity;
 
 /** A render-thread snapshot valid until the next beginFrame or discard. */
 public final class CapturedItem {
-    EntityItem owner;
+    Entity owner;
     Object model;
     Object stack;
     ItemGeometry geometry;
     int occurrence;
+    int categoryFlags;
     int firstVertex;
     int vertexCount;
     long fingerprint;
@@ -21,5 +22,5 @@ public final class CapturedItem {
     int alphaReference;
     final float[] transform = new float[12];
 
-    void clear() { owner = null; model = null; stack = null; geometry = null; }
+    void clear() { owner = null; model = null; stack = null; geometry = null; categoryFlags = 0; }
 }

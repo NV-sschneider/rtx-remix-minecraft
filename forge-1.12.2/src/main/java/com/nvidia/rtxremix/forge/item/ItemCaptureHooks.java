@@ -4,6 +4,8 @@
  */
 package com.nvidia.rtxremix.forge.item;
 
+import com.nvidia.rtxremix.InstanceCategoryBit;
+import com.nvidia.rtxremix.forge.entity.EntityCaptureHooks;
 import java.lang.reflect.Field;
 import java.nio.FloatBuffer;
 import java.util.ArrayList;
@@ -18,6 +20,8 @@ import net.minecraft.client.renderer.texture.TextureAtlasSprite;
 import net.minecraft.client.renderer.vertex.DefaultVertexFormats;
 import net.minecraft.client.renderer.vertex.VertexFormat;
 import net.minecraft.entity.item.EntityItem;
+import net.minecraft.entity.Entity;
+import net.minecraft.entity.EntityLivingBase;
 import net.minecraft.item.ItemStack;
 import net.minecraftforge.fml.relauncher.ReflectionHelper;
 import org.lwjgl.BufferUtils;
@@ -26,9 +30,10 @@ import org.lwjgl.opengl.GL13;
 import org.lwjgl.opengl.GL14;
 import org.lwjgl.util.vector.Matrix4f;
 
-/** Observes world-owned dropped items, never GUI, held-item, or enchantment-glint draws. */
+/** Observes actual dropped and held baked-item draws while their entity or hand scope is active. */
 public final class ItemCaptureHooks {
-    static final int MAX_PARTS = 256;
+    static final int MAX_PARTS = 288;
+    private static final int MAX_WORLD_PARTS = 256;
     static final int MAX_OWNER_PARTS = 16;
     private static final int MAX_MODEL_VERTICES = 16384;
     private static final Field ORIGIN_X = ReflectionHelper.findField(RenderManager.class, new String[] {"renderPosX", "field_78725_b"});
@@ -45,6 +50,7 @@ public final class ItemCaptureHooks {
     private static EntityItem owner;
     private static CapturedItem active;
     private static int entityDepth, modelDepth, occurrence, quadStart;
+    private static int supplementaryStart, supplementaryVertices;
     private static double originX, originY, originZ;
     private static TextureAtlasSprite sprite;
     private static boolean rejected;
@@ -67,8 +73,18 @@ public final class ItemCaptureHooks {
     }
     private static void clearScope() { owner = null; active = null; sprite = null; entityDepth = modelDepth = 0; }
 
+    public static void beginFirstPerson() { if (armed) occurrence = 0; }
+    public static boolean modelScopeOpen() { return armed && modelDepth != 0; }
+    public static void beginSupplementary() { supplementaryStart = PARTS.size(); supplementaryVertices = GEOMETRY.count(); }
+    public static void discardSupplementary() {
+        for (int i = PARTS.size() - 1; i >= supplementaryStart; i--) PARTS.remove(i).clear();
+        GEOMETRY.truncate(supplementaryVertices);
+        clearScope();
+    }
+
     public static void beginEntity(Object rendered) {
         if (!armed || failure != null || ++entityDepth != 1) return;
+        occurrence = 0;
         try {
             Minecraft mc = Minecraft.getMinecraft();
             if (!(rendered instanceof EntityItem) || ((EntityItem) rendered).world != mc.world
@@ -88,7 +104,17 @@ public final class ItemCaptureHooks {
 
     public static void beginModel(Object model, Object renderedStack) {
         if (!armed || failure != null || ++modelDepth != 1) return;
-        if (entityDepth != 1 || owner == null || PARTS.size() == MAX_PARTS || occurrence == MAX_OWNER_PARTS) return;
+        if (entityDepth > 1 || occurrence == MAX_OWNER_PARTS) return;
+        Entity holder = owner;
+        int category = 0;
+        if (holder == null) {
+            Object candidate = EntityCaptureHooks.activeOwner();
+            if (!(candidate instanceof EntityLivingBase)) return;
+            holder = (Entity) candidate;
+            category = EntityCaptureHooks.activeCategory();
+        }
+        int limit = category == InstanceCategoryBit.VIEW_MODEL ? MAX_PARTS : MAX_WORLD_PARTS;
+        if (PARTS.size() >= limit) return;
         try {
             ItemStack stack = (ItemStack) renderedStack;
             if (stack.isEmpty()) return;
@@ -104,14 +130,16 @@ public final class ItemCaptureHooks {
             } finally { OpenGlHelper.setActiveTexture(textureUnit); }
             if (PARTS.size() == POOL.size()) POOL.add(new CapturedItem());
             active = POOL.get(PARTS.size());
-            active.owner = owner; active.model = model; active.stack = stack; active.geometry = GEOMETRY;
+            active.owner = holder; active.model = model; active.stack = stack; active.geometry = GEOMETRY;
+            active.categoryFlags = category;
             active.occurrence = occurrence++;
             active.firstVertex = GEOMETRY.count();
             active.alphaBlend = blend;
             active.alphaCompare = GL11.glIsEnabled(GL11.GL_ALPHA_TEST) ? GL11.glGetInteger(GL11.GL_ALPHA_TEST_FUNC) - GL11.GL_NEVER : 7;
             active.alphaReference = channel(GL11.glGetFloat(GL11.GL_ALPHA_TEST_REF));
             readView(MODEL);
-            ItemTransform.world(INVERSE, MODEL, WORLD, originX, originY, originZ, active.transform);
+            if (owner == null) EntityCaptureHooks.currentTransform(MODEL, WORLD, active.transform);
+            else ItemTransform.world(INVERSE, MODEL, WORLD, originX, originY, originZ, active.transform);
             rejected = false;
         } catch (RuntimeException | LinkageError ex) { fail(ex); }
     }
@@ -152,7 +180,7 @@ public final class ItemCaptureHooks {
             sprite = null;
         } catch (RuntimeException | LinkageError ex) { fail(ex); }
     }
-    private static boolean capturing() { return armed && failure == null && entityDepth == 1 && modelDepth == 1 && active != null && !rejected; }
+    private static boolean capturing() { return armed && failure == null && entityDepth <= 1 && modelDepth == 1 && active != null && !rejected; }
     private static void fail(Throwable error) { failure = error; clearScope(); }
     private static int channel(float value) { return Math.max(0, Math.min(255, Math.round(value * 255))); }
     private static void readView(Matrix4f destination) { BUFFER.clear(); GL11.glGetFloat(GL11.GL_MODELVIEW_MATRIX, BUFFER); destination.load(BUFFER); }
