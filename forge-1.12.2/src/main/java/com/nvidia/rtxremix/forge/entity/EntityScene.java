@@ -18,7 +18,7 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
 import net.minecraft.client.model.ModelRenderer;
-import net.minecraft.entity.EntityLivingBase;
+import net.minecraft.entity.Entity;
 import net.minecraft.tileentity.TileEntity;
 import net.minecraft.util.math.BlockPos;
 
@@ -94,8 +94,8 @@ public final class EntityScene implements AutoCloseable {
             MeshAsset mesh = mesh(captured, texture);
             if (mesh == null) { keep(part, captured, owner); continue; }
             if (owner == null) {
-                owner = new Owner(captured.owner instanceof EntityLivingBase
-                        ? ((EntityLivingBase) captured.owner).getUniqueID() : null);
+                owner = new Owner(captured.owner instanceof Entity
+                        ? ((Entity) captured.owner).getUniqueID() : null);
                 owners.put(captured.owner, owner);
             }
             if (part == null) {
@@ -177,7 +177,7 @@ public final class EntityScene implements AutoCloseable {
     }
 
     private static boolean valid(CapturedEntityPart part) {
-        if (!(part.owner instanceof EntityLivingBase || part.owner instanceof TileEntity)
+        if (!(part.owner instanceof Entity || part.owner instanceof TileEntity)
                 || part.modelPart == null && (part.triangles == null || part.triangleGroup == null || part.vertexCount <= 0)
                 || part.textureIdentity == null || part.textureId <= 0
                 || part.occurrence < 0 || part.occurrence >= MAX_OWNER_PARTS || !Float.isFinite(part.scale)) return false;

@@ -35,6 +35,9 @@ import org.objectweb.asm.tree.analysis.BasicVerifier;
 import static org.junit.Assert.*;
 
 public class EntityCaptureTransformerTest {
+    private static final String MANAGER = "net/minecraft/client/renderer/entity/RenderManager";
+    private static final String RENDER = "net/minecraft/client/renderer/entity/Render";
+    private static final String UPLOADER = "net/minecraft/client/renderer/WorldVertexBufferUploader";
     private static final String LIVING = "net/minecraft/client/renderer/entity/RenderLivingBase";
     private static final String MODEL = "net/minecraft/client/model/ModelRenderer";
     private static final String ADVANCED = "net/ilexiconn/llibrary/client/model/tools/AdvancedModelRenderer";
@@ -60,6 +63,60 @@ public class EntityCaptureTransformerTest {
     private static final String VBO_PROBE = Type.getInternalName(VboProbe.class);
     private static final String LIVING_DESCRIPTOR = "(L" + ENTITY + ";DDDFF)V";
     private final EntityCaptureTransformer transformer = new EntityCaptureTransformer();
+
+    @Test public void scopesOnlyThePinnedPrimaryEntityDispatchBeforeShadowsAndDebugGeometry() throws Exception {
+        byte[] transformed = transform(MANAGER, classBytes(MANAGER));
+        ClassNode after = read(transformed);
+        MethodNode method = method(after, "renderEntity", "(Lnet/minecraft/entity/Entity;DDDFFZ)V");
+        assertEquals(1, hookCount(method, "beginManaged"));
+        assertEquals(1, hookCount(method, "activateManaged"));
+        assertEquals(1, hookCount(method, "deactivateManaged"));
+        assertEquals(2, hookCount(method, "endManaged"));
+        for (AbstractInsnNode instruction : method.instructions.toArray()) {
+            if (isHook(instruction, "activateManaged")) {
+                MethodInsnNode draw = (MethodInsnNode) instruction.getNext();
+                assertEquals(RENDER, draw.owner); assertEquals("doRender", draw.name);
+                assertTrue(isHook(draw.getNext(), "deactivateManaged"));
+            }
+            if (instruction instanceof MethodInsnNode && ((MethodInsnNode) instruction).name.equals("doRenderShadowAndFire")) {
+                assertFalse(isHook(instruction.getPrevious(), "activateManaged"));
+            }
+        }
+        verify(after);
+        assertSame(transformed, transform(MANAGER, transformed));
+    }
+
+    @Test public void namesSuspendCaptureWithFinallyAndUploaderObservesBeforeAnyReset() throws Exception {
+        byte[] transformed = transform(RENDER, classBytes(RENDER));
+        ClassNode after = read(transformed);
+        MethodNode name = method(after, "renderName", "(Lnet/minecraft/entity/Entity;DDD)V");
+        assertEquals(1, hookCount(name, "beginName")); assertEquals(2, hookCount(name, "endName"));
+        verify(after); assertSame(transformed, transform(RENDER, transformed));
+        transformed = transform(UPLOADER, classBytes(UPLOADER));
+        after = read(transformed);
+        MethodNode draw = method(after, "draw", "(L" + BUFFER + ";)V");
+        assertEquals(1, hookCount(draw, "captureEntityBuffer"));
+        assertEquals("captureEntityBuffer", nextCall(draw.instructions.getFirst()).name);
+        verify(after); assertSame(transformed, transform(UPLOADER, transformed));
+    }
+
+    @Test public void projectileAndEffectUploaderObserversComposeInEitherTransformerOrder() throws Exception {
+        EffectCaptureTransformer effects = new EffectCaptureTransformer();
+        for (boolean entityFirst : new boolean[] {true, false}) {
+            byte[] original = classBytes(UPLOADER);
+            byte[] transformed = entityFirst
+                    ? effects.transform("obfuscated", UPLOADER.replace('/', '.'), transform(UPLOADER, original))
+                    : transform(UPLOADER, effects.transform("obfuscated", UPLOADER.replace('/', '.'), original));
+            ClassNode after = read(transformed);
+            MethodNode draw = method(after, "draw", "(L" + BUFFER + ";)V");
+            assertEquals(1, hookCount(draw, "captureEntityBuffer"));
+            int effectHooks = 0;
+            for (AbstractInsnNode instruction : draw.instructions.toArray()) if (instruction instanceof MethodInsnNode
+                    && ((MethodInsnNode) instruction).name.equals("drawBuffer")) effectHooks++;
+            assertEquals(1, effectHooks);
+            verify(after);
+        }
+    }
 
     @Test
     public void snapshotsBeforeForgePreAndActivatesOnlyAcceptedLivingBodies() throws Exception {
@@ -418,7 +475,8 @@ public class EntityCaptureTransformerTest {
                 "com.nvidia.rtxremix.forge.core.EntityCaptureTransformer",
                 "com.nvidia.rtxremix.forge.core.AtlasAnimationTransformer",
                 "com.nvidia.rtxremix.forge.core.ItemCaptureTransformer",
-                "com.nvidia.rtxremix.forge.core.EffectCaptureTransformer"
+                "com.nvidia.rtxremix.forge.core.EffectCaptureTransformer",
+                "com.nvidia.rtxremix.forge.core.CloudCaptureTransformer"
         }, new RemixCorePlugin().getASMTransformerClass());
     }
 

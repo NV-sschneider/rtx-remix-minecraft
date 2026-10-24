@@ -20,7 +20,8 @@ public final class RemixCorePlugin implements IFMLLoadingPlugin {
             "com.nvidia.rtxremix.forge.core.EntityCaptureTransformer",
             "com.nvidia.rtxremix.forge.core.AtlasAnimationTransformer",
             "com.nvidia.rtxremix.forge.core.ItemCaptureTransformer",
-            "com.nvidia.rtxremix.forge.core.EffectCaptureTransformer"
+            "com.nvidia.rtxremix.forge.core.EffectCaptureTransformer",
+            "com.nvidia.rtxremix.forge.core.CloudCaptureTransformer"
         };
     }
 

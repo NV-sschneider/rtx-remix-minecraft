@@ -13,9 +13,45 @@ import java.util.List;
 import org.junit.Test;
 import org.lwjgl.opengl.GL11;
 import org.lwjgl.opengl.GL14;
+import org.lwjgl.util.vector.Matrix4f;
 import static org.junit.Assert.*;
 
 public class EntityTrianglesTest {
+    @Test public void projectileQuadsPreservePoseUvsAndCurrentColorWithoutVertexNormals() {
+        ByteBuffer source = EntityMesh.direct(4 * 20);
+        float[] xy = {0, 0, 1, 0, 1, 1, 0, 1};
+        for (int i = 0; i < 4; i++) source.putFloat(xy[i * 2]).putFloat(xy[i * 2 + 1]).putFloat(0)
+                .putFloat(xy[i * 2]).putFloat(xy[i * 2 + 1]);
+        source.flip(); source.position(3).mark().position(7);
+        Matrix4f texture = new Matrix4f(); texture.m30 = 0.25f; texture.m31 = -0.5f;
+        EntityTriangles triangles = new EntityTriangles();
+        assertTrue(triangles.appendPrimitives(source, 4, 4, 20, 12, -1, -1, 0xff804020, texture));
+        assertEquals(7, source.position()); source.reset(); assertEquals(3, source.position());
+        MeshInfoSurfaceTriangles surface = triangles.info(0, 6, 7, 9).surfaces[0];
+        assertEquals(6, surface.vertexCount);
+        ByteBuffer vertices = surface.vertexBuffer;
+        assertEquals(1, vertices.getFloat(20), 0);
+        assertEquals(0.25f, vertices.getFloat(24), 0); assertEquals(-0.5f, vertices.getFloat(28), 0);
+        assertEquals(0xff804020, vertices.getInt(32));
+        assertEquals(0, vertices.getFloat(3 * 64), 0);
+        assertEquals(1, vertices.getFloat(4 * 64), 0);
+        assertEquals(0, vertices.getFloat(5 * 64), 0);
+        assertEquals(1, vertices.getFloat(5 * 64 + 4), 0);
+    }
+
+    @Test public void malformedProjectileQuadsRejectAtomicallyAndCannotOverflowTheArena() {
+        ByteBuffer source = EntityMesh.direct(4 * 20);
+        for (int i = 0; i < 4; i++) source.putFloat(i == 1 || i == 2 ? 1 : 0)
+                .putFloat(i >= 2 ? 1 : 0).putFloat(0).putFloat(0).putFloat(0);
+        source.flip();
+        EntityTriangles triangles = new EntityTriangles(); Matrix4f texture = new Matrix4f();
+        assertTrue(triangles.appendPrimitives(source, 4, 4, 20, 12, -1, -1, -1, texture));
+        source.putFloat(40, Float.NaN);
+        assertFalse(triangles.appendPrimitives(source, 4, 4, 20, 12, -1, -1, -1, texture));
+        assertEquals(6, triangles.count());
+        assertFalse(triangles.appendPrimitives(source, Integer.MAX_VALUE, 4, 20, 12, -1, -1, -1, texture));
+        assertFalse(triangles.appendPrimitives(source, 4, 2, 20, 12, -1, -1, -1, texture));
+    }
     @Test public void preservesCompletedTriangleColorUvNormalAndProducerState() {
         ByteBuffer source = source(3);
         source.position(5).mark().position(9);

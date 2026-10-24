@@ -13,11 +13,44 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 import net.minecraft.tileentity.TileEntity;
+import net.minecraft.entity.Entity;
+import net.minecraft.nbt.NBTTagCompound;
 import org.junit.Test;
+import sun.reflect.ReflectionFactory;
 import static org.junit.Assert.*;
 
 public class EntitySceneTest {
+    @Test public void nonlivingOwnersRetainIdentityPoseAndRetireWhenAbsent() throws Exception {
+        Fake api = new Fake();
+        EntityScene scene = new EntityScene(api);
+        List<CapturedEntityPart> parts = parts(1);
+        // Entity's constructor boots Forge item registries. The ownership test only
+        // needs its real type and UUID contract, and never reads simulation fields.
+        Entity projectile = (Entity) ReflectionFactory.getReflectionFactory()
+                .newConstructorForSerialization(TestProjectile.class, Object.class.getDeclaredConstructor()).newInstance();
+        parts.get(0).owner = projectile;
+        scene.sync(parts);
+        assertTrue(scene.contains(projectile.getUniqueID()));
+        assertEquals(1, scene.trianglePartCount(projectile.getUniqueID()));
+        parts.get(0).transform[3] = 12;
+        scene.sync(parts);
+        assertEquals(1, scene.transformUpdates(projectile.getUniqueID()));
+        parts.clear(); scene.sync(parts);
+        assertFalse(scene.contains(projectile.getUniqueID()));
+        assertEquals(0, scene.resourceCount());
+        scene.close(); api.assertEmpty();
+    }
+
+    private static final class TestProjectile extends Entity {
+        private static final UUID ID = UUID.fromString("00000000-0000-0000-0000-000000000123");
+        private TestProjectile() { super(null); }
+        @Override public UUID getUniqueID() { return ID; }
+        protected void entityInit() { }
+        protected void readEntityFromNBT(NBTTagCompound tag) { }
+        protected void writeEntityToNBT(NBTTagCompound tag) { }
+    }
     @Test public void deferredGeometryStillUpdatesEveryExistingPoseAndRetainsDependencies() {
         Fake api = new Fake();
         EntityScene scene = new EntityScene(api);

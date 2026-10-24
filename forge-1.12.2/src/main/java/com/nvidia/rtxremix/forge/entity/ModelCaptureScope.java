@@ -17,6 +17,7 @@ final class ModelCaptureScope {
         return true;
     }
     void activate() { if (depth == 1) active = true; }
+    void deactivate() { if (depth == 1) active = false; }
     Object owner() { return depth == 1 && active ? owner : null; }
     Object outerOwner() { return depth == 1 ? owner : null; }
     boolean isOpen() { return depth != 0; }

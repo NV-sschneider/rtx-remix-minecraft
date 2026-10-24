@@ -24,6 +24,9 @@ import org.objectweb.asm.tree.VarInsnNode;
 /** Observes living and tile model draws without replacing their animation or OpenGL work. */
 public final class EntityCaptureTransformer implements IClassTransformer {
     private static final String LIVING = "net.minecraft.client.renderer.entity.RenderLivingBase";
+    private static final String MANAGER = "net.minecraft.client.renderer.entity.RenderManager";
+    private static final String RENDER = "net.minecraft.client.renderer.entity.Render";
+    private static final String UPLOADER = "net.minecraft.client.renderer.WorldVertexBufferUploader";
     private static final String MODEL = "net.minecraft.client.model.ModelRenderer";
     private static final String ADVANCED_MODEL = "net.ilexiconn.llibrary.client.model.tools.AdvancedModelRenderer";
     private static final String BENDS_MODEL = "goblinbob.mobends.core.client.model.ModelPart";
@@ -40,12 +43,15 @@ public final class EntityCaptureTransformer implements IClassTransformer {
     private static final String GL_STATE = "net/minecraft/client/renderer/GlStateManager";
     private static final String HOOKS = "com/nvidia/rtxremix/forge/entity/EntityCaptureHooks";
     private static final String LIVING_DESCRIPTOR = "(Lnet/minecraft/entity/EntityLivingBase;DDDFF)V";
+    private static final String MANAGED_DESCRIPTOR = "(Lnet/minecraft/entity/Entity;DDDFFZ)V";
+    private static final String RENDER_DESCRIPTOR = "(Lnet/minecraft/entity/Entity;DDDFF)V";
     private static final String TEXTURE_DESCRIPTOR = "(Lnet/minecraft/util/ResourceLocation;)V";
     private static final String TILE_DESCRIPTOR = "(Lnet/minecraft/tileentity/TileEntity;DDDFIF)V";
 
     @Override
     public byte[] transform(String name, String transformedName, byte[] basicClass) {
         if (basicClass == null || !(LIVING.equals(transformedName) || MODEL.equals(transformedName)
+                || MANAGER.equals(transformedName) || RENDER.equals(transformedName) || UPLOADER.equals(transformedName)
                 || ADVANCED_MODEL.equals(transformedName) || bendsModel(transformedName)
                 || OBJ_MODEL.equals(transformedName) || VBO_MODEL.equals(transformedName) || VBO_MESH.equals(transformedName)
                 || TEXTURES.equals(transformedName) || TILES.equals(transformedName))) {
@@ -56,7 +62,16 @@ public final class EntityCaptureTransformer implements IClassTransformer {
         reader.accept(type, 0);
         boolean changed = false;
         for (MethodNode method : type.methods) {
-            if (LIVING.equals(transformedName) && LIVING_DESCRIPTOR.equals(method.desc)
+            if (MANAGER.equals(transformedName) && MANAGED_DESCRIPTOR.equals(method.desc)
+                    && named(method.name, "renderEntity", "func_188391_a")) {
+                changed |= scopeManaged(method);
+            } else if (RENDER.equals(transformedName) && "(Lnet/minecraft/entity/Entity;DDD)V".equals(method.desc)
+                    && named(method.name, "renderName", "func_177067_a")) {
+                changed |= scopeName(method);
+            } else if (UPLOADER.equals(transformedName) && ("(L" + BUFFER + ";)V").equals(method.desc)
+                    && named(method.name, "draw", "func_181679_a")) {
+                changed |= observeEntityBuffer(method);
+            } else if (LIVING.equals(transformedName) && LIVING_DESCRIPTOR.equals(method.desc)
                     && named(method.name, "doRender", "func_76986_a")) {
                 changed |= scopeLiving(method);
             } else if (TILES.equals(transformedName) && TILE_DESCRIPTOR.equals(method.desc)
@@ -89,6 +104,50 @@ public final class EntityCaptureTransformer implements IClassTransformer {
         ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
         type.accept(writer);
         return writer.toByteArray();
+    }
+
+    private static boolean scopeManaged(MethodNode method) {
+        if (hasHook(method, "beginManaged")) return false;
+        int draws = 0;
+        for (AbstractInsnNode instruction : method.instructions.toArray()) {
+            if (!(instruction instanceof MethodInsnNode)) continue;
+            MethodInsnNode call = (MethodInsnNode) instruction;
+            if (call.getOpcode() == Opcodes.INVOKEVIRTUAL && RENDER.replace('.', '/').equals(call.owner)
+                    && named(call.name, "doRender", "func_76986_a") && RENDER_DESCRIPTOR.equals(call.desc)) {
+                method.instructions.insertBefore(call, hook("activateManaged", "()V"));
+                method.instructions.insert(call, hook("deactivateManaged", "()V"));
+                draws++;
+            }
+        }
+        if (draws != 1) throw new IllegalStateException("Entity capture requires one primary renderer dispatch");
+        InsnList begin = new InsnList();
+        begin.add(new VarInsnNode(Opcodes.ALOAD, 1));
+        begin.add(hook("beginManaged", "(Ljava/lang/Object;)V"));
+        LabelNode start = new LabelNode();
+        begin.add(start);
+        method.instructions.insert(begin);
+        finishScope(method, start, "endManaged");
+        return true;
+    }
+
+    private static boolean scopeName(MethodNode method) {
+        if (hasHook(method, "beginName")) return false;
+        InsnList begin = new InsnList();
+        begin.add(hook("beginName", "()V"));
+        LabelNode start = new LabelNode();
+        begin.add(start);
+        method.instructions.insert(begin);
+        finishScope(method, start, "endName");
+        return true;
+    }
+
+    private static boolean observeEntityBuffer(MethodNode method) {
+        if (hasHook(method, "captureEntityBuffer")) return false;
+        InsnList begin = new InsnList();
+        begin.add(new VarInsnNode(Opcodes.ALOAD, 1));
+        begin.add(hook("captureEntityBuffer", "(Ljava/lang/Object;)V"));
+        method.instructions.insert(begin);
+        return true;
     }
 
     private static boolean scopeLiving(MethodNode method) {

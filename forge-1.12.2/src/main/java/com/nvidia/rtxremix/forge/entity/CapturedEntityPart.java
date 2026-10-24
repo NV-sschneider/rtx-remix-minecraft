@@ -8,7 +8,7 @@ import net.minecraft.client.model.ModelRenderer;
 
 /** Render-thread scratch data, valid only until the next capture frame. */
 public final class CapturedEntityPart {
-    /** Living entity or world-owned tile entity; identity is scoped to the current scene. */
+    /** Entity or world-owned tile entity; identity is scoped to the current scene. */
     public Object owner;
     public ModelRenderer modelPart;
     public int displayList;

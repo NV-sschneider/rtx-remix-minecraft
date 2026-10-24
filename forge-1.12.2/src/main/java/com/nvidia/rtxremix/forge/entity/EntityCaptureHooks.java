@@ -10,6 +10,7 @@ import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.UUID;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.model.ModelRenderer;
 import net.minecraft.client.renderer.BufferBuilder;
@@ -18,7 +19,9 @@ import net.minecraft.client.renderer.entity.RenderManager;
 import net.minecraft.client.renderer.texture.ITextureObject;
 import net.minecraft.client.renderer.vertex.DefaultVertexFormats;
 import net.minecraft.client.renderer.vertex.VertexFormat;
+import net.minecraft.entity.Entity;
 import net.minecraft.entity.EntityLivingBase;
+import net.minecraft.entity.item.EntityItem;
 import net.minecraft.tileentity.TileEntity;
 import net.minecraft.util.ResourceLocation;
 import net.minecraft.util.math.BlockPos;
@@ -52,6 +55,10 @@ public final class EntityCaptureHooks {
     private static final ModelCaptureScope SCOPE = new ModelCaptureScope();
     private static final EntityTriangles TRIANGLES = new EntityTriangles();
     private static final EntityVboCache VBO_CACHE = new EntityVboCache();
+    private static final OffscreenEntityCapture OFFSCREEN = new OffscreenEntityCapture();
+    private static final boolean[] MANAGED_SCOPES = new boolean[64];
+    private static final Object[] BUFFER_GROUPS = new Object[MAX_OWNER_PARTS];
+    static { for (int i = 0; i < BUFFER_GROUPS.length; i++) BUFFER_GROUPS[i] = new Object(); }
     private static ByteBuffer vboReadback;
     private static Object vboWorld;
     private static long vboUploads, vboReadbacks, vboDraws, deferredVboDraws;
@@ -60,6 +67,9 @@ public final class EntityCaptureHooks {
     private static int ownerStart;
     private static int ownerTriangleStart;
     private static int occurrence;
+    private static int managedDepth, nameDepth;
+    private static Object observedTriangleBuffer;
+    private static long nonlivingBuffers;
     private static double originX, originY, originZ;
     private static ITextureObject texture;
     private static Throwable failure;
@@ -73,6 +83,7 @@ public final class EntityCaptureHooks {
         Object world = capture ? Minecraft.getMinecraft().world : null;
         if (world != vboWorld || !capture) { clearVboCache(); vboWorld = world; }
         VBO_CACHE.beginFrame();
+        OFFSCREEN.beginFrame();
         armed = capture;
     }
 
@@ -96,6 +107,69 @@ public final class EntityCaptureHooks {
         PARTS.clear();
         TRIANGLES.reset();
         unsupportedTriangles = rejectedTriangles = 0;
+        managedDepth = nameDepth = 0;
+        observedTriangleBuffer = null;
+    }
+
+    /** Runs before finishFrame, with entity/item observers still armed and the world view intact. */
+    public static void captureOffscreen(float partialTicks) {
+        if (armed && failure == null && !SCOPE.isOpen()) OFFSCREEN.capture(partialTicks);
+    }
+    public static int offscreenEntityCount() { return OFFSCREEN.capturedCount(); }
+    public static long offscreenFailureCount() { return OFFSCREEN.failureCount(); }
+    public static long nonlivingBufferCount() { return nonlivingBuffers; }
+    public static boolean normallyRendered(UUID id) { return OFFSCREEN.normallyRendered(id); }
+    static void beginSupplementary() { ownerStart = PARTS.size(); ownerTriangleStart = TRIANGLES.count(); }
+    static void discardSupplementary() {
+        for (int i = PARTS.size() - 1; i >= ownerStart; i--) PARTS.remove(i).clear();
+        TRIANGLES.truncate(ownerTriangleStart);
+        SCOPE.clear();
+        texture = null;
+        managedDepth = nameDepth = 0;
+    }
+
+    /** Marks real manager dispatches, and scopes only nonliving primary renderer bodies. */
+    public static void beginManaged(Object rendered) {
+        if (!armed || failure != null) return;
+        try {
+            if (managedDepth == MANAGED_SCOPES.length) throw new IllegalStateException("Entity render nesting exceeds capture bound");
+            boolean open = managedDepth != 0 || !(rendered instanceof EntityLivingBase);
+            MANAGED_SCOPES[managedDepth++] = open;
+            if (rendered instanceof Entity && ((Entity) rendered).world == Minecraft.getMinecraft().world) OFFSCREEN.observe(rendered);
+            if (!open || !SCOPE.enter(rendered, false)) return;
+            if (!(rendered instanceof Entity) || rendered instanceof EntityItem
+                    || ((Entity) rendered).world != Minecraft.getMinecraft().world || ((Entity) rendered).isDead) {
+                SCOPE.reject(); return;
+            }
+            prepareOwner();
+        } catch (ReflectiveOperationException | RuntimeException | LinkageError error) { fail(error); }
+    }
+
+    public static void activateManaged() {
+        if (armed && failure == null && managedDepth == 1 && MANAGED_SCOPES[0]) SCOPE.activate();
+    }
+    public static void deactivateManaged() {
+        if (armed && failure == null && managedDepth == 1 && MANAGED_SCOPES[0]) SCOPE.deactivate();
+    }
+    public static void endManaged() {
+        if (!armed || failure != null || managedDepth == 0) return;
+        if (MANAGED_SCOPES[--managedDepth]) endScope();
+    }
+    public static void beginName() { if (armed) nameDepth++; }
+    public static void endName() { if (armed && nameDepth > 0) nameDepth--; }
+
+    private static void prepareOwner() throws IllegalAccessException {
+        ownerStart = PARTS.size();
+        ownerTriangleStart = TRIANGLES.count();
+        occurrence = 0;
+        texture = null;
+        observedTriangleBuffer = null;
+        readView(VIEW);
+        if (Matrix4f.invert(VIEW, INVERSE) == null) throw new IllegalStateException("Entity base view is singular");
+        RenderManager manager = Minecraft.getMinecraft().getRenderManager();
+        originX = ORIGIN_X.getDouble(manager);
+        originY = ORIGIN_Y.getDouble(manager);
+        originZ = ORIGIN_Z.getDouble(manager);
     }
 
     // Object descriptors remain valid in both MCP development and SRG production classes.
@@ -104,21 +178,11 @@ public final class EntityCaptureHooks {
         if (!SCOPE.enter(rendered, false)) { return; }
         try {
             if (!(rendered instanceof EntityLivingBase)) { SCOPE.reject(); return; }
-            ownerStart = PARTS.size();
-            ownerTriangleStart = TRIANGLES.count();
-            occurrence = 0;
-            texture = null;
-            readView(VIEW);
-            if (Matrix4f.invert(VIEW, INVERSE) == null) {
-                throw new IllegalStateException("Living-entity base view is singular");
-            }
+            prepareOwner();
+            OFFSCREEN.observe(rendered);
             // Snapshot before Forge Pre modifies the view; its body rotations and
             // offsets must remain in the captured part matrix. The render manager's
             // origin also preserves translations supplied through the render arguments.
-            RenderManager manager = Minecraft.getMinecraft().getRenderManager();
-            originX = ORIGIN_X.getDouble(manager);
-            originY = ORIGIN_Y.getDouble(manager);
-            originZ = ORIGIN_Z.getDouble(manager);
         } catch (ReflectiveOperationException | RuntimeException | LinkageError ex) { fail(ex); }
     }
 
@@ -227,7 +291,55 @@ public final class EntityCaptureHooks {
             part.scale = 1;
             PARTS.add(part);
             occurrence++;
+            observedTriangleBuffer = completed;
         } catch (RuntimeException | LinkageError ex) { fail(ex); }
+    }
+
+    /** Observes completed CPU geometry only inside a nonliving entity's primary draw. */
+    public static void captureEntityBuffer(Object completed) {
+        Object owner = SCOPE.owner();
+        if (!armed || failure != null || nameDepth != 0 || !(owner instanceof Entity)
+                || owner instanceof EntityLivingBase || owner instanceof EntityItem || texture == null) return;
+        if (completed == observedTriangleBuffer) { observedTriangleBuffer = null; return; }
+        try {
+            BufferBuilder buffer = (BufferBuilder) completed;
+            if (buffer.getVertexCount() == 0 || GL11.glGetInteger(GL11.GL_LIST_INDEX) != 0) return;
+            VertexFormat format = buffer.getVertexFormat();
+            int mode = buffer.getDrawMode();
+            if (mode != GL11.GL_TRIANGLES && mode != GL11.GL_QUADS
+                    || !(DefaultVertexFormats.POSITION_TEX.equals(format) || DefaultVertexFormats.POSITION_TEX_COLOR.equals(format)
+                    || DefaultVertexFormats.POSITION_TEX_NORMAL.equals(format) || DefaultVertexFormats.POSITION_TEX_COLOR_NORMAL.equals(format)
+                    || DefaultVertexFormats.ITEM.equals(format) || DefaultVertexFormats.BLOCK.equals(format))
+                    || GL11.glGetInteger(GL20.GL_CURRENT_PROGRAM) != 0) {
+                unsupportedTriangles++;
+                return;
+            }
+            CapturedEntityPart part = captureState(true);
+            if (part == null) return;
+            BUFFER.clear(); GL11.glGetFloat(GL11.GL_CURRENT_COLOR, BUFFER);
+            int argb = channel(BUFFER.get(3)) << 24 | channel(BUFFER.get(0)) << 16
+                    | channel(BUFFER.get(1)) << 8 | channel(BUFFER.get(2));
+            int active = GL11.glGetInteger(GL13.GL_ACTIVE_TEXTURE);
+            try {
+                OpenGlHelper.setActiveTexture(OpenGlHelper.defaultTexUnit);
+                BUFFER.clear(); GL11.glGetFloat(GL11.GL_TEXTURE_MATRIX, BUFFER); VBO_TEXTURE.load(BUFFER);
+            } finally { OpenGlHelper.setActiveTexture(active); }
+            int start = TRIANGLES.count();
+            if (!TRIANGLES.appendPrimitives(buffer.getByteBuffer(), buffer.getVertexCount(), mode == GL11.GL_QUADS ? 4 : 3,
+                    format.getSize(), format.getUvOffsetById(0), format.hasColor() ? format.getColorOffset() : -1,
+                    format.hasNormal() ? format.getNormalOffset() : -1, argb, VBO_TEXTURE)) {
+                rejectTriangles(); return;
+            }
+            part.triangles = TRIANGLES;
+            part.triangleGroup = BUFFER_GROUPS[occurrence];
+            part.firstVertex = start;
+            part.vertexCount = TRIANGLES.count() - start;
+            part.geometryFingerprint = TRIANGLES.fingerprint();
+            part.scale = 1;
+            PARTS.add(part);
+            occurrence++;
+            nonlivingBuffers++;
+        } catch (RuntimeException | LinkageError error) { fail(error); }
     }
 
     /** Observed only after the exact Lycanites Mesh upload has succeeded. */
@@ -304,7 +416,7 @@ public final class EntityCaptureHooks {
     }
 
     /** Called by reload/release, not the per-frame discard that keeps reusable VBO snapshots. */
-    public static void clearVboCache() { VBO_CACHE.clear(); vboReadback = null; vboWorld = null; }
+    public static void clearVboCache() { VBO_CACHE.clear(); vboReadback = null; vboWorld = null; OFFSCREEN.release(!armed); }
     public static long vboUploadSnapshots() { return vboUploads; }
     public static long vboReadbackCount() { return vboReadbacks; }
     public static long vboDrawCount() { return vboDraws; }
@@ -330,6 +442,7 @@ public final class EntityCaptureHooks {
     }
 
     private static CapturedEntityPart captureState(boolean vertexColors) {
+        if (nameDepth != 0) return null;
         // Player skins enable ordinary alpha blending even for their solid body.
         // Additive eyes, glint and faded invisible models need separate semantics.
         boolean alphaBlend = GL11.glIsEnabled(GL11.GL_BLEND);
