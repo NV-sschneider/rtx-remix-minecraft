@@ -4,6 +4,7 @@
  */
 package com.nvidia.rtxremix.forge.terrain;
 
+import com.nvidia.rtxremix.forge.texture.SpriteOpacity;
 import java.util.List;
 import net.minecraft.block.state.IBlockState;
 import net.minecraft.client.Minecraft;
@@ -34,11 +35,16 @@ final class BakedBlockCapture {
     private final Minecraft mc;
     private final float[] positions = new float[12], uvs = new float[8];
     private final int[] colors = new int[4];
+    private final SpriteOpacity opacity = new SpriteOpacity(256);
+    private final BlockOverlays overlays = new BlockOverlays();
+    private boolean classifyOverlays;
     private boolean complete;
 
     BakedBlockCapture(Minecraft mc) { this.mc = mc; }
 
     void beginBlock() { complete = true; }
+    void beginFrame() { opacity.beginFrame(); }
+    void classifyOverlays(boolean enabled) { classifyOverlays = enabled; }
     boolean complete() { return complete; }
     boolean standardPipeline() {
         BlockRendererDispatcher dispatcher = mc.getBlockRendererDispatcher();
@@ -60,9 +66,12 @@ final class BakedBlockCapture {
         float x = pos.getX() - originX + (float) offset.x;
         float y = pos.getY() - originY + (float) offset.y;
         float z = pos.getZ() - originZ + (float) offset.z;
+        BlockQuadSink sink = classifyOverlays ? overlays : target;
+        if (classifyOverlays) overlays.begin();
         for (EnumFacing side : FACES) if (actual.shouldSideBeRendered(world, pos, side))
-            emitQuads(target, model.getQuads(extended, side, seed), actual, world, pos, x, y, z);
-        emitQuads(target, model.getQuads(extended, null, seed), actual, world, pos, x, y, z);
+            emitQuads(sink, model.getQuads(extended, side, seed), actual, world, pos, x, y, z);
+        emitQuads(sink, model.getQuads(extended, null, seed), actual, world, pos, x, y, z);
+        if (classifyOverlays) overlays.append(target);
     }
     void emitQuads(BlockQuadSink target, List<BakedQuad> quads, IBlockState state, IBlockAccess world,
                            BlockPos pos, float x, float y, float z) {
@@ -114,6 +123,7 @@ final class BakedBlockCapture {
                     || sprite.getMinU() > sprite.getMaxU() || sprite.getMinV() > sprite.getMaxV()) {
                 complete = false; continue;
             }
+            if (target == overlays) overlays.coverage(opacity.sprite(sprite));
             target.quad(positions, uvs, colors, nx, ny, nz,
                     sprite == null ? 0 : sprite.getMinU(), sprite == null ? 0 : sprite.getMinV(),
                     sprite == null ? 1 : sprite.getMaxU(), sprite == null ? 1 : sprite.getMaxV());

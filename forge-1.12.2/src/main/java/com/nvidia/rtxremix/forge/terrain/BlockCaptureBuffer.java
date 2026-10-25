@@ -12,10 +12,12 @@ import org.lwjgl.opengl.GL11;
 /** Fixed-capacity callback buffer; neither model reservations nor emitted vertices can grow it. */
 final class BlockCaptureBuffer extends BufferBuilder implements BlockQuadSink {
     private final float[] metadata = new float[BlockMeshDecoder.MAX_VERTICES / 4 * BlockMeshDecoder.METADATA_STRIDE];
+    private final boolean[] overlays = new boolean[BlockMeshDecoder.MAX_VERTICES / 4];
     private final BlockMeshDecoder decoder = new BlockMeshDecoder();
     private float minU, minV, maxU, maxV, nx, ny, nz;
     private int foliageVertices;
     private boolean foliage;
+    private boolean overlay;
     private int originX, originY, originZ;
     private long hash;
     private boolean building;
@@ -28,7 +30,7 @@ final class BlockCaptureBuffer extends BufferBuilder implements BlockQuadSink {
             throw new IllegalStateException("Better Foliage capture requires the standard 28-byte BLOCK format");
         originX = x; originY = y; originZ = z; foliageVertices = 0;
         hash = 0xcbf29ce484222325L;
-        minU = minV = maxU = maxV = Float.NaN; nx = Float.NaN; foliage = false;
+        minU = minV = maxU = maxV = Float.NaN; nx = Float.NaN; foliage = overlay = false;
         setTranslation(-x, -y, -z); begin(GL11.GL_QUADS, DefaultVertexFormats.BLOCK); building = true;
     }
 
@@ -40,14 +42,17 @@ final class BlockCaptureBuffer extends BufferBuilder implements BlockQuadSink {
 
     void sprite(TextureAtlasSprite sprite) {
         minU = sprite.getMinU(); minV = sprite.getMinV(); maxU = sprite.getMaxU(); maxV = sprite.getMaxV();
-        nx = Float.NaN; foliage = true;
+        nx = Float.NaN; foliage = true; overlay = false;
     }
+
+    @Override public void overlay(boolean value) { overlay = value; }
 
     @Override public void endVertex() {
         int vertex = getVertexCount();
         if (vertex >= BlockMeshDecoder.MAX_VERTICES)
             throw new IllegalStateException("Better Foliage output exceeds the bounded per-block capture buffer");
         if ((vertex & 3) == 0) {
+            overlays[vertex / 4] = overlay;
             int meta = vertex / 4 * BlockMeshDecoder.METADATA_STRIDE;
             metadata[meta] = minU; metadata[meta + 1] = minV; metadata[meta + 2] = maxU; metadata[meta + 3] = maxV;
             metadata[meta + 4] = nx; metadata[meta + 5] = ny; metadata[meta + 6] = nz;
@@ -70,10 +75,10 @@ final class BlockCaptureBuffer extends BufferBuilder implements BlockQuadSink {
         }
     }
 
-    int append(MeshPacking target) {
+    int append(BlockQuadSink target) {
         if (getDrawMode() != GL11.GL_QUADS || !getVertexFormat().equals(DefaultVertexFormats.BLOCK))
             throw new IllegalStateException("Better Foliage changed its captured vertex format");
-        decoder.append(getByteBuffer(), getVertexCount(), metadata, target); return foliageVertices;
+        decoder.append(getByteBuffer(), getVertexCount(), metadata, overlays, target); return foliageVertices;
     }
 
     @Override public void finishDrawing() { super.finishDrawing(); building = false; }

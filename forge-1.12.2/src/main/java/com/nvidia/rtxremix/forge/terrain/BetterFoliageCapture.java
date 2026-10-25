@@ -84,7 +84,7 @@ final class BetterFoliageCapture {
     }
 
     int capture(IBlockState state, IBlockAccess world, BlockPos pos, BlockRenderLayer target,
-                int x, int y, int z, MeshPacking packed) {
+                int x, int y, int z, BlockQuadSink packed) {
         if (!mc.isCallingFromMinecraftThread()) throw new IllegalStateException("Better Foliage capture requires the render thread");
         originX = x; originY = y; originZ = z;
         try {

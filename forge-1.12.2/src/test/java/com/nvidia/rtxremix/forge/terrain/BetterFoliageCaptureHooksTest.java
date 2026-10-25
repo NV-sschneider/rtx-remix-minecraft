@@ -5,6 +5,7 @@
 package com.nvidia.rtxremix.forge.terrain;
 
 import java.util.concurrent.atomic.AtomicReference;
+import net.minecraft.client.renderer.texture.TextureAtlasSprite;
 import org.junit.Test;
 import static org.junit.Assert.*;
 
@@ -55,4 +56,24 @@ public class BetterFoliageCaptureHooksTest {
     }
 
     private static void quad(BlockCaptureBuffer buffer) { buffer.quad(QUAD, UV, COLORS, 0, 0, 1, 0, 0, 1, 1); }
+
+    @Test public void delegatedBaseClassificationSurvivesBufferAndDoesNotLeakIntoGeneratedFoliage() {
+        BlockCaptureBuffer buffer = new BlockCaptureBuffer();
+        buffer.beginBlock(0, 0, 0);
+        buffer.overlay(false); quad(buffer);
+        buffer.overlay(true); quad(buffer);
+        TextureAtlasSprite sprite = new TextureAtlasSprite("fixture:grass") { };
+        sprite.setIconWidth(16); sprite.setIconHeight(16); sprite.initSprite(16, 16, 0, 0, false);
+        buffer.sprite(sprite);
+        for (int v = 0; v < 4; v++) buffer.pos(QUAD[v * 3], QUAD[v * 3 + 1], QUAD[v * 3 + 2])
+                .color(255, 255, 255, 255).tex(UV[v * 2], UV[v * 2 + 1]).lightmap(0, 0).endVertex();
+        buffer.finishDrawing();
+        MeshPacking base = new MeshPacking(), overlay = new MeshPacking();
+        BlockOverlaySink sink = new BlockOverlaySink(overlay); sink.target(base);
+        assertEquals(4, buffer.append(sink));
+        assertEquals(8, base.vertexCount()); assertEquals(4, overlay.vertexCount());
+        assertTrue(buffer.complete()); buffer.releaseBlock();
+        buffer.beginBlock(0, 0, 0); quad(buffer); buffer.finishDrawing(); buffer.append(sink); buffer.releaseBlock();
+        assertEquals(12, base.vertexCount()); assertEquals(4, overlay.vertexCount());
+    }
 }

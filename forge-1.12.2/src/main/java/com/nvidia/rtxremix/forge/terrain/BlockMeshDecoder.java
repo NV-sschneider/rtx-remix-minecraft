@@ -16,11 +16,18 @@ final class BlockMeshDecoder {
     boolean complete() { return complete; }
 
     void append(ByteBuffer source, int vertices, float[] metadata, MeshPacking target) {
+        int checkpoint = target.vertexCount();
+        try { append(source, vertices, metadata, null, target); }
+        catch (RuntimeException failure) { target.truncate(checkpoint); throw failure; }
+    }
+
+    /** The enclosing block transaction rolls back every routed material on failure. */
+    void append(ByteBuffer source, int vertices, float[] metadata, boolean[] overlays, BlockQuadSink target) {
         complete = true;
         if (vertices < 0 || vertices > MAX_VERTICES || (vertices & 3) != 0
-                || (long) vertices * 28 > source.limit() || metadata.length < vertices / 4 * METADATA_STRIDE)
+                || (long) vertices * 28 > source.limit() || metadata.length < vertices / 4 * METADATA_STRIDE
+                || (overlays != null && overlays.length < vertices / 4))
             throw new IllegalArgumentException("Invalid bounded block capture");
-        int checkpoint = target.vertexCount();
         try {
             for (int first = 0; first < vertices; first += 4) {
                 int meta = first / 4 * METADATA_STRIDE;
@@ -43,9 +50,10 @@ final class BlockMeshDecoder {
                     if (length < 0.000001f) { complete = false; continue; }
                     nx /= length; ny /= length; nz /= length;
                 }
+                target.overlay(overlays != null && overlays[first / 4]);
                 target.quad(positions, uv, colors, finite(nx), finite(ny), finite(nz), minU, minV, maxU, maxV);
             }
-        } catch (RuntimeException failure) { target.truncate(checkpoint); throw failure; }
+        } finally { target.overlay(false); }
     }
 
     private static float finite(float value) {

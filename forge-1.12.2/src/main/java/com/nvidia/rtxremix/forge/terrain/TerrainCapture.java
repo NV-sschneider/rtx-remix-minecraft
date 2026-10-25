@@ -5,6 +5,7 @@
 package com.nvidia.rtxremix.forge.terrain;
 
 import com.nvidia.rtxremix.InstanceInfoBlendEXT;
+import com.nvidia.rtxremix.InstanceCategoryBit;
 import com.nvidia.rtxremix.MaterialInfo;
 import com.nvidia.rtxremix.MaterialInfoOpaqueEXT;
 import com.nvidia.rtxremix.MeshInfo;
@@ -59,8 +60,8 @@ import org.lwjgl.opengl.GL21;
  * custom non-baked renderers require their own capture integration.
  *
  * <p>The 2 ms budget is cooperative: a model callback or native call cannot be preempted.
- * Each page is at most 1.1 MiB, each section at most 128 pages, and retirement is capped
- * at four pages per frame. Atomic section publication may add/remove up to 128 instances.
+ * Each page is at most 1.1 MiB, each section at most 144 pages, and retirement is capped
+ * at four pages per frame. Atomic section publication may add/remove up to 144 instances.
  * Mesh bytes include staging and retirement. Capacity pressure evicts farther sections
  * and defers work that cannot improve residency, while block edits retain priority.
  */
@@ -74,7 +75,8 @@ public final class TerrainCapture implements AutoCloseable {
     private static final int LAVA = WATER + 1;
     private static final int CLEAR_GLASS = LAVA + 1;
     private static final int STAINED_GLASS = CLEAR_GLASS + 1;
-    private static final int MATERIAL_COUNT = STAINED_GLASS + 1;
+    private static final int OVERLAY = STAINED_GLASS + 1;
+    private static final int MATERIAL_COUNT = OVERLAY + 1;
 
     private final RemixAPI api;
     private final Minecraft mc;
@@ -94,6 +96,8 @@ public final class TerrainCapture implements AutoCloseable {
         @Override public void remove(TerrainSchedule.Column column) { retireColumn(column); }
     };
     private final MeshPacking[] builders = new MeshPacking[MATERIAL_COUNT];
+    private final MeshPacking overlayBuilder = new MeshPacking();
+    private final BlockOverlaySink blockSink = new BlockOverlaySink(overlayBuilder);
     private final int[] checkpoints = new int[MATERIAL_COUNT];
     private final BlockPos.MutableBlockPos blockPosition = new BlockPos.MutableBlockPos();
     private final long[] materials = new long[MATERIAL_COUNT];
@@ -101,6 +105,7 @@ public final class TerrainCapture implements AutoCloseable {
     private AtlasAnimations animations;
     private AtlasMaterialMaps materialMaps;
     private long vertexColorExtension;
+    private long overlayExtension;
     private boolean texturesDirty = true;
     private boolean allDirty;
     private boolean closed;
@@ -124,6 +129,7 @@ public final class TerrainCapture implements AutoCloseable {
     private long clearGlassVertices;
     private long stainedGlassVertices;
     private long foliageVertices;
+    private long overlayVertices;
     private Build active;
 
     public TerrainCapture(RemixAPI api, Minecraft mc) {
@@ -137,6 +143,7 @@ public final class TerrainCapture implements AutoCloseable {
         this.fluids = new FluidCapture(mc);
         this.baked = new BakedBlockCapture(mc);
         this.foliage = BetterFoliageCapture.create(mc, baked);
+        builders[OVERLAY] = overlayBuilder;
         world.addEventListener(worldUpdates);
     }
 
@@ -154,6 +161,7 @@ public final class TerrainCapture implements AutoCloseable {
             texturesDirty = false;
         }
         animations.flush();
+        baked.beginFrame();
         long deadline = System.nanoTime() + TerrainBudget.FRAME_NANOS;
         schedule.move(MathHelper.floor(view.posX) >> 4,
                 MathHelper.clamp(MathHelper.floor(view.posY) >> 4, 0, SECTION_COUNT - 1),
@@ -272,6 +280,11 @@ public final class TerrainCapture implements AutoCloseable {
     public long getLavaVertexCount() { return lavaVertices; }
     public long getClearGlassVertexCount() { return clearGlassVertices; }
     public long getStainedGlassVertexCount() { return stainedGlassVertices; }
+    public long getOverlayVertexCount() { return overlayVertices; }
+    public long getSectionOverlayVertices(int x, int y, int z) {
+        TerrainSchedule.Section section = section(x, y, z);
+        return section == null || section.asset == null ? 0 : ((SectionAsset) section.asset).overlayVertices;
+    }
     public boolean isBetterFoliageActive() { return foliage != null; }
     public long getBetterFoliageVertexCount() { return foliageVertices; }
     public long getBetterFoliageCaptureCount() { return foliage == null ? 0 : foliage.captureCount(); }
@@ -287,6 +300,7 @@ public final class TerrainCapture implements AutoCloseable {
     public boolean isCapacityLimited() { return capacityLimited || schedule.deferred() != 0 || schedule.failures() != 0; }
     public int getResourceCount() {
         int result = lights.resourceCount() + pageResources + (atlas == 0 ? 0 : 1) + (vertexColorExtension == 0 ? 0 : 1)
+                + (overlayExtension == 0 ? 0 : 1)
                 + (materialMaps == null ? 0 : materialMaps.resourceCount());
         for (long material : materials) if (material != 0) result++;
         return result;
@@ -490,7 +504,7 @@ public final class TerrainCapture implements AutoCloseable {
             budget.reserve(bytes);
             build.uploadedBytes += bytes;
             pageResources++;
-            build.pages.add(new Page(handle, bytes));
+            build.pages.add(new Page(handle, bytes, build.layer == OVERLAY));
             build.vertex += count;
             return true;
         }
@@ -504,7 +518,9 @@ public final class TerrainCapture implements AutoCloseable {
         float[] transform = {1, 0, 0, section.column.x * 16f, 0, 1, 0, section.y * 16f, 0, 0, 1, section.column.z * 16f};
         // Mesh staging is budgeted; instances become visible together before the next submit.
         for (Page page : build.pages) {
-            page.instance = api.sceneInstanceAdd(page.mesh, transform, 0, 1, vertexColorExtension);
+            page.instance = api.sceneInstanceAdd(page.mesh, transform,
+                    page.overlay ? InstanceCategoryBit.DECAL_STATIC : 0, 1,
+                    page.overlay ? overlayExtension : vertexColorExtension);
             pageResources++;
         }
         SectionAsset old = (SectionAsset) section.asset;
@@ -523,13 +539,15 @@ public final class TerrainCapture implements AutoCloseable {
             long lavaCount = builders[LAVA] == null ? 0 : builders[LAVA].vertexCount();
             long clearGlassCount = builders[CLEAR_GLASS] == null ? 0 : builders[CLEAR_GLASS].vertexCount();
             long stainedGlassCount = builders[STAINED_GLASS] == null ? 0 : builders[STAINED_GLASS].vertexCount();
+            long overlayCount = overlayBuilder.vertexCount();
             section.asset = new SectionAsset(build.pages, waterCount, lavaCount, clearGlassCount, stainedGlassCount,
-                    build.foliageVertices, build.geometryHash, build.uploadedBytes);
+                    build.foliageVertices, overlayCount, build.geometryHash, build.uploadedBytes);
             waterVertices += waterCount;
             lavaVertices += lavaCount;
             clearGlassVertices += clearGlassCount;
             stainedGlassVertices += stainedGlassCount;
             foliageVertices += build.foliageVertices;
+            overlayVertices += overlayCount;
             if (old == null) {
                 sectionCount++;
                 if (section.column.capturedSections++ == 0) capturedColumns++;
@@ -565,9 +583,12 @@ public final class TerrainCapture implements AutoCloseable {
             int layerIndex = glass == GlassMaterials.Kind.CLEAR ? CLEAR_GLASS
                     : glass == GlassMaterials.Kind.STAINED ? STAINED_GLASS : layer.ordinal();
             if (layers[layerIndex] == null) layers[layerIndex] = new MeshPacking();
-            if (foliage == null) baked.emit(raw, world, pos, originX, originY, originZ, layers[layerIndex]);
+            baked.classifyOverlays(glass == null
+                    && (layer == BlockRenderLayer.CUTOUT || layer == BlockRenderLayer.CUTOUT_MIPPED));
+            blockSink.target(layers[layerIndex]);
+            if (foliage == null) baked.emit(raw, world, pos, originX, originY, originZ, blockSink);
             else {
-                active.foliageVertices += foliage.capture(raw, world, pos, layer, originX, originY, originZ, layers[layerIndex]);
+                active.foliageVertices += foliage.capture(raw, world, pos, layer, originX, originY, originZ, blockSink);
                 active.completeSolidCoverage &= foliage.complete();
                 active.geometryHash = (active.geometryHash ^ foliage.geometryHash()) * 0x100000001b3L;
             }
@@ -620,8 +641,12 @@ public final class TerrainCapture implements AutoCloseable {
             materials[LAVA] = createPhysicalMaterial(FluidMaterials.lava(HASHES.incrementAndGet(), atlas));
             materials[CLEAR_GLASS] = createPhysicalMaterial(GlassMaterials.clear(HASHES.incrementAndGet(), atlas));
             materials[STAINED_GLASS] = createPhysicalMaterial(GlassMaterials.stained(HASHES.incrementAndGet(), atlas));
+            MaterialInfo overlay = BlockOverlayMaterial.create(HASHES.incrementAndGet(), atlas);
+            materialMaps.apply(overlay);
+            materials[OVERLAY] = api.createMaterial(overlay);
             fluids.refreshSprites();
             vertexColorExtension = InstanceInfoBlendEXT.textureTimesVertexColor().allocNative(0);
+            overlayExtension = InstanceInfoBlendEXT.textureTimesVertexColorAlphaBlend(1).allocNative(0);
             LOGGER.info("Captured block atlas {}x{}; terrain follows Minecraft render distance", width, height);
         } finally {
             GL15.glBindBuffer(GL21.GL_PIXEL_PACK_BUFFER, oldPackBuffer);
@@ -673,6 +698,7 @@ public final class TerrainCapture implements AutoCloseable {
         clearGlassVertices -= asset.clearGlassVertices;
         stainedGlassVertices -= asset.stainedGlassVertices;
         foliageVertices -= asset.foliageVertices;
+        overlayVertices -= asset.overlayVertices;
         retiredSections++;
     }
     private void retirePages(List<Page> pages, long bytes, boolean reconsider) {
@@ -730,6 +756,12 @@ public final class TerrainCapture implements AutoCloseable {
                 RemixBridge.freeExt(vertexColorExtension);
                 vertexColorExtension = 0;
             } catch (RuntimeException | LinkageError error) { failure = error; }
+        }
+        if (overlayExtension != 0) {
+            try {
+                RemixBridge.freeExt(overlayExtension);
+                overlayExtension = 0;
+            } catch (RuntimeException | LinkageError error) { failure = appendFailure(failure, error); }
         }
         for (int i = 0; i < materials.length; i++) {
             if (materials[i] == 0) continue;
@@ -827,10 +859,11 @@ public final class TerrainCapture implements AutoCloseable {
     private static final class Page {
         long mesh;
         final long bytes;
+        final boolean overlay;
         long instance;
         Page nextRetired;
         boolean reconsiderOnRelease;
-        Page(long mesh, long bytes) { this.mesh = mesh; this.bytes = bytes; }
+        Page(long mesh, long bytes, boolean overlay) { this.mesh = mesh; this.bytes = bytes; this.overlay = overlay; }
     }
     /** Intrusive retirement links keep pressure eviction allocation-free. */
     private static final class PageQueue {
@@ -861,16 +894,19 @@ public final class TerrainCapture implements AutoCloseable {
         final long clearGlassVertices;
         final long stainedGlassVertices;
         final long foliageVertices;
+        final long overlayVertices;
         final long geometryHash;
         final long bytes;
         SectionAsset(List<Page> pages, long waterVertices, long lavaVertices,
-                     long clearGlassVertices, long stainedGlassVertices, long foliageVertices, long geometryHash, long bytes) {
+                     long clearGlassVertices, long stainedGlassVertices, long foliageVertices, long overlayVertices,
+                     long geometryHash, long bytes) {
             this.pages = pages;
             this.waterVertices = waterVertices;
             this.lavaVertices = lavaVertices;
             this.clearGlassVertices = clearGlassVertices;
             this.stainedGlassVertices = stainedGlassVertices;
             this.foliageVertices = foliageVertices;
+            this.overlayVertices = overlayVertices;
             this.geometryHash = geometryHash;
             this.bytes = bytes;
         }
