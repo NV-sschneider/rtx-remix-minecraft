@@ -41,6 +41,7 @@ public class ItemGeometryTest {
         assertEquals(4, surface.vertexCount);
         assertEquals(6, surface.indexCount);
         assertEquals(11, surface.material);
+        assertEquals(MeshInfoSurfaceTriangles.TEXCOORD_BOUNDS, surface.flags);
         assertTrue(surface.vertexBuffer.isDirect());
         assertTrue(surface.indexBuffer.isDirect());
         for (int v = 0; v < 4; v++) {
@@ -111,5 +112,24 @@ public class ItemGeometryTest {
         assertEquals(4, blend.alphaTestCompareOp);
         assertEquals(26, blend.alphaTestReferenceValue & 255);
         assertEquals(InstanceInfoBlendEXT.textureTimesVertexColor().textureColorArg2Source, blend.textureColorArg2Source);
+    }
+
+    @Test public void emittedUvAndVertexAlphaMustBothSupportTheSpriteProof() {
+        ItemGeometry geometry = new ItemGeometry(); ByteBuffer input = quad();
+        assertTrue(append(geometry, input));
+        assertTrue(geometry.lastQuadBounded()); assertFalse(geometry.lastQuadOpaque());
+        for (int v = 0; v < 4; v++) input.put((4 + v) * STRIDE + 15, (byte) 255);
+        assertTrue(append(geometry, input));
+        assertTrue(geometry.lastQuadBounded()); assertTrue(geometry.lastQuadOpaque());
+        // A custom item may sample outside the nominal sprite. Keep its geometry and ordinary
+        // atlas UVs, but do not clamp the surface or infer alpha from the wrong sprite.
+        input.putFloat(4 * STRIDE + 16, 0.49f);
+        assertTrue(append(geometry, input)); assertFalse(geometry.lastQuadBounded());
+        MeshInfoSurfaceTriangles surface = geometry.info(8, 4, 11, 13, false).surfaces[0];
+        assertEquals(0, surface.flags); assertEquals(0.49f, surface.vertexBuffer.getFloat(24), 0);
+        assertEquals(0xff2468ac, surface.vertexBuffer.getInt(32));
+        // Even a binary 0/255 vertex gradient interpolates fractional opacity across the quad.
+        input.putFloat(4 * STRIDE + 16, 0.5f); input.put(4 * STRIDE + 15, (byte) 0);
+        assertTrue(append(geometry, input)); assertFalse(geometry.lastQuadOpaque());
     }
 }

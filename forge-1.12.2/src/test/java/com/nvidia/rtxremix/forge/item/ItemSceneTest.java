@@ -10,6 +10,7 @@ import com.nvidia.rtxremix.InstanceInfoBlendEXT;
 import com.nvidia.rtxremix.MaterialInfo;
 import com.nvidia.rtxremix.MeshInfo;
 import com.nvidia.rtxremix.forge.entity.FirstPersonCapture;
+import com.nvidia.rtxremix.forge.texture.SpriteOpacity;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -67,6 +68,24 @@ public class ItemSceneTest {
         scene.close(); api.assertEmpty();
     }
 
+    @Test public void retainedDroppedItemChangesLightingWhenItsCurrentSourceProofChanges() throws Exception {
+        Fake api = new Fake(); ItemScene scene = new ItemScene(api); List<CapturedItem> items = items(1);
+        CapturedItem item = items.get(0); item.categoryFlags = 0; item.alphaBlend = true;
+        item.alphaCompare = InstanceInfoBlendEXT.VK_COMPARE_OP_GREATER; item.alphaReference = 26;
+        item.coverage = SpriteOpacity.OPAQUE; item.spriteBounds = true;
+        scene.sync(items, 73); long instance = api.instances.keySet().iterator().next(), mesh = api.instances.get(instance);
+        assertTrue(scene.ordinaryLighting(item.owner.getUniqueID())); assertEquals(0, api.currentAlpha(instance));
+        // CPU sprite revisions are re-proven by capture, even when every geometry byte is retained.
+        item.coverage = SpriteOpacity.UNKNOWN; scene.sync(items, 73);
+        assertEquals(mesh, (long) api.instances.get(instance)); assertEquals(1, api.currentAlpha(instance));
+        assertFalse(scene.ordinaryLighting(item.owner.getUniqueID()));
+        item.coverage = SpriteOpacity.CUTOUT; scene.sync(items, 73);
+        assertEquals(0, api.currentAlpha(instance)); assertTrue(scene.ordinaryLighting(item.owner.getUniqueID()));
+        item.alphaCompare = InstanceInfoBlendEXT.VK_COMPARE_OP_ALWAYS; scene.sync(items, 73);
+        assertEquals(1, api.currentAlpha(instance)); assertFalse(scene.ordinaryLighting(item.owner.getUniqueID()));
+        scene.close(); api.assertEmpty();
+    }
+
     private static void prepareCamera() {
         FirstPersonCapture.prepareCamera(CameraInfoParameterizedEXT.builder()
                 .forward(0, 0, -1).right(1, 0, 0).up(0, 1, 0).build());
@@ -103,6 +122,8 @@ public class ItemSceneTest {
         final Map<Long, Long> meshes = new HashMap<>(), instances = new HashMap<>();
         final Map<Long, Float> positions = new HashMap<>();
         final Set<Long> blends = new HashSet<>(), materials = new HashSet<>();
+        final Map<Long, Integer> alphaStates = new HashMap<>();
+        final Map<Long, Long> instanceBlends = new HashMap<>();
         long next = 1, failBlend;
         public long createMesh(MeshInfo info) {
             long handle = next++; meshes.put(handle, info.surfaces[0].material);
@@ -114,13 +135,15 @@ public class ItemSceneTest {
         public long add(long mesh, float[] transform, int category, long blend) { long handle = next++; update(handle, mesh, transform, category, blend); return handle; }
         public void update(long instance, long mesh, float[] transform, int category, long blend) {
             assertTrue(meshes.containsKey(mesh)); assertTrue(blends.contains(blend)); instances.put(instance, mesh);
+            instanceBlends.put(instance, blend);
         }
-        public void remove(long instance) { assertNotNull(instances.remove(instance)); }
-        public long blend(InstanceInfoBlendEXT info) { long handle = next++; blends.add(handle); return handle; }
+        public void remove(long instance) { assertNotNull(instances.remove(instance)); instanceBlends.remove(instance); }
+        public long blend(InstanceInfoBlendEXT info) { long handle = next++; blends.add(handle); alphaStates.put(handle, info.alphaBlendEnabled); return handle; }
         public void freeBlend(long handle) {
             if (handle == failBlend) { failBlend = 0; throw new IllegalStateException("blend release"); }
-            assertTrue(blends.remove(handle));
+            assertTrue(blends.remove(handle)); alphaStates.remove(handle);
         }
-        void assertEmpty() { assertTrue(meshes.isEmpty()); assertTrue(instances.isEmpty()); assertTrue(blends.isEmpty()); assertTrue(materials.isEmpty()); }
+        int currentAlpha(long instance) { return alphaStates.get(instanceBlends.get(instance)); }
+        void assertEmpty() { assertTrue(meshes.isEmpty()); assertTrue(instances.isEmpty()); assertTrue(blends.isEmpty()); assertTrue(materials.isEmpty()); assertTrue(alphaStates.isEmpty()); assertTrue(instanceBlends.isEmpty()); }
     }
 }

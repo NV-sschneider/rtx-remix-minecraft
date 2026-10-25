@@ -18,6 +18,8 @@ public final class CapturedItem {
     int vertexCount;
     long fingerprint;
     boolean alphaBlend;
+    boolean spriteBounds;
+    int coverage;
     int alphaCompare;
     int alphaReference;
     final float[] transform = new float[12];

@@ -15,6 +15,7 @@ import com.nvidia.rtxremix.forge.entity.CaptureOwnerKey;
 import com.nvidia.rtxremix.forge.entity.FirstPersonCapture;
 import com.nvidia.rtxremix.forge.entity.ViewModelGeometry;
 import com.nvidia.rtxremix.forge.entity.ViewModelUploadBudget;
+import com.nvidia.rtxremix.forge.texture.SpriteOpacity;
 import com.nvidia.rtxremix.forge.RemixForgeMod;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
@@ -154,6 +155,17 @@ public final class ItemScene implements AutoCloseable {
         return resources;
     }
     public boolean contains(UUID id) { checkThread(); for (Owner owner : owners.values()) if (id.equals(owner.id)) return true; return false; }
+    /** True only while every submitted part of this item uses ordinary opaque/cutout lighting. */
+    public boolean ordinaryLighting(UUID id) {
+        checkThread();
+        boolean found = false;
+        for (Owner owner : owners.values()) if (id.equals(owner.id)) for (Part part : owner.parts) {
+            if (part == null || part.instance == 0 || part.lastSeen != frame) continue;
+            if (part.alphaBlend) return false;
+            found = true;
+        }
+        return found;
+    }
     public long transformUpdates(UUID id) { checkThread(); for (Owner owner : owners.values()) if (id.equals(owner.id)) return owner.updates; return 0; }
 
     private static boolean valid(CapturedItem item) {
@@ -170,7 +182,7 @@ public final class ItemScene implements AutoCloseable {
         if (meshes.size() >= MAX_MESHES || bytes > MAX_MESH_BYTES - meshBytes) return null;
         boolean viewModel = ViewModelGeometry.applies(item.categoryFlags);
         if (viewModel && !viewBudget.admit(bytes)) return null;
-        MeshInfo source = item.geometry.info(item.firstVertex, item.vertexCount, material, HASHES.incrementAndGet());
+        MeshInfo source = item.geometry.info(item.firstVertex, item.vertexCount, material, HASHES.incrementAndGet(), item.spriteBounds);
         MeshInfo info = source;
         if (viewModel) info = viewGeometry.prepare(info, probe.pose);
         long handle = api.createMesh(info);
@@ -210,7 +222,8 @@ public final class ItemScene implements AutoCloseable {
         boolean viewModel = ViewModelGeometry.applies(item.categoryFlags);
         float[] transform = viewModel ? FirstPersonCapture.anchorTransform() : item.transform;
         boolean moved = !Arrays.equals(part.transform, transform) || viewModel && part.mesh != mesh;
-        boolean changedBlend = first || part.alphaBlend != item.alphaBlend
+        boolean alphaBlend = alphaBlend(item);
+        boolean changedBlend = first || part.alphaBlend != alphaBlend
                 || part.alphaCompare != item.alphaCompare || part.alphaReference != item.alphaReference;
         if (part.retiredBlend != 0) { api.freeBlend(part.retiredBlend); part.retiredBlend = 0; }
         if (!first && !moved && !changedBlend && part.mesh == mesh) return;
@@ -229,7 +242,7 @@ public final class ItemScene implements AutoCloseable {
         if (changedBlend) {
             part.retiredBlend = part.blend;
             part.blend = blend;
-            part.alphaBlend = item.alphaBlend;
+            part.alphaBlend = alphaBlend;
             part.alphaCompare = item.alphaCompare; part.alphaReference = item.alphaReference;
         }
         if (part.mesh != mesh) {
@@ -242,7 +255,7 @@ public final class ItemScene implements AutoCloseable {
         if (part.retiredBlend != 0) { api.freeBlend(part.retiredBlend); part.retiredBlend = 0; }
     }
     static InstanceInfoBlendEXT blend(CapturedItem item) {
-        InstanceInfoBlendEXT ext = item.alphaBlend
+        InstanceInfoBlendEXT ext = alphaBlend(item)
                 ? InstanceInfoBlendEXT.textureTimesVertexColorAlphaBlend(item.alphaReference)
                 : InstanceInfoBlendEXT.textureTimesVertexColor();
         ext.alphaTestEnabled = item.alphaCompare == InstanceInfoBlendEXT.VK_COMPARE_OP_ALWAYS ? 0 : 1;
@@ -250,6 +263,9 @@ public final class ItemScene implements AutoCloseable {
         ext.alphaTestReferenceValue = (byte) item.alphaReference;
         // The enabled vertex-color array supersedes GL_CURRENT_COLOR and already contains the item tint.
         return ext;
+    }
+    private static boolean alphaBlend(CapturedItem item) {
+        return item.alphaBlend && !SpriteOpacity.unblended(item.coverage, item.alphaCompare, item.alphaReference);
     }
     private void retireParts(boolean unrequested) {
         Iterator<Owner> iterator = owners.values().iterator();
@@ -344,23 +360,24 @@ public final class ItemScene implements AutoCloseable {
         Object model, stack;
         long fingerprint;
         int vertices;
-        boolean viewModel;
+        boolean viewModel, spriteBounds;
         final float[] pose = new float[12];
         void set(CapturedItem item) {
             model = item.model; stack = item.stack; fingerprint = item.fingerprint; vertices = item.vertexCount;
             viewModel = ViewModelGeometry.applies(item.categoryFlags);
+            spriteBounds = item.spriteBounds;
             if (viewModel) FirstPersonCapture.geometryPose(item.transform, pose);
             else Arrays.fill(pose, 0);
         }
         @Override public int hashCode() {
             int result = 31 * (31 * System.identityHashCode(model) + System.identityHashCode(stack)) + (int) (fingerprint ^ fingerprint >>> 32) + vertices;
-            return 31 * (31 * result + (viewModel ? 1 : 0)) + Arrays.hashCode(pose);
+            return 31 * (31 * (31 * result + (viewModel ? 1 : 0)) + (spriteBounds ? 1 : 0)) + Arrays.hashCode(pose);
         }
         @Override public boolean equals(Object value) {
             if (!(value instanceof MeshKey)) return false;
             MeshKey other = (MeshKey) value;
             return model == other.model && stack == other.stack && fingerprint == other.fingerprint && vertices == other.vertices
-                    && viewModel == other.viewModel && Arrays.equals(pose, other.pose);
+                    && viewModel == other.viewModel && spriteBounds == other.spriteBounds && Arrays.equals(pose, other.pose);
         }
     }
 }

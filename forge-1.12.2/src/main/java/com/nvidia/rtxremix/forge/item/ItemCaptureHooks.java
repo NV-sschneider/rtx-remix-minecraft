@@ -8,6 +8,7 @@ import com.nvidia.rtxremix.InstanceCategoryBit;
 import com.nvidia.rtxremix.forge.entity.EntityCaptureHooks;
 import com.nvidia.rtxremix.forge.entity.EntityGlintHooks;
 import com.nvidia.rtxremix.forge.entity.FirstPersonCapture;
+import com.nvidia.rtxremix.forge.texture.SpriteOpacity;
 import java.lang.reflect.Field;
 import java.nio.FloatBuffer;
 import java.util.ArrayList;
@@ -45,6 +46,7 @@ public final class ItemCaptureHooks {
     private static final List<CapturedItem> POOL = new ArrayList<>();
     private static final List<CapturedItem> FRAME = Collections.unmodifiableList(PARTS);
     private static final ItemGeometry GEOMETRY = new ItemGeometry();
+    private static final SpriteOpacity OPACITY = new SpriteOpacity();
     private static final FloatBuffer BUFFER = BufferUtils.createFloatBuffer(16);
     private static final Matrix4f VIEW = new Matrix4f(), INVERSE = new Matrix4f(), MODEL = new Matrix4f(), WORLD = new Matrix4f();
     private static final float[] LIGHT_TRANSFORM = new float[12];
@@ -59,7 +61,7 @@ public final class ItemCaptureHooks {
     private static boolean rejected;
 
     private ItemCaptureHooks() { }
-    public static void beginFrame(boolean capture) { discard(); armed = capture; }
+    public static void beginFrame(boolean capture) { discard(); OPACITY.beginFrame(); armed = capture; }
     public static List<CapturedItem> finishFrame() {
         armed = false;
         clearScope();
@@ -75,7 +77,7 @@ public final class ItemCaptureHooks {
         GEOMETRY.truncate(0);
         HeldItemLights.reset();
     }
-    private static void clearScope() { owner = null; active = null; sprite = null; entityDepth = modelDepth = 0; }
+    private static void clearScope() { owner = null; active = null; sprite = null; entityDepth = modelDepth = 0; OPACITY.clear(); }
 
     public static void beginFirstPerson() { if (armed) occurrence = 0; }
     /** A RenderItem scope can belong to an unsupported holder, such as a snowball.
@@ -144,6 +146,9 @@ public final class ItemCaptureHooks {
             active.occurrence = occurrence++;
             active.firstVertex = GEOMETRY.count();
             active.alphaBlend = blend;
+            active.spriteBounds = true;
+            active.coverage = owner == null ? SpriteOpacity.UNKNOWN : SpriteOpacity.OPAQUE;
+            OPACITY.clear();
             active.alphaCompare = GL11.glIsEnabled(GL11.GL_ALPHA_TEST) ? GL11.glGetInteger(GL11.GL_ALPHA_TEST_FUNC) - GL11.GL_NEVER : 7;
             active.alphaReference = channel(GL11.glGetFloat(GL11.GL_ALPHA_TEST_REF));
             readView(MODEL);
@@ -199,6 +204,12 @@ public final class ItemCaptureHooks {
                     || !GEOMETRY.append(buffer.getByteBuffer(), quadStart, format.getSize(), format.getUvOffsetById(0),
                     format.getColorOffset(), format.getNormalOffset(), sprite.getMinU(), sprite.getMinV(), sprite.getMaxU(), sprite.getMaxV())) {
                 rejected = true;
+            } else {
+                active.spriteBounds &= GEOMETRY.lastQuadBounded();
+                if (active.coverage != SpriteOpacity.UNKNOWN) {
+                    active.coverage = !GEOMETRY.lastQuadOpaque() || !GEOMETRY.lastQuadBounded() ? SpriteOpacity.UNKNOWN
+                            : Math.min(active.coverage, OPACITY.sprite(sprite));
+                }
             }
             sprite = null;
         } catch (RuntimeException | LinkageError ex) { fail(ex); }

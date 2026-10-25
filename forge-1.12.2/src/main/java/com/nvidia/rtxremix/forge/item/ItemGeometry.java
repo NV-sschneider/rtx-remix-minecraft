@@ -18,6 +18,7 @@ final class ItemGeometry {
     private final MeshInfoSurfaceTriangles surface = new MeshInfoSurfaceTriangles();
     private final MeshInfo info = new MeshInfo();
     private int count;
+    private boolean lastOpaque, lastBounded;
 
     ItemGeometry() { info.surfaces = new MeshInfoSurfaceTriangles[] {surface}; }
     int count() { return count; }
@@ -35,10 +36,14 @@ final class ItemGeometry {
                 || ((long) first + 4) * stride > source.limit()
                 || !Float.isFinite(minU) || !Float.isFinite(minV) || !Float.isFinite(maxU) || !Float.isFinite(maxV)
                 || minU > maxU || minV > maxV) return false;
+        boolean opaque = true, bounded = minU < maxU && minV < maxV;
         for (int v = 0; v < 4; v++) {
             int base = (first + v) * stride;
             for (int axis = 0; axis < 3; axis++) if (!Float.isFinite(source.getFloat(base + axis * 4))) return false;
-            if (!Float.isFinite(source.getFloat(base + uvOffset)) || !Float.isFinite(source.getFloat(base + uvOffset + 4))) return false;
+            float u = source.getFloat(base + uvOffset), t = source.getFloat(base + uvOffset + 4);
+            if (!Float.isFinite(u) || !Float.isFinite(t)) return false;
+            bounded &= u >= minU && u <= maxU && t >= minV && t <= maxV;
+            opaque &= (source.get(base + colorOffset + 3) & 255) == 255;
         }
         ensure((count + 4) * HardcodedVertex.STRIDE);
         int minimum = HardcodedVertex.packHalf2x16(minU, minV);
@@ -68,8 +73,12 @@ final class ItemGeometry {
             for (int pad = 0; pad < 5; pad++) vertices.putInt(0);
         }
         count += 4;
+        lastOpaque = opaque; lastBounded = bounded;
         return true;
     }
+
+    boolean lastQuadOpaque() { return lastOpaque; }
+    boolean lastQuadBounded() { return lastBounded; }
 
     long fingerprint(int first, int verticesCount) {
         long hash = 0xcbf29ce484222325L;
@@ -80,6 +89,10 @@ final class ItemGeometry {
     }
 
     MeshInfo info(int first, int verticesCount, long material, long hash) {
+        return info(first, verticesCount, material, hash, true);
+    }
+
+    MeshInfo info(int first, int verticesCount, long material, long hash, boolean spriteBounds) {
         ByteBuffer page = vertices.duplicate().order(ByteOrder.nativeOrder());
         page.position(first * HardcodedVertex.STRIDE).limit((first + verticesCount) * HardcodedVertex.STRIDE);
         surface.vertexBuffer = page.slice().order(ByteOrder.nativeOrder());
@@ -95,6 +108,7 @@ final class ItemGeometry {
         surface.vertexCount = verticesCount;
         surface.indexCount = verticesCount / 4 * 6;
         surface.material = material;
+        surface.flags = spriteBounds ? MeshInfoSurfaceTriangles.TEXCOORD_BOUNDS : 0;
         info.hash = hash;
         return info;
     }
