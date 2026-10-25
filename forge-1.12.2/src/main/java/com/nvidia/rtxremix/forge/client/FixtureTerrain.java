@@ -20,8 +20,6 @@ import net.minecraft.world.WorldServer;
 /** Readiness-driven travel, mutation, and radius probes in the fixture's own save. */
 final class FixtureTerrain {
     static final int RADIUS = requestedRadius();
-    private static final long MAX_MESH_BYTES = 512L * 1024 * 1024;
-    private static final long MEMORY_PRESSURE_BYTES = 500L * 1024 * 1024;
     private static final long PHASE_TIMEOUT = TimeUnit.SECONDS.toNanos(300);
     private static final long PROGRESS_INTERVAL = TimeUnit.SECONDS.toNanos(10);
     private static final int IMAGE_SETTLE_FRAMES = 20;
@@ -55,6 +53,8 @@ final class FixtureTerrain {
     private int targetRadius = RADIUS;
     private long capacityFrame = -1;
     private long capacityBytes;
+    private long capacityPublications, capacityEvictions;
+    private int capacityDeferred, capacityColumns;
     private long lastProgress = System.nanoTime();
 
     FixtureTerrain(Minecraft mc, ClientEvents events, IntegratedServer server, WorldServer world,
@@ -184,11 +184,13 @@ final class FixtureTerrain {
                 + " discoveredColumns=" + events.terrainColumnCount()
                 + " capturedColumns=" + events.terrainCapturedColumnCount()
                 + " sections=" + events.terrainSectionCount() + " pending=" + events.terrainPendingSectionCount()
+                + " deferred=" + events.terrainDeferredSectionCount() + " evicted=" + events.terrainEvictedSectionCount()
                 + " retiring=" + events.terrainRetirementCount()
                 + " published=" + events.terrainPublishedSectionCount()
                 + " retired=" + events.terrainRetiredSectionCount()
                 + " discarded=" + events.terrainDiscardedBuildCount()
-                + " resources=" + events.terrainResourceCount() + " bytes=" + events.terrainCapturedBytes();
+                + " resources=" + events.terrainResourceCount() + " bytes=" + events.terrainCapturedBytes()
+                + " budget=" + events.terrainMeshBudgetBytes();
     }
 
     static void setRadius(Minecraft mc, int radius) {
@@ -218,21 +220,28 @@ final class FixtureTerrain {
 
     private boolean recoverCapacity() {
         long bytes = events.terrainCapturedBytes();
-        if (bytes > MAX_MESH_BYTES) throw new IllegalStateException("Terrain mesh memory exceeded its budget");
-        if (targetRadius <= 4 || !events.terrainCapacityLimited() || events.terrainPendingSectionCount() == 0
-                || bytes <= MEMORY_PRESSURE_BYTES) {
+        long budget = events.terrainMeshBudgetBytes();
+        if (bytes > budget) throw new IllegalStateException("Terrain mesh memory exceeded its budget");
+        int deferred = events.terrainDeferredSectionCount();
+        if (targetRadius <= 4 || budget <= 0 || deferred == 0 || events.terrainPendingSectionCount() != 0
+                || events.terrainRetirementCount() != 0 || events.terrainRadius() != targetRadius) {
             capacityFrame = -1;
             return false;
         }
         long frame = events.renderedFrames();
-        if (capacityFrame < 0 || bytes != capacityBytes) {
+        long publications = events.terrainPublishedSectionCount(), evictions = events.terrainEvictedSectionCount();
+        int columns = events.terrainColumnCount();
+        if (capacityFrame < 0 || bytes != capacityBytes || publications != capacityPublications
+                || evictions != capacityEvictions || deferred != capacityDeferred || columns != capacityColumns) {
             capacityFrame = frame;
             capacityBytes = bytes;
+            capacityPublications = publications; capacityEvictions = evictions;
+            capacityDeferred = deferred; capacityColumns = columns;
             return false;
         }
         if (frame - capacityFrame < IMAGE_SETTLE_FRAMES) return false;
         output.log("TERRAIN_CAPACITY_PASS", status() + " stableFrames=" + (frame - capacityFrame)
-                + " coverageComplete=false memoryBudget=" + MAX_MESH_BYTES + " recoveryRadius=4");
+                + " coverageComplete=false memoryBudget=" + budget + " recoveryRadius=4");
         targetRadius = 4;
         setRadius(mc, targetRadius);
         transition(Phase.ORIGIN);

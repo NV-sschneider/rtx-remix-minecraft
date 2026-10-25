@@ -8,8 +8,13 @@ import com.nvidia.rtxremix.forge.entity.EntityCaptureHooks;
 import com.nvidia.rtxremix.forge.tree.FallingTreeObservation;
 import java.awt.image.BufferedImage;
 import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Future;
@@ -47,6 +52,8 @@ final class FixtureFallingTrees implements AutoCloseable {
     private Class<?> treeClass;
     private Method clientBuilt, shouldRender, destroyData, branchCount;
     private final Set<UUID> priorTrees = new HashSet<>();
+    private final List<BlockPos> standingBranches = new ArrayList<>();
+    private final Map<BlockPos, long[]> standingSections = new LinkedHashMap<>();
     private Phase phase = Phase.SETUP;
     private Future<?> action;
     private FallingTreeObservation observation;
@@ -67,6 +74,9 @@ final class FixtureFallingTrees implements AutoCloseable {
         returnX = x; returnY = y; returnZ = z; returnYaw = yaw; returnPitch = pitch;
         originalView = mc.gameSettings.thirdPersonView; originalHud = mc.gameSettings.hideGUI;
         originalFlying = mc.player.capabilities.isFlying;
+        standingBranches.addAll(layout.branches);
+        for (BlockPos pos : standingBranches)
+            standingSections.put(new BlockPos(pos.getX() >> 4, pos.getY() >> 4, pos.getZ() >> 4), new long[1]);
     }
 
     private void setup() throws ReflectiveOperationException {
@@ -98,10 +108,18 @@ final class FixtureFallingTrees implements AutoCloseable {
         }
         int result = world.getMinecraftServer().getCommandManager().executeCommand(world.getMinecraftServer(),
                 "dt settree " + x + " " + y + " " + z + " dynamictrees:oak JP");
-        Layout layout = new Layout(x, y, z);
-        if (result != 1 || !isBranch(world.getBlockState(layout.cut)))
+        if (result != 1 || !isBranch(world.getBlockState(new BlockPos(x, y + 1, z))))
             throw new IllegalStateException("Installed Dynamic Trees did not generate the fixture's oak trunk");
-        return layout;
+        // Capture the complete server tree before teleporting the client. Client chunks can arrive
+        // independently, so a first nonempty client scan is not a complete removal checklist.
+        List<BlockPos> branches = new ArrayList<>();
+        for (int yy = y + 1; yy <= y + 18; yy++)
+            for (int zz = z - 12; zz <= z + 12; zz++)
+                for (int xx = x - 12; xx <= x + 12; xx++) {
+                    BlockPos pos = new BlockPos(xx, yy, zz);
+                    if (isBranch(world.getBlockState(pos))) branches.add(pos);
+                }
+        return new Layout(x, y, z, branches);
     }
 
     boolean tick() throws Exception {
@@ -124,8 +142,8 @@ final class FixtureFallingTrees implements AutoCloseable {
                 break;
             case STANDING:
                 if (settled(isBranch(clientWorld.getBlockState(layout.cut))
-                        && events.terrainColumnCaptured(layout.x >> 4, layout.z >> 4)
-                        && events.terrainPendingSectionCount() == 0 && events.terrainRetirementCount() == 0, 30)) {
+                        && standingTerrainReady() && events.terrainRetirementCount() == 0, 30)) {
+                    snapshotStandingTerrain();
                     capture("falling-tree-standing"); log("STANDING_PASS");
                     action = server.callFromMainThread(() -> {
                         requireWorld();
@@ -168,7 +186,9 @@ final class FixtureFallingTrees implements AutoCloseable {
                 }
                 break;
             case RETIRED:
-                if (settled(!events.entityCaptured(spawned.id) && clientTree() == null, 20)) {
+                if (settled(!events.entityCaptured(spawned.id) && clientTree() == null
+                        && removedTerrainReady() && events.terrainRetirementCount() == 0, 20)) {
+                    capture("falling-tree-terrain-removed"); log("TERRAIN_REMOVAL_PASS");
                     log("RETIREMENT_PASS"); restoreClient(); action = restoreServer(); cleanupQueued = true; transition(Phase.RETURN);
                 }
                 break;
@@ -191,6 +211,32 @@ final class FixtureFallingTrees implements AutoCloseable {
             }
             return null;
         });
+    }
+
+    private boolean standingTerrainReady() {
+        if (standingBranches.isEmpty()) return false;
+        for (BlockPos pos : standingBranches) if (!isBranch(clientWorld.getBlockState(pos))) return false;
+        for (BlockPos section : standingSections.keySet())
+            if (!events.terrainSectionReady(section.getX(), section.getY(), section.getZ())) return false;
+        return true;
+    }
+
+    private void snapshotStandingTerrain() {
+        for (Map.Entry<BlockPos, long[]> entry : standingSections.entrySet()) {
+            BlockPos section = entry.getKey();
+            entry.getValue()[0] = events.terrainSectionRevision(section.getX(), section.getY(), section.getZ());
+        }
+    }
+
+    private boolean removedTerrainReady() {
+        for (BlockPos pos : standingBranches) if (isBranch(clientWorld.getBlockState(pos))) return false;
+        for (Map.Entry<BlockPos, long[]> entry : standingSections.entrySet()) {
+            BlockPos section = entry.getKey();
+            if (!events.terrainSectionReady(section.getX(), section.getY(), section.getZ())
+                    || events.terrainSectionRevision(section.getX(), section.getY(), section.getZ()) <= entry.getValue()[0])
+                return false;
+        }
+        return true;
     }
 
     private void observe() throws Exception {
@@ -248,7 +294,7 @@ final class FixtureFallingTrees implements AutoCloseable {
     }
     private EntityPlayerMP player() {
         EntityPlayerMP player = server.getPlayerList().getPlayerByUUID(playerId);
-        if (player == null) throw new IllegalStateException("Falling-tree fixture player unavailable"); return player;
+        if (player == null || player.world != world) throw new IllegalStateException("Falling-tree fixture player unavailable"); return player;
     }
     private void requireWorld() {
         FixtureCompatibility.requireSmokeSave(save);
@@ -289,6 +335,7 @@ final class FixtureFallingTrees implements AutoCloseable {
                 + " capturedFrames=" + (observation == null ? 0 : observation.capturedFrames())
                 + " renderableFrames=" + (observation == null ? 0 : observation.renderableFrames())
                 + " transformUpdates=" + (observation == null ? 0 : observation.transformUpdates())
+                + " standingBranches=" + standingBranches.size() + " terrainSections=" + standingSections.size()
                 + " rejected=" + EntityCaptureHooks.rejectedTriangleDraws() + " unsupported=" + EntityCaptureHooks.unsupportedTriangleDraws()
                 + " dirtyTextures=" + events.dirtyEntityTextures() + " pendingTerrain=" + events.terrainPendingSectionCount();
     }
@@ -301,7 +348,11 @@ final class FixtureFallingTrees implements AutoCloseable {
     static final class Layout {
         final int x, y, z;
         final BlockPos cut;
-        Layout(int x, int y, int z) { this.x = x; this.y = y; this.z = z; cut = new BlockPos(x, y + 1, z); }
+        final List<BlockPos> branches;
+        Layout(int x, int y, int z, List<BlockPos> branches) {
+            this.x = x; this.y = y; this.z = z; cut = new BlockPos(x, y + 1, z);
+            this.branches = Collections.unmodifiableList(new ArrayList<>(branches));
+        }
     }
     private static final class Spawn {
         final UUID id;

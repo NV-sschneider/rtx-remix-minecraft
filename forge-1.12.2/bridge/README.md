@@ -50,6 +50,10 @@ checks the same interior pixels changed color, framebuffer copies, preserved GL
 state, and native shutdown. The before/after images are saved as
 `forge-1.12.2/bridge/build/gpu-smoke/gpu-smoke.png` and
 `forge-1.12.2/bridge/build/gpu-smoke/gpu-smoke-texture-patched.png`.
+The same stage reads the acquired primary-depth texture, verifies the submitted
+non-reversed `[0,1]` projection at a known triangle distance, clear miss value `1`,
+and native image orientation. It also checks optional-depth disappearance and
+reimport, and rejects access after the shared frame is released.
 The normal-map stage compares two identically lit surfaces, first with matching
 runtime-converted normals and then with one pre-encoded `NORMAL_OTH` texture.
 It patches that retained texture and checks the lighting changes relative to the
@@ -65,6 +69,9 @@ Run one mode per process with the compiled test classpath and the same three DLL
 arguments used by `build-bridge.ps1`. To exercise Forge defaults, copy
 `forge-1.12.2/config/rtx.conf` into the test working directory before running;
 the build script's ordinary GPU smoke uses the root Fabric configuration.
+The view-model probe also logs a primary-depth sample for visible geometry before
+the world's near plane, alongside its projected geometry depth. This measures
+the pinned runtime's near-depth behavior without assuming an unclamped value.
 
 The retained-alpha probe keeps one foreground material, mesh, and instance while
 switching opaque/cutout/blended draw state, then patches the retained texture to
@@ -110,7 +117,14 @@ original `com.nvidia.rtxremix` JNI ABI remains unchanged.
 Start Remix with `interopImage=true` and its Vulkan swapchain enabled, then create
 `LegacyGlInterop` from `dxvkGetInteropInfo()`. After each world `submit`, call
 `acquireToFramebuffer` with the latest interop information and Minecraft's FBO.
-It waits and copies native color while retaining shared-image ownership. After
+It waits and copies native color while retaining shared-image ownership. Color
+and optional primary depth participate in the same semaphore wait and release.
+While acquired, `getDepthTexture()` borrows a read-only `GL_R32F` texture, or
+returns zero if the runtime supplied none. Do not retain its GL name or sample it
+after `finishFromFramebuffer` or `releaseAcquired`. Depth dimensions come from
+`InteropInfo` and can differ from color resolution. The depth image has the same
+native orientation as color, so `flipY=true` color copies require flipped depth
+sampling too. After
 Minecraft draws its HUD and screens, `finishFromFramebuffer` copies their final
 color back and signals the client-completion timeline. Call `present` with that
 value, the current nonzero `hwndOverride`, and `skipVulkanSwapchain=0`. With both
@@ -129,12 +143,18 @@ native menu pixels must be verified from the actual game window.
 
 The adapter imports resized images automatically, synchronizes before replacing
 them, and restores framebuffer bindings, texture binding, scissor and sRGB state.
-It currently copies color only; depth requires separate implementation and validation.
-The Forge smoke fixture verified camera and
+It copies color and exposes primary depth for read-only client composition; it
+does not overwrite Minecraft's depth attachment. The Forge smoke fixture verified camera and
 color alignment for its small terrain scene. Keep the API and adapter alive
 across rendering toggles: recreating only the adapter would reset its timeline
 counter against the same runtime semaphore. Close the adapter while its original
 GL context is current, then destroy the game window, then shut down the runtime.
+
+The Forge integration's opt-in `-Drlcraftremix.presentationDiagnostics=true`
+records bounded frame-phase timing, focus/window transitions and interop timeline
+progress. It does not recreate semaphores or reset the native renderer. The
+reported Alt-Tab recovery remains an investigation, not a confirmed bridge fix;
+an advancing timeline alone also does not prove visible ray-traced output.
 
 ## License and provenance
 

@@ -114,14 +114,27 @@ sections build first; completed sections replace their previous assets atomicall
 Block edits invalidate neighboring sections, including diagonal dependencies.
 Chunk replacement, unload, resource reload, and world changes invalidate stale work.
 
-The mesh budget is 512 MiB, including assets being uploaded or retired. Runtime
+The default mesh budget is 512 MiB, including assets being uploaded or retired. Runtime
 copies and acceleration structures require additional GPU memory. Each frame
 probes at most 32 columns, visits 4,096 blocks, uploads one page of at most
 1,146,880 bytes, and retires four pages. The two-millisecond capture budget is
 cooperative: individual model/native calls cannot be interrupted. Atlas creation
 and complete teardown are separate from it. A section publishes up to 128
-instances atomically. Capacity failures retain previous geometry and retry after
-invalidation; they do not silently lower the requested render distance.
+instances atomically. Admission measures the complete section before native
+uploads. At capacity, changed blocks and nearer sections take priority: farther
+assets retire under the existing frame budget, and work that cannot improve
+residency is deferred. Stable spatial ordering prevents equal-priority sections
+continually evicting one another. Queued destruction does not count as free memory.
+When an edit cannot fit alongside its old mesh, that stale mesh retires first;
+the section can be temporarily absent while its replacement is admitted.
+Deferred sections are reconsidered after camera movement, invalidation, or enough
+memory is actually released. The requested render distance stays unchanged, but
+capacity-limited distant terrain can remain absent.
+
+For diagnostic pressure tests, `-Drlcraftremix.terrainMeshMiB=N` sets an integer
+budget from 8 to 512 MiB when the terrain scene is created. Omit it for the normal
+512 MiB budget. Pressure-fixture logs report the configured budget, deferred
+sections, and evictions separately from pending builds and retirement.
 
 Water and lava use the installed vanilla liquid tessellator for exposed faces,
 corner heights, flow, and overlays, while retaining unlit biome color. Water uses
@@ -190,7 +203,7 @@ Reload or world release detaches observers and releases material consumers befor
 their atlas handles. Custom uploads outside the observed atlas animation contract
 need a separate adapter.
 
-## Sky and clouds
+## Sky, clouds, and fog
 
 The Overworld uses a 256 × 128 HDR dome built from provider sky, fog, and sunrise
 colors. Sun/moon meshes use active resource-pack textures; 500 procedural stars
@@ -212,6 +225,16 @@ unobserved immediate-mode/display-list geometry, unknown bindings, and arbitrary
 dynamic custom-sky textures are outside that contract. The special Forge cloud
 color texture is handled by its own adapter. Cloud capture permits 16 batches and
 32,766 output vertices per frame; texture storage is limited to 16 textures/32 MiB.
+
+Atmospheric fog observes the final fixed-function state after vanilla and Forge
+fog callbacks, then applies LINEAR, EXP, or EXP2 attenuation to finite primary
+hits using Remix's shared depth image. Fog color, density/range, and supported
+radial or eye-plane distance modes come from those callbacks. Composition happens
+before world HUD and screen overlays. Sky misses, reflection interiors, and
+blended surfaces without their own primary depth do not receive independent fog
+distances. Custom shader fog and explicit per-vertex fog coordinates are outside
+this contract. Underwater rendering keeps the existing native medium attenuation
+instead of applying the atmospheric composite a second time.
 
 ## Entities, items, and tile renderers
 
@@ -339,7 +362,7 @@ screenshots do not contain the native menu.** Inspect an owned game-window or
 desktop capture when validating its actual appearance; a resolved menu state or
 an ordinary F2 screenshot alone does not establish visible native presentation.
 Window recreation within the same GL context preserves the interop timeline;
-resizing reimports the color image. Replacing the GL context is unsupported and
+resizing reimports the color and optional depth images. Replacing the GL context is unsupported and
 is rejected by the native ownership check. Menu capture follows window changes.
 
 The optional Neat adapter keeps its original health-bar draw in an RGBA overlay
@@ -381,6 +404,15 @@ entity/tile/item counts; effect counts and omissions; clouds/custom-sky triangle
 PBR sprites/maps; and skipped SOLID draws/fallback frames. A submitted-frame count
 alone does not prove visible output. Repeated capacity or omission counters identify
 a bounded or unsupported path rather than completed scene coverage.
+
+`-Drlcraftremix.presentationDiagnostics=true` enables bounded `RTX_PRESENT` log
+records for focus/visibility/size transitions, ten-second progress summaries,
+and completed Submit/acquire/copy/Present operations taking at least 500 ms. Records include
+world versus worldless submission, image/depth availability, HWND, and both interop
+timeline values. Repeated nonadvancing timelines produce one diagnostic until they
+advance again. This observes the reported freeze that clears after Alt-Tab; its
+cause remains unconfirmed, and the diagnostic does not reset the renderer or
+change presentation behavior.
 
 The Java 8 CI job builds and runs Forge JVM tests independently of the Fabric job.
 These tests validate packing, state, lifetimes, and bytecode contracts without
@@ -430,11 +462,13 @@ focused run; their presence describes an available check, not a recorded pass.
 | `-MobHudSmokeTest` | Installed Neat health-bar pixels, disabled/focused/F1 visibility rules, and settings restoration. |
 | `-BlockEffectSmokeTest` | Contrasting crack stages 1/8, real FBP plant/stone debris, intermediate stone/tinted-grass placement poses, and cleanup. |
 | `-VisibilitySmokeTest` | Same-room shadow controls at 2 and 2.5, image comparison including highlights, and exact native-setting restoration. |
+| `-FogSmokeTest` | Owned Forge fog callbacks, near/far pixel measurements for LINEAR/EXP/EXP2 and changed color under Remix and vanilla, then callback/settings/pose restoration. |
 | `-DimensionSmokeTest` | Server-owned Overworld/Nether/End/Overworld transitions with rendering enabled. |
 | `-WindowSmokeTest` | Native menus in gameplay/inventory, input release, fullscreen, resize, and restoration. |
 | `-TerrainOptimizationSmokeTest` | Supported SOLID draw suppression, injected failure with pixel-exact pre-HUD recovery, release, reload, and resize. |
 | `-SoakSmokeTest` | Repeated loaded-chunk travel, reload, renderer disable/re-enable, and bounded-resource observations. |
 | `-TerrainSmokeTest` | Travel, a published edit, view-distance changes, retirement, and recovery. |
+| `-TerrainPressureSmokeTest` | Nearby edits/removals and travel while distant sections are deferred, bounded mesh bytes, and stable publication/eviction counts after settling. |
 
 `-WindowMinimizeSmokeTest` also requires `-WindowSmokeTest` and the separate
 `scripts/check-window-minimize.ps1` helper. Run the helper in another PowerShell
@@ -486,6 +520,20 @@ survival balance or natural world-generation compatibility.
 `-TerrainSmokeRadius` accepts 4–32, default 4. If the initial radius reaches the
 mesh cap, the fixture records incomplete coverage and reduces to four to verify
 recovery; that is not a pass for full coverage at the original radius.
+
+`-TerrainPressureSmokeTest` selects the terrain fixture automatically and requires
+a scene that fills the mesh budget. An intentionally small `rlcraftremix.terrainMeshMiB`
+budget makes pressure easier to reproduce; set this diagnostic JVM property in
+the test instance before launching. Natural terrain is available with
+`-TerrainNaturalSmokeTest`. Remove any budget override afterward. The pressure
+fixture requires actual deferred work and will not report a pressure pass for a
+scene that fits entirely in memory.
+After live edits and travel pass, an owned blank pause screen stops simulation
+while rendering continues. The final stability check requires drained queues and
+unchanged publication, eviction, and invalidation counters for two discovery
+cycles (at least 120 frames); it allows up to 30 minutes for a large natural
+landscape to settle. The fixture closes its pause screen before restoring player
+state.
 
 ```powershell
 .\forge-1.12.2\scripts\launch-prototype.ps1 -InstanceName 'RLCraft 2.9.3 - Remix Test' -SmokeTest -TerrainSmokeTest -TerrainNaturalSmokeTest -TerrainSmokeRadius 8 -ExitAfterSmoke

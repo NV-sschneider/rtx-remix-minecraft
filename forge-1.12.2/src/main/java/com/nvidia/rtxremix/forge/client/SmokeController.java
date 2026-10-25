@@ -66,7 +66,7 @@ final class SmokeController {
     private enum State {
         INACTIVE, WAIT_MENU, WAIT_WORLD, BUILD_SCENE, SETTLE, REMIX, VANILLA,
         REENABLE, MATERIALS, GLASS, OBJECTS, EFFECTS, COMBAT, CLOUDS, PBR, FIRSTPERSON, HELD_LIGHTS, GLINT, TILES, FOLIAGE, WINDOW, TERRAIN,
-        COMPATIBILITY, FALLING_TREES, MOB_HUD, BLOCK_EFFECTS, VISIBILITY, SURVIVAL, DIMENSIONS, TERRAIN_OPTIMIZATION, SOAK, MULTIPLAYER, RESTORE_MULTIPLAYER,
+        COMPATIBILITY, FALLING_TREES, MOB_HUD, BLOCK_EFFECTS, VISIBILITY, FOG, SURVIVAL, DIMENSIONS, TERRAIN_OPTIMIZATION, SOAK, MULTIPLAYER, RESTORE_MULTIPLAYER,
         SKY_APPLY, SKY_CAPTURE, RESTORE_SURVIVAL, RESTORE_DIMENSIONS, RESTORE_RULES, DISCONNECT, UNLOAD, EXIT, DONE
     }
 
@@ -83,6 +83,7 @@ final class SmokeController {
     private final boolean includeEntities;
     private final boolean includeSky;
     private final boolean includeTerrain;
+    private final boolean includeTerrainPressure;
     private final boolean naturalTerrain;
     private final boolean includeMaterials;
     private final boolean includeObjects;
@@ -95,6 +96,7 @@ final class SmokeController {
     private final boolean includeMobHud;
     private final boolean includeBlockEffects;
     private final boolean includeVisibility;
+    private final boolean includeFog;
     private final boolean includeTerrainOptimization;
     private final boolean includeSoak;
     private final boolean includeMultiplayer;
@@ -139,6 +141,7 @@ final class SmokeController {
     private int previousThirdPerson;
     private int previousRenderDistance;
     private FixtureTerrain terrainFixture;
+    private FixtureTerrainPressure pressureFixture;
     private FixtureMaterials materialFixture;
     private volatile FixtureMaterials.Layout materialLayout;
     private FixtureGlass glassFixture;
@@ -174,6 +177,8 @@ final class SmokeController {
     private volatile FixtureBlockEffects.Layout blockEffectsLayout;
     private FixtureVisibility visibilityFixture;
     private volatile FixtureVisibility.Layout visibilityLayout;
+    private FixtureFog fogFixture;
+    private volatile FixtureFog.Layout fogLayout;
     private volatile FixtureSurvival.Layout survivalLayout;
     private FixtureDimensions dimensionsFixture;
     private FixtureTerrainOptimization optimizationFixture;
@@ -194,7 +199,8 @@ final class SmokeController {
         this.exitAfter = requested && Boolean.getBoolean("rlcraftremix.smoke.exit");
         this.includeEntities = requested && Boolean.getBoolean("rlcraftremix.smoke.entities");
         this.includeSky = requested && Boolean.getBoolean("rlcraftremix.smoke.sky");
-        this.includeTerrain = requested && Boolean.getBoolean("rlcraftremix.smoke.terrain");
+        this.includeTerrainPressure = requested && Boolean.getBoolean("rlcraftremix.smoke.terrainPressure");
+        this.includeTerrain = requested && (Boolean.getBoolean("rlcraftremix.smoke.terrain") || includeTerrainPressure);
         this.naturalTerrain = includeTerrain && Boolean.getBoolean("rlcraftremix.smoke.terrainNatural");
         this.includeMaterials = requested && Boolean.getBoolean("rlcraftremix.smoke.materials");
         this.includeObjects = requested && Boolean.getBoolean("rlcraftremix.smoke.objects");
@@ -215,6 +221,7 @@ final class SmokeController {
         this.includeMobHud = requested && Boolean.getBoolean("rlcraftremix.smoke.mobHud");
         this.includeBlockEffects = requested && Boolean.getBoolean("rlcraftremix.smoke.blockEffects");
         this.includeVisibility = requested && Boolean.getBoolean("rlcraftremix.smoke.visibility");
+        this.includeFog = requested && Boolean.getBoolean("rlcraftremix.smoke.fog");
         this.includeTerrainOptimization = requested && Boolean.getBoolean("rlcraftremix.smoke.terrainOptimization");
         this.includeSoak = requested && Boolean.getBoolean("rlcraftremix.smoke.soak");
         this.includeMultiplayer = requested && Boolean.getBoolean("rlcraftremix.smoke.multiplayer");
@@ -222,7 +229,7 @@ final class SmokeController {
                 || includeEffects || includeCombat || includeClouds || includePbr || includeFirstPerson || includeTiles
                 || includeWindow || includeHeldLights || includeGlint || includeFoliage || includeCompatibility
                 || includeDimensions || includeTerrainOptimization || includeSoak || includeSurvival
-                || includeFallingTrees || includeMobHud || includeBlockEffects || includeVisibility))
+                || includeFallingTrees || includeMobHud || includeBlockEffects || includeVisibility || includeFog))
             throw new IllegalArgumentException("Multiplayer smoke runs separately from integrated-world fixtures");
         this.id = requested
                 ? DateTimeFormatter.ofPattern("uuuuMMdd-HHmmss").withZone(ZoneOffset.UTC).format(Instant.now())
@@ -232,6 +239,7 @@ final class SmokeController {
         this.stateSince = System.nanoTime();
         if (requested) log("START", "exit=" + exitAfter + " seed=" + SEED + " entities=" + includeEntities
                 + " sky=" + includeSky + " terrain=" + includeTerrain + " naturalTerrain=" + naturalTerrain
+                + " terrainPressure=" + includeTerrainPressure
                 + " materials=" + includeMaterials + " objects=" + includeObjects + " effects=" + includeEffects
                 + " combat=" + includeCombat + " clouds=" + includeClouds + " pbr=" + includePbr
                 + " firstperson=" + includeFirstPerson + " tiles=" + includeTiles + " window=" + includeWindow
@@ -242,6 +250,7 @@ final class SmokeController {
                 + " mobHud=" + includeMobHud
                 + " blockEffects=" + includeBlockEffects
                 + " visibility=" + includeVisibility
+                + " fog=" + includeFog
                 + " terrainOptimization=" + includeTerrainOptimization
                 + " soak=" + includeSoak
                 + " multiplayer=" + includeMultiplayer
@@ -516,6 +525,15 @@ final class SmokeController {
                     lastFrames = events.renderedFrames();
                     if (visibilityFixture.tick()) beginAfterVisibility();
                     break;
+                case FOG:
+                    if (!fixtureReady()) break;
+                    lastFrames = events.renderedFrames();
+                    if (fogFixture.tick()) {
+                        fogFixture.close();
+                        fogFixture = null;
+                        beginAfterFog();
+                    }
+                    break;
                 case SURVIVAL:
                     if (!fixtureReady()) break;
                     lastFrames = events.renderedFrames();
@@ -549,7 +567,7 @@ final class SmokeController {
                 case TERRAIN:
                     if (!fixtureReady()) break;
                     lastFrames = events.renderedFrames();
-                    if (terrainFixture.tick()) {
+                    if (includeTerrainPressure ? pressureFixture.tick() : terrainFixture.tick()) {
                         if (includeSky) beginSkyPhase(SkyPhase.DAY);
                         else beginRuleRestoration(true, null);
                     }
@@ -795,6 +813,7 @@ final class SmokeController {
         if (includeMobHud) mobHudLayout = FixtureMobHud.build(world, cx + 720, floorY, cz);
         if (includeBlockEffects) blockEffectsLayout = FixtureBlockEffects.build(world, cx + 800, floorY, cz);
         if (includeVisibility) visibilityLayout = FixtureVisibility.build(world, cx + 880, floorY, cz);
+        if (includeFog) fogLayout = FixtureFog.build(world, cx + 960, floorY, cz);
         Pose result = new Pose(cx + 0.5, floorY + 4.0, cz + 17.5, 180f, 16f, creatures);
         world.setSpawnPoint(new BlockPos(cx, floorY + 1, cz + 12));
         player.setGameType(GameType.CREATIVE);
@@ -808,6 +827,7 @@ final class SmokeController {
 
     private void closeRenderFixtures() {
         // Closing an owned pause screen lets the integrated server drain cleanup work.
+        if (pressureFixture != null) pressureFixture.close();
         if (objectFixture != null) objectFixture.close();
         if (glassFixture != null) glassFixture.close();
         if (effectFixture != null) effectFixture.close();
@@ -826,6 +846,7 @@ final class SmokeController {
         if (mobHudFixture != null) mobHudFixture.close();
         if (blockEffectsFixture != null) blockEffectsFixture.close();
         if (visibilityFixture != null) visibilityFixture.close();
+        if (fogFixture != null) fogFixture.close();
         if (optimizationFixture != null) optimizationFixture.close();
         if (soakFixture != null) soakFixture.close();
         if (multiplayerFixture != null) multiplayerFixture.close();
@@ -883,14 +904,11 @@ final class SmokeController {
     }
 
     private void beginTerrainFixture() {
-        terrainFixture = new FixtureTerrain(mc, events, fixtureServer, fixtureServerWorld,
-                saveName, pose.x, pose.y, pose.z, new FixtureTerrain.Output() {
-                    @Override public BufferedImage image() { return readScreenshot(); }
-                    @Override public String capture(String name, BufferedImage image) throws Exception {
-                        return SmokeController.this.capture(name, image);
-                    }
-                    @Override public void log(String event, String fields) { SmokeController.this.log(event, fields); }
-                });
+        if (includeTerrainPressure)
+            pressureFixture = new FixtureTerrainPressure(mc, events, fixtureServer, fixtureServerWorld,
+                    saveName, pose.x, pose.y, pose.z, pose.yaw, pose.pitch, fixtureOutput());
+        else terrainFixture = new FixtureTerrain(mc, events, fixtureServer, fixtureServerWorld,
+                saveName, pose.x, pose.y, pose.z, fixtureOutput());
         transition(State.TERRAIN);
     }
 
@@ -1053,6 +1071,14 @@ final class SmokeController {
     }
 
     private void beginAfterVisibility() {
+        if (includeFog) {
+            fogFixture = new FixtureFog(mc, events, fixtureServer, fixtureServerWorld,
+                    saveName, fogLayout, pose.x, pose.y, pose.z, pose.yaw, pose.pitch, fixtureOutput());
+            transition(State.FOG);
+        } else beginAfterFog();
+    }
+
+    private void beginAfterFog() {
         if (includeSurvival) {
             survivalFixture = new FixtureSurvival(mc, events, fixtureServer, fixtureServerWorld,
                     saveName, survivalLayout, pose.x, pose.y, pose.z, pose.yaw, pose.pitch, fixtureOutput());
@@ -1398,7 +1424,7 @@ final class SmokeController {
                 || state == State.CLOUDS || state == State.PBR || state == State.FIRSTPERSON || state == State.HELD_LIGHTS || state == State.FOLIAGE
                 || state == State.TILES || state == State.WINDOW || state == State.GLINT
                 || state == State.COMPATIBILITY || state == State.SURVIVAL || state == State.DIMENSIONS || state == State.RESTORE_DIMENSIONS
-                || state == State.TERRAIN_OPTIMIZATION)
+                || state == State.TERRAIN_OPTIMIZATION || state == State.FOG)
             return NATIVE_TIMEOUT * 10;
         if (state == State.REMIX || state == State.REENABLE || state == State.SKY_CAPTURE) return NATIVE_TIMEOUT;
         if (state == State.SETTLE || state == State.VANILLA || state == State.RESTORE_RULES || state == State.DISCONNECT
@@ -1434,6 +1460,7 @@ final class SmokeController {
                 + " frames=" + Math.max(0L, lastFrames - frameBaseline)
                 + (includeEntities && pose != null ? " " + entityCaptureSummary() : "")
                 + (terrainFixture == null ? "" : " " + terrainFixture.status())
+                + (pressureFixture == null ? "" : " " + pressureFixture.status())
                 + (materialFixture == null ? "" : " " + materialFixture.status())
                 + (glassFixture == null ? "" : " " + glassFixture.status())
                 + (effectFixture == null ? "" : " " + effectFixture.status())
@@ -1452,6 +1479,7 @@ final class SmokeController {
                 + (mobHudFixture == null ? "" : " " + mobHudFixture.status())
                 + (blockEffectsFixture == null ? "" : " " + blockEffectsFixture.status())
                 + (visibilityFixture == null ? "" : " " + visibilityFixture.status())
+                + (fogFixture == null ? "" : " " + fogFixture.status())
                 + (dimensionsFixture == null ? "" : " " + dimensionsFixture.status())
                 + (optimizationFixture == null ? "" : " " + optimizationFixture.status())
                 + (soakFixture == null ? "" : " " + soakFixture.status())
@@ -1486,6 +1514,7 @@ final class SmokeController {
             skyStep = null;
             serverShutdown = null;
             terrainFixture = null;
+            pressureFixture = null;
             materialFixture = null;
             materialLayout = null;
             glassFixture = null;
@@ -1513,6 +1542,7 @@ final class SmokeController {
             mobHudFixture = null; mobHudLayout = null;
             blockEffectsFixture = null; blockEffectsLayout = null;
             visibilityFixture = null; visibilityLayout = null;
+            fogFixture = null; fogLayout = null;
             optimizationFixture = null;
             soakFixture = null;
             clientRules = null;
