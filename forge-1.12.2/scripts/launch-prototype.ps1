@@ -24,8 +24,12 @@ param(
     [switch]$BlockEffectSmokeTest,
     [switch]$VisibilitySmokeTest,
     [switch]$FogSmokeTest,
+    [switch]$FogEdgeSmokeTest,
+    [switch]$FogNearestSmokeTest,
+    [switch]$DroppedItemSmokeTest,
     [switch]$DimensionSmokeTest,
     [switch]$WindowSmokeTest,
+    [string]$WindowCaptureAck,
     [switch]$WindowMinimizeSmokeTest,
     [switch]$TerrainOptimizationSmokeTest,
     [switch]$SoakSmokeTest,
@@ -44,6 +48,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $TerrainSmokeTest = $TerrainSmokeTest -or $TerrainPressureSmokeTest
+$FogSmokeTest = $FogSmokeTest -or $FogEdgeSmokeTest
 if ([string]::IsNullOrWhiteSpace($InstanceName) -or
     $InstanceName -in @('.', '..') -or
     $InstanceName.IndexOfAny([IO.Path]::GetInvalidFileNameChars()) -ge 0 -or
@@ -82,9 +87,18 @@ if ($MobHudSmokeTest -and -not $SmokeTest) { throw '-MobHudSmokeTest requires -S
 if ($BlockEffectSmokeTest -and -not $SmokeTest) { throw '-BlockEffectSmokeTest requires -SmokeTest.' }
 if ($VisibilitySmokeTest -and -not $SmokeTest) { throw '-VisibilitySmokeTest requires -SmokeTest.' }
 if ($FogSmokeTest -and -not $SmokeTest) { throw '-FogSmokeTest requires -SmokeTest.' }
+if ($FogNearestSmokeTest -and -not $FogEdgeSmokeTest) { throw '-FogNearestSmokeTest requires -FogEdgeSmokeTest.' }
+if ($DroppedItemSmokeTest -and -not $SmokeTest) { throw '-DroppedItemSmokeTest requires -SmokeTest.' }
 if ($DimensionSmokeTest -and -not $SmokeTest) { throw '-DimensionSmokeTest requires -SmokeTest.' }
 if ($WindowMinimizeSmokeTest -and -not $WindowSmokeTest) { throw '-WindowMinimizeSmokeTest requires -WindowSmokeTest and its external owned-window helper.' }
 if ($WindowSmokeTest -and -not $SmokeTest) { throw '-WindowSmokeTest requires -SmokeTest.' }
+if ($WindowCaptureAck) {
+    if (-not $WindowSmokeTest -or -not [IO.Path]::IsPathRooted($WindowCaptureAck) -or $WindowCaptureAck -match '[\s"\x00]') {
+        throw '-WindowCaptureAck requires -WindowSmokeTest and an absolute acknowledgment-file path without spaces or quotes.'
+    }
+    # Prism's INI reader interprets backslash escapes even in JVM arguments.
+    $WindowCaptureAck = [IO.Path]::GetFullPath($WindowCaptureAck).Replace('\', '/')
+}
 if ($TerrainOptimizationSmokeTest -and -not $SmokeTest) { throw '-TerrainOptimizationSmokeTest requires -SmokeTest.' }
 if ($SoakSmokeTest -and -not $SmokeTest) { throw '-SoakSmokeTest requires -SmokeTest.' }
 if ($PSBoundParameters.ContainsKey('SoakSeconds') -and -not $SoakSmokeTest) { throw '-SoakSeconds requires -SoakSmokeTest.' }
@@ -96,7 +110,7 @@ if ($MultiplayerSmokeTest) {
         $CombatSmokeTest -or $CloudSmokeTest -or $PbrSmokeTest -or $FirstPersonSmokeTest -or $HeldLightSmokeTest -or
         $GlintSmokeTest -or $FoliageSmokeTest -or $TileSmokeTest -or $CompatibilitySmokeTest -or $DimensionSmokeTest -or
         $WindowSmokeTest -or $WindowMinimizeSmokeTest -or $TerrainOptimizationSmokeTest -or $SoakSmokeTest -or $TerrainSmokeTest -or $SurvivalSmokeTest -or
-        $FallingTreeSmokeTest -or $MobHudSmokeTest -or $BlockEffectSmokeTest -or $VisibilitySmokeTest -or $FogSmokeTest) {
+        $FallingTreeSmokeTest -or $MobHudSmokeTest -or $BlockEffectSmokeTest -or $VisibilitySmokeTest -or $FogSmokeTest -or $DroppedItemSmokeTest) {
         throw 'Multiplayer smoke runs separately from integrated-world fixtures.'
     }
 } elseif ($PSBoundParameters.ContainsKey('MultiplayerPort') -or $PSBoundParameters.ContainsKey('MultiplayerFixtureId')) {
@@ -163,7 +177,7 @@ for ($i = $generalStart + 1; $i -lt $lines.Length; $i++) {
 $general = @($lines[($generalStart + 1)..($generalEnd - 1)])
 $argsLine = $general | Where-Object { $_ -match '^JvmArgs=' } | Select-Object -First 1
 $jvmArgs = if ($argsLine) { $argsLine.Substring(8).Trim('"') } else { '' }
-$jvmArgs = ($jvmArgs -replace '(?:^|\s)-Drlcraftremix\.smoke(?:\.(?:exit|entities|sky|materials|objects|effects|combat|clouds|pbr|firstperson|firstPersonFar|heldlights|glint|foliage|tiles|compatibility|survival|fallingTrees|mobHud|blockEffects|visibility|fog|dimensions|window|windowMinimize|terrain|terrainPressure|terrainOptimization|soak|soakSeconds|terrainNatural|terrainRadius|multiplayer|multiplayerPort|multiplayerFixtureId))?=\S+', '').Trim()
+$jvmArgs = ($jvmArgs -replace '(?:^|\s)-Drlcraftremix\.smoke(?:\.(?:exit|entities|sky|materials|objects|effects|combat|clouds|pbr|firstperson|firstPersonFar|heldlights|glint|foliage|tiles|compatibility|survival|fallingTrees|mobHud|blockEffects|visibility|fog|fogEdges|fogNearest|droppedItems|dimensions|window|windowCaptureAck|windowMinimize|terrain|terrainPressure|terrainOptimization|soak|soakSeconds|terrainNatural|terrainRadius|multiplayer|multiplayerPort|multiplayerFixtureId))?=\S+', '').Trim()
 if ($SmokeTest) { $jvmArgs = "$jvmArgs -Drlcraftremix.smoke=true".Trim() }
 if ($ExitAfterSmoke) { $jvmArgs += ' -Drlcraftremix.smoke.exit=true' }
 if ($EntitySmokeTest) { $jvmArgs += ' -Drlcraftremix.smoke.entities=true' }
@@ -187,9 +201,13 @@ if ($MobHudSmokeTest) { $jvmArgs += ' -Drlcraftremix.smoke.mobHud=true' }
 if ($BlockEffectSmokeTest) { $jvmArgs += ' -Drlcraftremix.smoke.blockEffects=true' }
 if ($VisibilitySmokeTest) { $jvmArgs += ' -Drlcraftremix.smoke.visibility=true' }
 if ($FogSmokeTest) { $jvmArgs += ' -Drlcraftremix.smoke.fog=true' }
+if ($FogEdgeSmokeTest) { $jvmArgs += ' -Drlcraftremix.smoke.fogEdges=true' }
+if ($FogNearestSmokeTest) { $jvmArgs += ' -Drlcraftremix.smoke.fogNearest=true' }
+if ($DroppedItemSmokeTest) { $jvmArgs += ' -Drlcraftremix.smoke.droppedItems=true' }
 if ($DimensionSmokeTest) { $jvmArgs += ' -Drlcraftremix.smoke.dimensions=true' }
 if ($WindowMinimizeSmokeTest) { $jvmArgs += ' -Drlcraftremix.smoke.windowMinimize=true' }
 if ($WindowSmokeTest) { $jvmArgs += ' -Drlcraftremix.smoke.window=true' }
+if ($WindowCaptureAck) { $jvmArgs += " -Drlcraftremix.smoke.windowCaptureAck=$WindowCaptureAck" }
 if ($TerrainOptimizationSmokeTest) { $jvmArgs += ' -Drlcraftremix.smoke.terrainOptimization=true' }
 if ($SoakSmokeTest) { $jvmArgs += " -Drlcraftremix.smoke.soak=true -Drlcraftremix.smoke.soakSeconds=$SoakSeconds" }
 if ($MultiplayerSmokeTest) { $jvmArgs += " -Drlcraftremix.smoke.multiplayer=true -Drlcraftremix.smoke.multiplayerPort=$MultiplayerPort -Drlcraftremix.smoke.multiplayerFixtureId=$MultiplayerFixtureId" }

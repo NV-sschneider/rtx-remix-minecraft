@@ -6,6 +6,7 @@ package com.nvidia.rtxremix.forge.client;
 
 import com.nvidia.rtxremix.forge.overlay.OverlayHooks;
 import com.nvidia.rtxremix.forge.overlay.OverlayInputGate;
+import com.nvidia.rtxremix.forge.overlay.FullscreenPresentation;
 import java.nio.charset.StandardCharsets;
 import java.util.Locale;
 import java.util.UUID;
@@ -30,8 +31,9 @@ final class FixtureWindowOverlay implements AutoCloseable {
     private static final long TIMEOUT = TimeUnit.SECONDS.toNanos(120), PROGRESS = TimeUnit.SECONDS.toNanos(10);
     private static final int SETTLE_FRAMES = 20;
     private static final long SETTLE_NANOS = TimeUnit.MILLISECONDS.toNanos(1500);
-    private enum Phase { BASELINE, GAME_GRAPHICS, GAME_DEVELOPER, GAME_CLOSED, INVENTORY,
-        INVENTORY_GRAPHICS, INVENTORY_DEVELOPER, INVENTORY_CLOSED, FULLSCREEN, WINDOWED,
+    private enum Phase { BASELINE, FIRST_DISABLED, FIRST_REENABLED, GAME_GRAPHICS, GAME_DEVELOPER, GAME_CLOSED, INVENTORY,
+        INVENTORY_GRAPHICS, INVENTORY_DEVELOPER, INVENTORY_CLOSED, FULLSCREEN, FULLSCREEN_DISABLED, FULLSCREEN_REENABLED,
+        WINDOWED, WINDOWED_DISABLED, WINDOWED_REENABLED,
         RECREATED_MENU, RESIZED, RESIZED_MENU, RESTORE, MINIMIZE_REQUEST, MINIMIZED, RESTORE_REQUEST, RETURN, DONE }
     private final Minecraft mc;
     private final ClientEvents events;
@@ -46,6 +48,7 @@ final class FixtureWindowOverlay implements AutoCloseable {
     private final int originalWidth, originalHeight, originalX, originalY;
     private final byte[] config = new byte[16];
     private final long originalWindowChanges;
+    private final FixtureWindowCapture captureAck;
     private GuiContainer inventory;
     private Container inventoryContainer;
     private boolean inventoryClosed;
@@ -53,8 +56,12 @@ final class FixtureWindowOverlay implements AutoCloseable {
     private long since = System.nanoTime(), progress = since, readyFrame = -1;
     private long readySince;
     private int resolvedMenu, resizedWidth, resizedHeight;
+    private int restoredWindowWidth, restoredWindowHeight, restoredWindowX, restoredWindowY;
     private boolean closed;
     private long minimizedFrame;
+    private long disabledFrame;
+    private boolean disabledByFixture;
+    private String checkpoint;
 
     FixtureWindowOverlay(Minecraft mc, ClientEvents events, IntegratedServer server, WorldServer world,
             String saveName, FixtureTerrain.Output output) {
@@ -68,6 +75,7 @@ final class FixtureWindowOverlay implements AutoCloseable {
         originalContainer = mc.player.openContainer;
         originalFullscreen = mc.isFullScreen(); originalFullscreenSetting = mc.gameSettings.fullScreen;
         originalWidth = mc.displayWidth; originalHeight = mc.displayHeight; originalX = Display.getX(); originalY = Display.getY();
+        captureAck = new FixtureWindowCapture();
         originalWindowChanges = events.windowChanges(); log("STARTED");
         output.log("WINDOW_CAPTURE_CONTRACT", "Framebuffer PNGs contain GL content only; native menus are composed during Vulkan Present. Capture the owned foreground game client area to verify native GUI pixels.");
     }
@@ -75,8 +83,12 @@ final class FixtureWindowOverlay implements AutoCloseable {
     boolean tick() throws Exception {
         if (closed || mc.world != clientWorld || mc.getIntegratedServer() != server || mc.player == null
                 || !playerId.equals(mc.player.getUniqueID()) || !saveName.equals(server.getFolderName())
-                || !events.isEnabled() || events.failureMessage() != null || !OverlayHooks.available()) {
+                || events.isEnabled() == disabledByFixture || events.failureMessage() != null
+                || !disabledByFixture && !OverlayHooks.available()) {
             throw new IllegalStateException("Window fixture renderer/world unavailable");
+        }
+        if (disabledByFixture && events.renderedFrames() != disabledFrame) {
+            throw new IllegalStateException("Native world rendering continued during the disabled window checkpoint");
         }
         resolvedMenu = readMenu();
         if (System.nanoTime() - since >= TIMEOUT) {
@@ -86,7 +98,17 @@ final class FixtureWindowOverlay implements AutoCloseable {
         if (System.nanoTime() - progress >= PROGRESS) { log("PROGRESS"); progress = System.nanoTime(); }
         switch (phase) {
             case BASELINE:
-                if (settled(menuClosed() && gameplay())) {
+                if (presentation("FIRST_ENABLED", menuClosed() && gameplay() && presentationMode(originalFullscreen))) {
+                    disable(); transition(Phase.FIRST_DISABLED);
+                }
+                break;
+            case FIRST_DISABLED:
+                if (presentation("FIRST_DISABLED", menuClosed() && gameplay() && presentationMode(originalFullscreen))) {
+                    enable(); transition(Phase.FIRST_REENABLED);
+                }
+                break;
+            case FIRST_REENABLED:
+                if (presentation("FIRST_REENABLED", menuClosed() && gameplay() && presentationMode(originalFullscreen))) {
                     KeyBinding.setKeyBindState(mc.gameSettings.keyBindForward.getKeyCode(), true);
                     KeyBinding.onTick(mc.gameSettings.keyBindForward.getKeyCode());
                     openGraphics(); transition(Phase.GAME_GRAPHICS);
@@ -136,13 +158,35 @@ final class FixtureWindowOverlay implements AutoCloseable {
                 }
                 break;
             case FULLSCREEN:
-                if (settled(mc.isFullScreen() && Display.isFullscreen() && gameplay())) {
-                    capture("window-fullscreen"); log("FULLSCREEN_PASS"); mc.toggleFullscreen(); transition(Phase.WINDOWED);
+                if (presentation("FULLSCREEN_ENABLED", presentationMode(true) && menuClosed() && gameplay())) {
+                    capture("window-fullscreen"); disable(); transition(Phase.FULLSCREEN_DISABLED);
+                }
+                break;
+            case FULLSCREEN_DISABLED:
+                if (presentation("FULLSCREEN_DISABLED", presentationMode(true) && menuClosed() && gameplay())) {
+                    enable(); transition(Phase.FULLSCREEN_REENABLED);
+                }
+                break;
+            case FULLSCREEN_REENABLED:
+                if (presentation("FULLSCREEN_REENABLED", presentationMode(true) && menuClosed() && gameplay())) {
+                    log("FULLSCREEN_PASS"); mc.toggleFullscreen(); transition(Phase.WINDOWED);
                 }
                 break;
             case WINDOWED:
-                if (settled(!mc.isFullScreen() && !Display.isFullscreen() && gameplay())) {
-                    capture("window-returned"); log("WINDOWED_PASS"); openGraphics(); transition(Phase.RECREATED_MENU);
+                if (presentation("WINDOWED_ENABLED", presentationMode(false) && menuClosed() && gameplay())) {
+                    restoredWindowWidth = mc.displayWidth; restoredWindowHeight = mc.displayHeight;
+                    restoredWindowX = Display.getX(); restoredWindowY = Display.getY();
+                    capture("window-returned"); disable(); transition(Phase.WINDOWED_DISABLED);
+                }
+                break;
+            case WINDOWED_DISABLED:
+                if (presentation("WINDOWED_DISABLED", presentationMode(false) && menuClosed() && gameplay())) {
+                    enable(); transition(Phase.WINDOWED_REENABLED);
+                }
+                break;
+            case WINDOWED_REENABLED:
+                if (presentation("WINDOWED_REENABLED", presentationMode(false) && menuClosed() && gameplay())) {
+                    log("WINDOWED_PASS"); openGraphics(); transition(Phase.RECREATED_MENU);
                 }
                 break;
             case RECREATED_MENU:
@@ -217,26 +261,46 @@ final class FixtureWindowOverlay implements AutoCloseable {
     }
     private boolean sameInventory() { return mc.currentScreen == inventory && mc.player.openContainer == inventoryContainer && inventory.inventorySlots == inventoryContainer; }
     private boolean dimensions(int width, int height) { return mc.displayWidth == width && mc.displayHeight == height && Display.getWidth() == width && Display.getHeight() == height; }
+    private boolean presentationMode(boolean fullscreen) {
+        if (mc.isFullScreen() != fullscreen || mc.gameSettings.fullScreen != fullscreen || Display.isFullscreen()
+                || FullscreenPresentation.isBorderless() != fullscreen) return false;
+        DisplayMode desktop = Display.getDesktopDisplayMode();
+        return !fullscreen || dimensions(desktop.getWidth(), desktop.getHeight());
+    }
+    private void disable() { events.setEnabled(false); disabledByFixture = true; disabledFrame = events.renderedFrames(); }
+    private void enable() { events.setEnabled(true); disabledByFixture = false; }
+    private boolean presentation(String name, boolean ready) throws Exception {
+        if (!settled(ready)) return false;
+        checkpoint = name;
+        return captureAck.await(saveName, name, status(), output::log);
+    }
     private boolean settled(boolean ready) {
         if (!ready) { readyFrame = -1; readySince = 0; return false; }
-        if (readyFrame < 0) { readyFrame = events.renderedFrames(); readySince = System.nanoTime(); }
-        return events.renderedFrames() - readyFrame >= SETTLE_FRAMES && System.nanoTime() - readySince >= SETTLE_NANOS;
+        long frame = disabledByFixture ? OverlayHooks.frameId() : events.renderedFrames();
+        if (readyFrame < 0) { readyFrame = frame; readySince = System.nanoTime(); }
+        return frame - readyFrame >= SETTLE_FRAMES && System.nanoTime() - readySince >= SETTLE_NANOS;
     }
     private void resize(int width, int height) throws LWJGLException {
         Display.setDisplayMode(new DisplayMode(width, height)); mc.resize(width, height);
     }
     private void restoreWindow() throws LWJGLException {
+        // Re-enter fullscreen from the user's remembered window, so the fixture's
+        // temporary resize does not become the size restored by their next F11.
+        if (originalFullscreen && !mc.isFullScreen() && restoredWindowWidth > 0) {
+            resize(restoredWindowWidth, restoredWindowHeight); Display.setLocation(restoredWindowX, restoredWindowY);
+        }
         if (mc.isFullScreen() != originalFullscreen) mc.toggleFullscreen();
         if (!originalFullscreen) { resize(originalWidth, originalHeight); Display.setLocation(originalX, originalY); }
         mc.gameSettings.fullScreen = originalFullscreenSetting;
     }
-    private void transition(Phase next) { phase = next; since = progress = System.nanoTime(); readyFrame = -1; readySince = 0; log("PHASE"); }
+    private void transition(Phase next) { phase = next; since = progress = System.nanoTime(); readyFrame = -1; readySince = 0; checkpoint = null; log("PHASE"); }
     private void capture(String name) throws Exception { output.log("WINDOW_CAPTURE", status() + " file=" + output.capture(name, output.image())); }
     private void log(String event) { output.log("WINDOW_" + event, status()); }
     String status() {
         return "windowPhase=" + phase + " menu=" + resolvedMenu + " capture=" + OverlayHooks.capturing()
                 + " grabbed=" + Mouse.isGrabbed() + " focused=" + mc.inGameHasFocus + " fullscreen=" + mc.isFullScreen()
-                + " displayFullscreen=" + Display.isFullscreen() + " screen=" + identity(mc.currentScreen)
+                + " displayFullscreen=" + Display.isFullscreen() + " borderless=" + FullscreenPresentation.isBorderless()
+                + " enabled=" + events.isEnabled() + " checkpoint=" + checkpoint + " screen=" + identity(mc.currentScreen)
                 + " container=" + identity(mc.player.openContainer) + " originalContainer=" + identity(originalContainer)
                 + " playerInventory=" + identity(mc.player.inventoryContainer) + " gameplay=" + gameplay()
                 + " width=" + mc.displayWidth + " height=" + mc.displayHeight + " frames=" + events.renderedFrames()
@@ -256,8 +320,9 @@ final class FixtureWindowOverlay implements AutoCloseable {
                 KeyBinding.setKeyBindState(mc.gameSettings.keyBindForward.getKeyCode(), false);
                 if (mc.world == clientWorld && mc.player != null && playerId.equals(mc.player.getUniqueID())
                         && mc.currentScreen == inventory) mc.player.closeScreen();
-                restoreWindow(); closed = true;
+                restoreWindow();
             } catch (LWJGLException failure) { throw new IllegalStateException("Cannot restore smoke fixture window", failure); }
+            finally { if (disabledByFixture) enable(); closed = true; }
         }
     }
 }
