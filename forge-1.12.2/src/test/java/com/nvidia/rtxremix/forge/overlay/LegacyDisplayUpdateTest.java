@@ -62,6 +62,35 @@ public class LegacyDisplayUpdateTest {
         assertEquals(Arrays.asList("isFullscreen", "wasResized", "getWidth", "getHeight", "reshape", "processMessages"), tail);
     }
 
+    @Test public void pinnedMessagePumpRetainsFocusRegainContextBindingBeforeInputPolling() throws Exception {
+        List<String> pump = calls("org/lwjgl/opengl/Display", "processMessages", "()V");
+        assertTrue(pump.indexOf("org/lwjgl/opengl/DisplayImplementation.update") >= 0);
+        assertTrue(pump.indexOf("org/lwjgl/opengl/DisplayImplementation.update")
+                < pump.indexOf("org/lwjgl/opengl/Display.pollDevices"));
+        List<String> update = calls("org/lwjgl/opengl/WindowsDisplay", "update", "()V");
+        assertEquals("org/lwjgl/opengl/WindowsDisplay.nUpdate", update.get(0));
+        assertTrue(update.indexOf("org/lwjgl/opengl/Context.isCurrent") >= 0);
+        assertTrue(update.indexOf("org/lwjgl/opengl/Context.isCurrent")
+                < update.indexOf("org/lwjgl/opengl/Context.makeCurrent"));
+        List<String> activate = calls("org/lwjgl/opengl/WindowsDisplay", "appActivate", "(ZJ)V");
+        assertTrue(activate.contains("org/lwjgl/opengl/WindowsKeyboard.releaseAll"));
+    }
+
+    private List<String> calls(String owner, String name, String descriptor) throws Exception {
+        ClassNode type = new ClassNode(Opcodes.ASM5);
+        try (InputStream input = getClass().getClassLoader().getResourceAsStream(owner + ".class")) {
+            assertNotNull(input); new ClassReader(input).accept(type, 0);
+        }
+        for (MethodNode method : type.methods) if (method.name.equals(name) && method.desc.equals(descriptor)) {
+            List<String> result = new ArrayList<String>();
+            for (AbstractInsnNode instruction : method.instructions.toArray()) if (instruction instanceof MethodInsnNode) {
+                MethodInsnNode call = (MethodInsnNode) instruction; result.add(call.owner + "." + call.name);
+            }
+            return result;
+        }
+        throw new AssertionError("Missing pinned method " + owner + "." + name + descriptor);
+    }
+
     private static final class Fake implements LegacyDisplayUpdate.Access {
         final List<String> trace = new ArrayList<String>();
         boolean created = true, fullscreen, parented, resized, parentResized, windowResized;

@@ -34,6 +34,7 @@ import com.nvidia.rtxremix.forge.overlay.OverlayFrame;
 import com.nvidia.rtxremix.forge.overlay.OverlayHooks;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.WorldClient;
+import org.lwjgl.opengl.Display;
 
 import java.io.File;
 import java.io.IOException;
@@ -53,6 +54,8 @@ final class PrototypeRenderer {
     private final OverlayFrame overlayFrame = new OverlayFrame();
     private final LastGoodFrame lastGoodFrame = new LastGoodFrame();
     private final TerrainFrameState terrainFrame = new TerrainFrameState();
+    private final PresentationDiagnostics presentationDiagnostics = new PresentationDiagnostics(
+            Boolean.getBoolean("rlcraftremix.presentationDiagnostics"), message -> RemixForgeMod.LOG.info(message));
     private final TerrainDrawGate.Replacement solidReplacement = new TerrainDrawGate.Replacement() {
         @Override public boolean available(int x, int y, int z) {
             net.minecraft.entity.Entity view = mc.getRenderViewEntity();
@@ -187,10 +190,11 @@ final class PrototypeRenderer {
         medium.update(world, captured.parameterizedExt.position);
         terrain.updateLights(captured.parameterizedExt.position);
         sky.update(world, partialTicks, captured.parameterizedExt.position);
-        api.submit(null);
-        nativeFramePending = true;
-        interop.acquireToFramebuffer(api.dxvkGetInteropInfo(), mc.getFramebuffer().framebufferObject,
-                mc.displayWidth, mc.displayHeight, true);
+        InteropInfo frame = submitNativeFrame(true);
+        presentationDiagnostics.begin(PresentationDiagnostics.ACQUIRE);
+        try { interop.acquireToFramebuffer(frame, mc.getFramebuffer().framebufferObject,
+                mc.displayWidth, mc.displayHeight, true); }
+        finally { presentationDiagnostics.end(); }
         terrainFrame.copied();
         captureTerrainFallback();
         overlayFrame.capture(mc.getFramebuffer().framebufferObject, mc.displayWidth, mc.displayHeight);
@@ -309,6 +313,17 @@ final class PrototypeRenderer {
     void finishOverlay() { overlayFrame.restore(mc.getFramebuffer().framebufferObject, mc.displayWidth, mc.displayHeight); }
     boolean ownsSwapchain() { return initialized && !windowClosing; }
 
+    private InteropInfo submitNativeFrame(boolean worldFrame) {
+        presentationDiagnostics.window(hwnd, Display.isActive(), Display.isVisible(), mc.displayWidth, mc.displayHeight, frames);
+        presentationDiagnostics.begin(PresentationDiagnostics.SUBMIT);
+        try { api.submit(null); nativeFramePending = true; }
+        finally { presentationDiagnostics.end(); }
+        InteropInfo frame = api.dxvkGetInteropInfo();
+        presentationDiagnostics.submitted(worldFrame, frame.dxvkDoneSemaphore_ValueToWait,
+                frame.imageMemory_Handle, frame.width, frame.height, frame.depthImageMemory_Handle != 0);
+        return frame;
+    }
+
     /** Minecraft's final UI is complete. Return the shared image before the runtime draws its GUI. */
     Throwable presentFrame() {
         followWindow();
@@ -318,13 +333,16 @@ final class PrototypeRenderer {
             if (!nativeFramePending) {
                 // Disabled rendering and menus still use the native swapchain once initialized.
                 // Acquire without replacing the vanilla frame that Minecraft already drew.
-                api.submit(null);
-                nativeFramePending = true;
-                interop.acquire(api.dxvkGetInteropInfo());
+                InteropInfo frame = submitNativeFrame(false);
+                presentationDiagnostics.begin(PresentationDiagnostics.ACQUIRE);
+                try { interop.acquire(frame); }
+                finally { presentationDiagnostics.end(); }
             }
             if (interop.hasAcquiredFrame()) {
-                done = interop.finishFromFramebuffer(mc.getFramebuffer().framebufferObject,
-                        mc.displayWidth, mc.displayHeight, true);
+                presentationDiagnostics.begin(PresentationDiagnostics.COPY);
+                try { done = interop.finishFromFramebuffer(mc.getFramebuffer().framebufferObject,
+                        mc.displayWidth, mc.displayHeight, true); }
+                finally { presentationDiagnostics.end(); }
             } else done = interop.releaseAcquired();
         } catch (RuntimeException | LinkageError failure) {
             done = interop.releaseAcquired();
@@ -337,8 +355,10 @@ final class PrototypeRenderer {
         present.interopFlipY = 0;
         // Complete a successful Submit even when the GL copy failed. Never submit twice
         // before Present, and report recoverable copy failure only after releasing ownership.
-        try { api.present(present); }
-        finally { nativeFramePending = false; }
+        presentationDiagnostics.releasing(done);
+        presentationDiagnostics.begin(PresentationDiagnostics.PRESENT);
+        try { api.present(present); presentationDiagnostics.presented(); }
+        finally { nativeFramePending = false; presentationDiagnostics.end(); }
         return copyFailure;
     }
     boolean entityCaptured(UUID id) { return entities != null && entities.contains(id); }
