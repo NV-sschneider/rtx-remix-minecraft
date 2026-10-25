@@ -289,6 +289,12 @@ final class PrototypeRenderer {
     long fogMissingDepthFrames() { return fog == null ? 0 : fog.missingDepthFrames(); }
     int fogHistorySamples() { return fog == null ? 0 : fog.historySamples(); }
     long fogHistoryResets() { return fog == null ? 0 : fog.historyResets(); }
+    float fogHistoryWeight() { return fog == null ? 0 : fog.historyWeight(); }
+    String fogHistoryDiagnostics() {
+        return fog == null ? "inactive" : "pose=" + fog.historyPoseResets() + ",law=" + fog.historyLawResets()
+                + ",size=" + fog.historySizeResets() + ",discard=" + fog.historyDiscardResets()
+                + ",weight=" + fog.historyWeight() + ",lawError=" + fog.historyLawError();
+    }
     com.nvidia.rtxremix.forge.fog.FogState fogState() { return fog == null ? null : fog.lastApplied(); }
     boolean terrainSuppressionRequested() { return SUPPRESS_SOLID; }
     boolean terrainSuppressionSupported() { return VanillaTerrainDraws.supported(); }

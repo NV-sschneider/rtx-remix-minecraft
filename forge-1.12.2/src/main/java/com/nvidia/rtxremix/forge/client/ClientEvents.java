@@ -257,6 +257,8 @@ public final class ClientEvents {
     long fogMissingDepthFrames() { return renderer.fogMissingDepthFrames(); }
     int fogHistorySamples() { return renderer.fogHistorySamples(); }
     long fogHistoryResets() { return renderer.fogHistoryResets(); }
+    float fogHistoryWeight() { return renderer.fogHistoryWeight(); }
+    String fogHistoryDiagnostics() { return renderer.fogHistoryDiagnostics(); }
     com.nvidia.rtxremix.forge.fog.FogState fogState() { return renderer.fogState(); }
     boolean terrainSuppressionRequested() { return renderer.terrainSuppressionRequested(); }
     boolean terrainSuppressionSupported() { return renderer.terrainSuppressionSupported(); }

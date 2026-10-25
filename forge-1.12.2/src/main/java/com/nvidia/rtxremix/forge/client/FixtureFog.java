@@ -32,7 +32,7 @@ import org.lwjgl.opengl.GLContext;
 
 /** Owned Forge fog callbacks and two depth targets, measured separately under Remix and vanilla. */
 public final class FixtureFog implements AutoCloseable {
-    private enum Phase { SETUP, ARRIVE, NATIVE, VANILLA, EDGE_CLEAR, EDGE_LINEAR, EDGE_MOVE, EDGE_RESTABILIZE, RESTORE, RETURN, DONE }
+    private enum Phase { SETUP, ARRIVE, NATIVE, VANILLA, EDGE_CLEAR, EDGE_LINEAR, EDGE_MOVE, EDGE_RESTABILIZE, EDGE_LAW_DRIFT, EDGE_LAW_FAST, EDGE_REMOVE, RESTORE, RETURN, DONE }
     private enum Preset {
         NONE(FogState.EXP, 0, 0, 1, 0.1f, 0.6f, 0.2f),
         LINEAR(FogState.LINEAR, 0, 10, 22, 0.1f, 0.6f, 0.2f),
@@ -77,11 +77,16 @@ public final class FixtureFog implements AutoCloseable {
     private boolean serverConfigured, serverFlying;
     private double nearError, farError, nearTransmissionError, farTransmissionError;
     private double[] nearPixels, farPixels;
-    private FogEdgeProbe leafEdges, solidEdge;
+    private FogEdgeProbe leafEdges, farLeafEdges, solidEdge;
     private BufferedImage edgeFirst;
     private long edgeSampleFrame;
     private long historyResetBaseline;
     private int motionSteps, motionMinSamples = Integer.MAX_VALUE;
+    private long lawStartFrame;
+    private float observedStart, observedEnd;
+    private float removalDrift;
+    private float fastDriftBase, fastPeakWeight;
+    private long removalHash, removalFrame = -1;
 
     FixtureFog(Minecraft mc, ClientEvents events, IntegratedServer server, WorldServer world,
             String save, Layout layout, double x, double y, double z, float yaw, float pitch, FixtureTerrain.Output output) {
@@ -116,6 +121,16 @@ public final class FixtureFog implements AutoCloseable {
             for (int dx = 12; dx <= 15; dx++) for (int dy = 1; dy <= 8; dy++)
                 world.setBlockState(new BlockPos(x + dx, y + dy, z - 5), Blocks.LEAVES.getDefaultState()
                         .withProperty(BlockLeaves.DECAYABLE, false).withProperty(BlockLeaves.CHECK_DECAY, false), 3);
+        if (edges) {
+            for (int dx = -1; dx <= 7; dx++) for (int dz = -50; dz <= -46; dz++) {
+                int top = Math.min(255, Math.max(y + 14, world.getHeight(new BlockPos(x + dx, y, z + dz)).getY()));
+                for (int yy = y + 1; yy <= top; yy++) world.setBlockToAir(new BlockPos(x + dx, yy, z + dz));
+            }
+            // Smaller projected leaf holes expose single-sample misses hidden by the near panel.
+            for (int dx = 0; dx <= 6; dx++) for (int dy = 5; dy <= 13; dy++)
+                world.setBlockState(new BlockPos(x + dx, y + dy, z - 48), Blocks.LEAVES.getDefaultState()
+                        .withProperty(BlockLeaves.DECAYABLE, false).withProperty(BlockLeaves.CHECK_DECAY, false), 3);
+        }
         return new Layout(x, y, z);
     }
 
@@ -163,13 +178,41 @@ public final class FixtureFog implements AutoCloseable {
             case EDGE_CLEAR:
             case EDGE_LINEAR:
             case EDGE_RESTABILIZE:
+            case EDGE_LAW_DRIFT:
+            case EDGE_LAW_FAST:
                 if (settled(ready() && (nearestControl() || phase == Phase.EDGE_CLEAR
+                        || phase == Phase.EDGE_LAW_DRIFT || phase == Phase.EDGE_LAW_FAST
                         || events.fogHistorySamples() == 32), worldFrames) && worldFrames - edgeSampleFrame >= 3) {
                     if (sampleEdges()) {
                         if (phase == Phase.EDGE_CLEAR) { select(1); transition(Phase.EDGE_LINEAR); }
                         else if (phase == Phase.EDGE_LINEAR && !nearestControl()) {
                             historyResetBaseline = events.fogHistoryResets(); motionSteps = 0;
                             motionMinSamples = Integer.MAX_VALUE; transition(Phase.EDGE_MOVE);
+                        }
+                        else if (phase == Phase.EDGE_RESTABILIZE) {
+                            select(1); lawStartFrame = worldFrames; historyResetBaseline = events.fogHistoryResets();
+                            transition(Phase.EDGE_LAW_DRIFT);
+                        }
+                        else if (phase == Phase.EDGE_LAW_DRIFT) {
+                            if (events.fogHistorySamples() != 32 || events.fogHistoryResets() != historyResetBaseline)
+                                throw new IllegalStateException("Gradual fog drift repeatedly discarded stationary coverage: " + status());
+                            fastDriftBase = observedStart - preset.start; fastPeakWeight = 0;
+                            select(1); lawStartFrame = worldFrames; transition(Phase.EDGE_LAW_FAST);
+                        }
+                        else if (phase == Phase.EDGE_LAW_FAST) {
+                            if (events.fogHistorySamples() != 32 || events.fogHistoryResets() != historyResetBaseline
+                                    || !(fastPeakWeight > 1.0f / 32))
+                                throw new IllegalStateException("Changing fog did not exercise bounded adaptive weight: " + status());
+                            removalDrift = observedStart - preset.start; historyResetBaseline = events.fogHistoryResets();
+                            BlockPos marker = farLeafMarker();
+                            removalHash = events.sectionGeometryHash(marker.getX() >> 4, marker.getY() >> 4, marker.getZ() >> 4);
+                            action = server.callFromMainThread(() -> {
+                                requireWorld();
+                                for (int dx = 0; dx <= 6; dx++) for (int dy = 5; dy <= 13; dy++)
+                                    world.setBlockToAir(new BlockPos(layout.x + dx, layout.y + dy, layout.z - 48));
+                                return null;
+                            });
+                            transition(Phase.EDGE_REMOVE);
                         }
                         else {
                             unregister(); appliedBaseline = events.fogAppliedFrames(); transition(Phase.RESTORE);
@@ -183,6 +226,21 @@ public final class FixtureFog implements AutoCloseable {
                         throw new IllegalStateException("Fog history was retained across moving camera: " + status());
                     output.capture("fog-moving-reset", output.image()); log("MOTION_RESET_PASS");
                     select(1); transition(Phase.EDGE_RESTABILIZE);
+                }
+                break;
+            case EDGE_REMOVE:
+                BlockPos marker = farLeafMarker();
+                if (complete() && clientWorld.isAirBlock(marker) && events.terrainPendingSectionCount() == 0
+                        && events.terrainRetirementCount() == 0
+                        && events.sectionGeometryHash(marker.getX() >> 4, marker.getY() >> 4, marker.getZ() >> 4) != removalHash) {
+                    if (removalFrame < 0) removalFrame = events.renderedFrames();
+                    if (events.renderedFrames() - removalFrame >= 3) {
+                        BufferedImage image = output.image(); int green = farLeafFogPixels(image);
+                        output.capture("fog-far-leaves-removed", image);
+                        if (green != 0 || events.fogHistoryResets() != historyResetBaseline)
+                            throw new IllegalStateException("Removed foliage retained fog coverage or reset history: green=" + green + " " + status());
+                        log("LEAF_REMOVAL_PASS"); unregister(); appliedBaseline = events.fogAppliedFrames(); transition(Phase.RESTORE);
+                    }
                 }
                 break;
             case RESTORE:
@@ -205,7 +263,11 @@ public final class FixtureFog implements AutoCloseable {
         if (!observing(event)) return;
         GlStateManager.setFog(preset.mode == FogState.LINEAR ? GlStateManager.FogMode.LINEAR
                 : preset.mode == FogState.EXP ? GlStateManager.FogMode.EXP : GlStateManager.FogMode.EXP2);
-        GlStateManager.setFogStart(preset.start); GlStateManager.setFogEnd(preset.end);
+        float drift = phase == Phase.EDGE_LAW_DRIFT ? Math.min(0.5f, (worldFrames - lawStartFrame) * 0.00005f)
+                : phase == Phase.EDGE_LAW_FAST ? fastDriftBase + (float) (0.08 * Math.sin((worldFrames - lawStartFrame) * 0.25))
+                : phase == Phase.EDGE_REMOVE ? removalDrift : 0;
+        observedStart = preset.start + drift; observedEnd = preset.end + drift;
+        GlStateManager.setFogStart(observedStart); GlStateManager.setFogEnd(observedEnd);
         radial = GLContext.getCapabilities().GL_NV_fog_distance;
         if (radial) GlStateManager.glFogi(0x855A, 0x855B);
         event.setDensity(preset.density); event.setCanceled(true); densityCalls++;
@@ -221,6 +283,7 @@ public final class FixtureFog implements AutoCloseable {
     public void frame(RenderWorldLastEvent event) {
         if (!registered || !ownsClient()) return;
         if (phase == Phase.EDGE_MOVE) motionMinSamples = Math.min(motionMinSamples, events.fogHistorySamples());
+        if (phase == Phase.EDGE_LAW_FAST) fastPeakWeight = Math.max(fastPeakWeight, events.fogHistoryWeight());
         projection.clear(); GL11.glGetFloat(GL11.GL_PROJECTION_MATRIX, projection);
         projectionX = projection.get(0); projectionY = projection.get(5); worldFrames++;
     }
@@ -233,7 +296,7 @@ public final class FixtureFog implements AutoCloseable {
     private void select(int index) {
         caseIndex = index; preset = CASES[index]; densityBaseline = densityCalls; colorBaseline = colorCalls;
         appliedBaseline = events.fogAppliedFrames(); nearError = farError = 0;
-        leafEdges = solidEdge = null; edgeFirst = null; edgeSampleFrame = worldFrames;
+        leafEdges = farLeafEdges = solidEdge = null; edgeFirst = null; edgeSampleFrame = worldFrames;
     }
 
     private boolean sampleEdges() throws Exception {
@@ -244,19 +307,25 @@ public final class FixtureFog implements AutoCloseable {
             leafEdges = new FogEdgeProbe(image,
                     projectX(11.5, 22.5) - marginX, projectY(layout.y + 9 - eye, 22.5) - marginY,
                     projectX(15.5, 22.5) + marginX, projectY(layout.y + 1 - eye, 22.5) + marginY);
+            farLeafEdges = new FogEdgeProbe(image,
+                    projectX(-0.5, 65.5) - marginX, projectY(layout.y + 14 - eye, 65.5) - marginY,
+                    projectX(6.5, 65.5) + marginX, projectY(layout.y + 5 - eye, 65.5) + marginY);
             double edge = projectX(3.5, 27.5);
             solidEdge = new FogEdgeProbe(image, edge - marginX,
                     projectY(layout.y + 9 - eye, 27.5), edge + marginX,
                     projectY(layout.y + 5 - eye, 27.5));
             edgeFirst = image;
         }
-        leafEdges.sample(image); solidEdge.sample(image); edgeSampleFrame = worldFrames;
+        leafEdges.sample(image); farLeafEdges.sample(image); solidEdge.sample(image); edgeSampleFrame = worldFrames;
         if (leafEdges.samples() != FogEdgeProbe.SAMPLES) return false;
-        String name = preset == Preset.NONE ? "clear" : phase == Phase.EDGE_RESTABILIZE ? "linear-restabilized" : "linear";
+        String name = preset == Preset.NONE ? "clear" : phase == Phase.EDGE_RESTABILIZE ? "linear-restabilized"
+                : phase == Phase.EDGE_LAW_DRIFT ? "linear-drift" : phase == Phase.EDGE_LAW_FAST ? "linear-fast" : "linear";
         output.log("FOG_EDGE_OBSERVATION", "preset=" + name
                 + " resolve=" + (nearestControl() ? "nearest-control" : "temporal-coverage")
                 + " historySamples=" + events.fogHistorySamples() + " historyResets=" + events.fogHistoryResets()
+                + " history=" + events.fogHistoryDiagnostics()
                 + " leaf=" + leafEdges.summary()
+                + " farLeaf=" + farLeafEdges.summary()
                 + " solid=" + solidEdge.summary() + " output=" + image.getWidth() + "x" + image.getHeight());
         // PNG encoding happens only after the last sample, so it cannot select the sampled frame spacing.
         output.capture("fog-edges-" + name + "-first", edgeFirst);
@@ -267,11 +336,30 @@ public final class FixtureFog implements AutoCloseable {
     private double projectX(double relative, double distance) { return 0.5 + 0.5 * relative / distance * projectionX; }
     private double projectY(double relative, double distance) { return 0.5 - 0.5 * relative / distance * projectionY; }
 
+    private BlockPos farLeafMarker() { return new BlockPos(layout.x + 3, layout.y + 9, layout.z - 48); }
+    private int farLeafFogPixels(BufferedImage image) {
+        double eye = cameraY() + mc.player.getEyeHeight();
+        int left = Math.max(0, (int) Math.floor(projectX(-0.5, 65.5) * image.getWidth()) - 4);
+        int right = Math.min(image.getWidth(), (int) Math.ceil(projectX(6.5, 65.5) * image.getWidth()) + 4);
+        int top = Math.max(0, (int) Math.floor(projectY(layout.y + 14 - eye, 65.5) * image.getHeight()) - 4);
+        int bottom = Math.min(image.getHeight(), (int) Math.ceil(projectY(layout.y + 5 - eye, 65.5) * image.getHeight()) + 4);
+        int green = 0;
+        for (int y = top; y < bottom; y++) for (int x = left; x < right; x++) {
+            int rgb = image.getRGB(x, y), g = rgb >>> 8 & 255;
+            if (g > (rgb >>> 16 & 255) + 32 && g > (rgb & 255) + 32) green++;
+        }
+        return green;
+    }
+
     private boolean ready() {
         if (!arenaReady() || densityCalls <= densityBaseline || colorCalls <= colorBaseline
                 || !Float.isFinite(projectionX) || !Float.isFinite(projectionY) || projectionX <= 0 || projectionY <= 0) return false;
+        FogState state = events.fogState();
+        boolean lawMatches = phase == Phase.EDGE_LAW_DRIFT || phase == Phase.EDGE_LAW_FAST ? state != null && state.enabled()
+                && state.mode() == FogState.LINEAR && close(state.start(), observedStart) && close(state.end(), observedEnd)
+                : matches(state, preset);
         return phase == Phase.VANILLA || events.fogAppliedFrames() > appliedBaseline
-                && events.fogMissingDepthFrames() == 0 && matches(events.fogState(), preset);
+                && events.fogMissingDepthFrames() == 0 && lawMatches;
     }
 
     private void captureAndCheck() throws Exception {
@@ -325,6 +413,9 @@ public final class FixtureFog implements AutoCloseable {
         if (mc.world.getBlockState(layout.near).getBlock() != Blocks.QUARTZ_BLOCK
                 || mc.world.getBlockState(layout.far).getBlock() != Blocks.QUARTZ_BLOCK) return false;
         if (edgeDiagnostics) {
+            BlockPos farLeaf = farLeafMarker();
+            if (phase != Phase.RESTORE && (clientWorld.getBlockState(farLeaf).getBlock() != Blocks.LEAVES
+                    || phase != Phase.VANILLA && !events.terrainSectionReady(farLeaf.getX() >> 4, farLeaf.getY() >> 4, farLeaf.getZ() >> 4))) return false;
             for (int dx = 12; dx <= 15; dx++) for (int dy = 1; dy <= 8; dy++) {
                 BlockPos leaf = new BlockPos(layout.x + dx, layout.y + dy, layout.z - 5);
                 if (clientWorld.getBlockState(leaf).getBlock() != Blocks.LEAVES
@@ -372,7 +463,7 @@ public final class FixtureFog implements AutoCloseable {
         preset = null; if (registered) { MinecraftForge.EVENT_BUS.unregister(this); registered = false; }
     }
     private void restoreClient() {
-        unregister(); edgeFirst = null; leafEdges = solidEdge = null; if (!configured) return;
+        unregister(); edgeFirst = null; leafEdges = farLeafEdges = solidEdge = null; if (!configured) return;
         mc.gameSettings.thirdPersonView = originalView; mc.gameSettings.hideGUI = originalHud;
         mc.gameSettings.fovSetting = originalFov; mc.gameSettings.viewBobbing = originalBobbing;
         if (ownsClient()) {
@@ -398,7 +489,8 @@ public final class FixtureFog implements AutoCloseable {
                 + " farPixels=" + Arrays.toString(farPixels) + " nearError=" + nearError + " farError=" + farError
                 + " nearTransmissionError=" + nearTransmissionError + " farTransmissionError=" + farTransmissionError
                 + " edgeSamples=" + (leafEdges == null ? 0 : leafEdges.samples())
-                + " historySamples=" + events.fogHistorySamples() + " historyResets=" + events.fogHistoryResets();
+                + " historySamples=" + events.fogHistorySamples() + " historyResets=" + events.fogHistoryResets()
+                + " history=" + events.fogHistoryDiagnostics() + " fastPeakWeight=" + fastPeakWeight;
     }
     @Override public void close() {
         if (closed) return; closed = true;

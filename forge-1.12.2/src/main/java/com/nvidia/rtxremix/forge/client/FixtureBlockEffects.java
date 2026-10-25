@@ -11,8 +11,12 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.nio.FloatBuffer;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Queue;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
@@ -22,11 +26,15 @@ import net.minecraft.block.state.IBlockState;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.WorldClient;
 import net.minecraft.client.particle.Particle;
+import net.minecraft.client.particle.ParticleManager;
 import net.minecraft.entity.player.EntityPlayerMP;
 import net.minecraft.init.Blocks;
 import net.minecraft.server.integrated.IntegratedServer;
 import net.minecraft.util.EnumParticleTypes;
+import net.minecraft.util.EnumFacing;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.RayTraceResult;
+import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.World;
 import net.minecraft.world.WorldServer;
 import net.minecraftforge.fml.relauncher.ReflectionHelper;
@@ -41,7 +49,8 @@ final class FixtureBlockEffects implements AutoCloseable {
     private static final String DIGGING = "com.TominoCZ.FBP.particle.FBPParticleDigging";
     private static final String PLACEMENT = "com.TominoCZ.FBP.particle.FBPParticleBlock";
     private static final int BREAKER = Integer.MIN_VALUE + 7290;
-    private enum Phase { SETUP, ARRIVE, BASELINE, BASELINE_STABLE, CRACK_EARLY, CRACK_LATE, CRACK_CLEAR, PLANT, STONE,
+    private enum Phase { SETUP, ARRIVE, BASELINE, BASELINE_STABLE, CRACK_EARLY, CRACK_LATE, CRACK_CLEAR,
+        DEBRIS_BACKGROUND, DEBRIS_BASELINE, DEBRIS_STABLE, PLANT, STONE, HIT, DEBRIS_FADE, DEBRIS_REMOVE,
         PLACE_STONE_READY, PLACE_STONE, PLACE_STONE_REST, PLACE_GRASS_READY, PLACE_GRASS, PLACE_GRASS_REST, RETURN, DONE }
     private final Minecraft mc;
     private final ClientEvents events;
@@ -59,7 +68,7 @@ final class FixtureBlockEffects implements AutoCloseable {
     private final float returnYaw, returnPitch;
     private Constructor<?> placementConstructor;
     private Method killPlacement;
-    private Field particleAge, placementHeight;
+    private Field particleAge, placementHeight, particleQueue, particleAlpha, previousDebrisAlpha;
     private final List<Particle> debris = new ArrayList<>(24);
     private Phase phase = Phase.SETUP;
     private Future<?> action;
@@ -67,17 +76,29 @@ final class FixtureBlockEffects implements AutoCloseable {
     private BufferedImage firstPoseImage;
     private BufferedImage crackBaseline;
     private CrackImageObservation crackObservation;
+    private BufferedImage debrisBaseline, debrisEmptyImage, debrisFirstImage, debrisLastImage, debrisFadeImage;
+    private DebrisImageObservation debrisObservation;
+    private DebrisImageObservation.Result debrisResult;
+    private Phase debrisKind = Phase.PLANT;
     private final FloatBuffer projection = BufferUtils.createFloatBuffer(16);
     private float projectionX, projectionY;
     private boolean registered;
     private BlockEffectObservation observation;
     private long since = System.nanoTime(), progress = since, readyFrame = -1, lastFrame = -1, damageHash, debrisHash;
     private int debrisSamples, bursts, attempts, lastBurstTick = Integer.MIN_VALUE;
+    private int renderedFadingDebris;
+    private double renderedAlphaMin = 1, renderedAlphaMax = 1;
+    private Throwable alphaObservationFailure;
+    private boolean shaded;
     private int lastAge = -1;
     private float lastHeight;
     private boolean placementCleaned, cleanupQueued, closed, smoothLighting, clientConfigured;
     // Only server tasks read/write these fields; cleanup is ordered after the setup task.
     private boolean serverConfigured, serverFlying;
+    private final IBlockState[] backdropOriginal = new IBlockState[28];
+    private int backdropSaved;
+    private final IBlockState[] shadeOriginal = new IBlockState[153];
+    private int shadeSaved;
 
     FixtureBlockEffects(Minecraft mc, ClientEvents events, IntegratedServer server, WorldServer world,
             String save, Layout layout, double x, double y, double z, float yaw, float pitch,
@@ -104,6 +125,9 @@ final class FixtureBlockEffects implements AutoCloseable {
         placementConstructor = placementType.getConstructor(World.class, double.class, double.class, double.class, IBlockState.class, long.class);
         killPlacement = placementType.getMethod("killParticle");
         particleAge = ReflectionHelper.findField(Particle.class, "particleAge", "field_70546_d");
+        particleQueue = ReflectionHelper.findField(ParticleManager.class, "queue", "field_187241_h");
+        particleAlpha = ReflectionHelper.findField(Particle.class, "particleAlpha", "field_82339_as");
+        previousDebrisAlpha = ReflectionHelper.findField(Class.forName(DIGGING), "prevParticleAlpha");
         // ClientTick END follows the next particle update, while the screenshot
         // and native counters describe the preceding rendered pose.
         placementHeight = ReflectionHelper.findField(placementType, "prevHeight");
@@ -142,6 +166,7 @@ final class FixtureBlockEffects implements AutoCloseable {
     boolean tick() throws Exception {
         if (!ownsClient() || !events.isEnabled() || events.failureMessage() != null)
             throw new IllegalStateException("Block-effect fixture renderer/world unavailable");
+        if (alphaObservationFailure != null) throw new IllegalStateException("Owned debris alpha observation failed", alphaObservationFailure);
         if (System.nanoTime() - since > TimeUnit.SECONDS.toNanos(60)) {
             capture("block-effects-timeout-" + phase.name().toLowerCase(Locale.ROOT));
             throw new IllegalStateException("Block-effect fixture timed out: " + status());
@@ -188,21 +213,61 @@ final class FixtureBlockEffects implements AutoCloseable {
                     BufferedImage image = output.image(); output.capture("block-effects-cracks-cleared", image);
                     if (!crackObservation.restored(image)) throw new IllegalStateException("Cancelled cracks did not restore the block image");
                     crackObservation = null; log("CRACKS_CLEAR_PASS");
-                    transition(Phase.PLANT); seedDebris(plantState(), layout.plant);
+                    action = server.callFromMainThread(() -> { requireWorld(); installBackdrop(); return null; });
+                    transition(Phase.DEBRIS_BACKGROUND);
+                }
+                break;
+            case DEBRIS_BACKGROUND:
+                if (complete() && settled(backdropReady(), 20)) transition(Phase.DEBRIS_BASELINE);
+                break;
+            case DEBRIS_BASELINE:
+                if (settled(backdropReady(), 20)) {
+                    debrisBaseline = output.image(); transition(Phase.DEBRIS_STABLE);
+                }
+                break;
+            case DEBRIS_STABLE:
+                if (settled(backdropReady(), 20)) {
+                    BufferedImage noise = output.image();
+                    double eye = cameraY() + mc.player.getEyeHeight();
+                    int[] target = DebrisImageObservation.box(noise.getWidth(), noise.getHeight(), -.85, .85,
+                            layout.y + 1 - eye, layout.y + 3.1 - eye, 1.9, 2.5, projectionX, projectionY);
+                    int[] control = DebrisImageObservation.box(noise.getWidth(), noise.getHeight(), 1.7, 2.2,
+                            layout.y + 2.15 - eye, layout.y + 2.75 - eye, 2.49, 2.49, projectionX, projectionY);
+                    debrisObservation = new DebrisImageObservation(debrisBaseline, noise, target, control, debrisKind == Phase.PLANT, shaded);
+                    debrisEmptyImage = shaded ? noise : null;
+                    debrisBaseline = null; debrisFirstImage = debrisLastImage = debrisFadeImage = null; debrisResult = null;
+                    transition(debrisKind); seedDebris();
                 }
                 break;
             case PLANT:
             case STONE:
-                boolean plant = phase == Phase.PLANT;
+            case HIT:
                 observeDebris();
-                if (debrisSamples >= 3) {
-                    capture(plant ? "block-effects-fbp-plant-breaking-debris" : "block-effects-fbp-stone-breaking-debris");
-                    log(plant ? "PLANT_DEBRIS_PASS" : "STONE_DEBRIS_PASS"); clearDebris();
-                    if (plant) { transition(Phase.STONE); seedDebris(Blocks.STONE.getDefaultState(), layout.stone); }
-                    else { attempts = 0; transition(Phase.PLACE_STONE_READY); }
+                if (debrisObservation.passed()) {
+                    if (shaded) { transition(Phase.DEBRIS_FADE); lastFrame = events.renderedFrames(); }
+                    else finishDebris();
                 } else if (mc.player.ticksExisted - lastBurstTick >= 10 && liveDebris() == 0) {
-                    if (bursts >= 3) throw new IllegalStateException("FBP debris expired without captured animation: " + status());
-                    seedDebris(plant ? plantState() : Blocks.STONE.getDefaultState(), plant ? layout.plant : layout.stone);
+                    if (bursts >= 3) {
+                        if (debrisLastImage != null) output.capture("block-effects-fbp-" + (shaded ? "shade-" : "")
+                                + phase.name().toLowerCase(Locale.ROOT) + "-debris-failed", debrisLastImage);
+                        throw new IllegalStateException("FBP debris lacked three visibly lit animated frames: " + status());
+                    }
+                    seedDebris();
+                }
+                break;
+            case DEBRIS_FADE:
+                // Keep the authored lifetime, gravity, scale and alpha. Delaying
+                // PNG writes keeps short late-life poses available to rendering.
+                if (renderedFadingDebris > 0 && events.renderedFrames() > lastFrame) {
+                    debrisFadeImage = output.image(); log("DEBRIS_NATURAL_FADE_OBSERVED"); finishDebris();
+                } else if (liveDebris() == 0) {
+                    log("DEBRIS_NATURAL_FADE_NOT_OBSERVED"); finishDebris();
+                }
+                break;
+            case DEBRIS_REMOVE:
+                if (complete() && settled(arenaReady() && clientWorld.isAirBlock(layout.hitSource())
+                        && events.terrainPendingSectionCount() == 0 && events.terrainRetirementCount() == 0, 20)) {
+                    attempts = 0; transition(Phase.PLACE_STONE_READY);
                 }
                 break;
             case PLACE_STONE_READY:
@@ -263,11 +328,38 @@ final class FixtureBlockEffects implements AutoCloseable {
         return phase == Phase.DONE;
     }
 
-    private void seedDebris(IBlockState state, BlockPos pos) {
+    private void seedDebris() throws ReflectiveOperationException {
         clearDebris(); lastBurstTick = mc.player.ticksExisted; bursts++;
+        if (phase == Phase.HIT) seedHitDebris();
+        else seedBreakingDebris(phase == Phase.PLANT ? plantState() : Blocks.STONE.getDefaultState());
+        lastFrame = events.renderedFrames(); debrisHash = events.particleGeometryHash();
+    }
+
+    private void finishDebris() throws Exception {
+        String kind = (shaded ? "shade-" : "") + debrisKind.name().toLowerCase(Locale.ROOT);
+        if (debrisEmptyImage != null) output.capture("block-effects-fbp-" + kind + "-debris-empty", debrisEmptyImage);
+        output.capture("block-effects-fbp-" + kind + "-debris-first-lit", debrisFirstImage);
+        output.capture("block-effects-fbp-" + kind + "-debris-last-lit", debrisLastImage);
+        if (debrisFadeImage != null) output.capture("block-effects-fbp-" + kind + "-debris-natural-fade", debrisFadeImage);
+        log((shaded ? "SHADE_" : "") + debrisKind.name() + "_DEBRIS_PIXELS_PASS"); clearDebris();
+        debrisEmptyImage = debrisFirstImage = debrisLastImage = debrisFadeImage = null; debrisObservation = null;
+        if (debrisKind != Phase.HIT) {
+            debrisKind = debrisKind == Phase.PLANT ? Phase.STONE : Phase.HIT;
+            transition(Phase.DEBRIS_BASELINE);
+        } else if (!shaded) {
+            shaded = true; debrisKind = Phase.PLANT;
+            action = server.callFromMainThread(() -> { requireWorld(); installShade(); return null; });
+            transition(Phase.DEBRIS_BACKGROUND);
+        } else {
+            action = server.callFromMainThread(() -> { requireWorld(); restoreShade(); restoreBackdrop(); return null; });
+            transition(Phase.DEBRIS_REMOVE);
+        }
+    }
+
+    private void seedBreakingDebris(IBlockState state) {
         for (int i = 0; i < 18; i++) {
             Particle particle = mc.effectRenderer.spawnEffectParticle(EnumParticleTypes.BLOCK_CRACK.getParticleID(),
-                    pos.getX() + .2 + i % 3 * .3, pos.getY() + .2 + i / 9 * .3, pos.getZ() + .2 + i / 3 % 3 * .3,
+                    layout.x + .2 + i % 3 * .3, layout.y + 1.4 + i / 9 * .3, layout.z + 9.15 + i / 3 % 3 * .1,
                     (i % 3 - 1) * .025, .04, (i / 3 % 3 - 1) * .025, Block.getStateId(state));
             if (particle == null || !DIGGING.equals(particle.getClass().getName())) {
                 if (particle != null) particle.setExpired();
@@ -275,13 +367,77 @@ final class FixtureBlockEffects implements AutoCloseable {
             }
             debris.add(particle);
         }
-        lastFrame = events.renderedFrames(); debrisHash = events.particleGeometryHash();
     }
 
-    private void observeDebris() {
+    @SuppressWarnings("unchecked")
+    private void seedHitDebris() throws IllegalAccessException {
+        Queue<Particle> queue = (Queue<Particle>) particleQueue.get(mc.effectRenderer);
+        if (queue.size() > 1024) throw new IllegalStateException("Particle queue is too busy for owned hit observation");
+        Set<Particle> before = Collections.newSetFromMap(new IdentityHashMap<Particle, Boolean>()); before.addAll(queue);
+        RayTraceResult original = mc.objectMouseOver; BlockPos source = layout.hitSource();
+        try {
+            // FBP's smart hit path reads this ordinary Minecraft hit result.
+            mc.objectMouseOver = new RayTraceResult(new Vec3d(source.getX() + .5, source.getY() + .5,
+                    source.getZ() + 1), EnumFacing.SOUTH, source);
+            for (int i = 0; i < 12; i++) mc.effectRenderer.addBlockHitEffects(source, EnumFacing.SOUTH);
+        } finally {
+            mc.objectMouseOver = original;
+            for (Particle particle : queue) if (!before.contains(particle)) debris.add(particle);
+        }
+        if (debris.isEmpty()) throw new IllegalStateException("Installed manager emitted no block-hit debris");
+        for (Particle particle : debris) if (!DIGGING.equals(particle.getClass().getName()))
+            throw new IllegalStateException("Block-hit path emitted unsupported debris " + particle.getClass().getName());
+    }
+
+    private void observeDebris() throws Exception {
         long frame = events.renderedFrames(), hash = events.particleGeometryHash();
         if (frame <= lastFrame || liveDebris() == 0 || events.particleQuads() < 6 || hash == debrisHash) return;
         lastFrame = frame; debrisHash = hash; debrisSamples++;
+        BufferedImage image = output.image(); debrisResult = debrisObservation.sample(image, frame, hash);
+        debrisLastImage = image;
+        if (debrisResult.visible && debrisFirstImage == null) debrisFirstImage = image;
+        if (debrisSamples <= 3 || debrisResult.visible) output.log("BLOCK_EFFECTS_DEBRIS_PIXELS",
+                "kind=" + phase + " shaded=" + shaded + " burst=" + bursts + " " + debrisResult.describe());
+    }
+
+    private void installBackdrop() {
+        for (int i = 0; i < backdropOriginal.length; i++) {
+            BlockPos pos = layout.backdrop(i); backdropOriginal[i] = world.getBlockState(pos); backdropSaved = i + 1;
+            world.setBlockState(pos, pos.equals(layout.hitSource()) ? Blocks.STONE.getDefaultState() : Blocks.OBSIDIAN.getDefaultState(), 3);
+        }
+    }
+    private void restoreBackdrop() {
+        for (int i = 0; i < backdropSaved; i++) world.setBlockState(layout.backdrop(i), backdropOriginal[i], 3);
+        backdropSaved = 0;
+    }
+    private void installShade() {
+        for (int i = 0; i < shadeOriginal.length; i++) {
+            BlockPos pos = layout.shade(i); shadeOriginal[i] = world.getBlockState(pos); shadeSaved = i + 1;
+            world.setBlockState(pos, Blocks.STONE.getDefaultState(), 3);
+        }
+        // This block already belongs to the snapshotted backdrop transaction.
+        world.setBlockState(layout.shadeReference(), Blocks.STONE.getDefaultState(), 3);
+    }
+    private void restoreShade() {
+        for (int i = 0; i < shadeSaved; i++) world.setBlockState(layout.shade(i), shadeOriginal[i], 3);
+        shadeSaved = 0;
+    }
+    private boolean backdropReady() {
+        for (int i = 0; i < backdropOriginal.length; i++) {
+            BlockPos pos = layout.backdrop(i);
+            if (clientWorld.getBlockState(pos).getBlock() != (pos.equals(layout.hitSource())
+                    || shaded && pos.equals(layout.shadeReference()) ? Blocks.STONE : Blocks.OBSIDIAN)
+                    || !events.terrainSectionReady(pos.getX() >> 4, pos.getY() >> 4, pos.getZ() >> 4)) return false;
+        }
+        if (shaded) {
+            for (int i = 0; i < shadeOriginal.length; i++) {
+                BlockPos pos = layout.shade(i);
+                if (clientWorld.getBlockState(pos).getBlock() != Blocks.STONE
+                        || !events.terrainSectionReady(pos.getX() >> 4, pos.getY() >> 4, pos.getZ() >> 4)) return false;
+            }
+            if (clientWorld.canSeeSky(new BlockPos(layout.x, layout.y + 2, layout.z + 9))) return false;
+        }
+        return projectionX > 0 && projectionY > 0 && events.terrainPendingSectionCount() == 0 && events.terrainRetirementCount() == 0;
     }
 
     private void spawnPlacement(IBlockState state, BlockPos pos) throws ReflectiveOperationException {
@@ -326,6 +482,16 @@ final class FixtureBlockEffects implements AutoCloseable {
         if (!registered || !ownsClient()) return;
         projection.clear(); GL11.glGetFloat(GL11.GL_PROJECTION_MATRIX, projection);
         projectionX = projection.get(0); projectionY = projection.get(5);
+        renderedFadingDebris = 0; renderedAlphaMin = 1; renderedAlphaMax = 0;
+        try {
+            for (Particle particle : debris) if (particle.isAlive()) {
+                double previous = previousDebrisAlpha.getDouble(particle);
+                double current = particleAlpha.getFloat(particle);
+                double alpha = previous + (current - previous) * event.getPartialTicks();
+                renderedAlphaMin = Math.min(renderedAlphaMin, alpha); renderedAlphaMax = Math.max(renderedAlphaMax, alpha);
+                if (current < previous && alpha >= .05 && alpha <= .85) renderedFadingDebris++;
+            }
+        } catch (IllegalAccessException error) { alphaObservationFailure = error; }
     }
     private int[] face(BlockPos position, BufferedImage image) {
         return CrackImageObservation.face(image.getWidth(), image.getHeight(), position.getX() - cameraX(),
@@ -373,6 +539,8 @@ final class FixtureBlockEffects implements AutoCloseable {
     private Future<?> restoreServer() {
         return server.callFromMainThread(() -> {
             requireWorld();
+            restoreShade();
+            restoreBackdrop();
             // Re-sending just the two owned animation blocks repairs a client-side
             // dummy left by interruption, without touching any unrelated block.
             world.notifyBlockUpdate(layout.stone, world.getBlockState(layout.stone), world.getBlockState(layout.stone), 3);
@@ -413,10 +581,16 @@ final class FixtureBlockEffects implements AutoCloseable {
                 + " damageHash=" + events.damageGeometryHash() + " particleQuads=" + events.particleQuads()
                 + " particleHash=" + events.particleGeometryHash() + " liveDebris=" + liveDebris()
                 + " debrisSamples=" + debrisSamples + " bursts=" + bursts + " placementAttempts=" + attempts
+                + " shaded=" + shaded + " fadingDebris=" + renderedFadingDebris
+                + " alphaMin=" + renderedAlphaMin + " alphaMax=" + renderedAlphaMax
+                + " debrisPixels={" + (debrisResult == null ? "not-sampled" : debrisResult.describe()) + "}"
                 + " placementAlive=" + (placement != null && placement.isAlive()) + " age=" + lastAge + " height=" + lastHeight
                 + " placementSamples=" + (observation == null ? 0 : observation.samples())
                 + " correctedPlacementQuadTotal=" + EffectCaptureHooks.placedColorQuadTotal()
                 + " opaqueCutoutPlacementQuadTotal=" + EffectCaptureHooks.placedOpaqueCutoutQuadTotal()
+                + " debrisQuadTotal=" + EffectCaptureHooks.debrisQuadTotal()
+                + " opaqueCutoutDebrisQuadTotal=" + EffectCaptureHooks.debrisOpaqueCutoutQuadTotal()
+                + " fadedDebrisQuadTotal=" + EffectCaptureHooks.debrisFadedQuadTotal()
                 + " stone=" + clientWorld.getBlockState(layout.stone).getBlock().getRegistryName()
                 + " grass=" + clientWorld.getBlockState(layout.grass).getBlock().getRegistryName()
                 + " pendingTerrain=" + events.terrainPendingSectionCount() + " skippedQuads=" + events.effectSkippedQuads();
@@ -431,7 +605,8 @@ final class FixtureBlockEffects implements AutoCloseable {
                 catch (ReflectiveOperationException error) { throw new IllegalStateException("Owned FBP animation cleanup failed", error); }
             }
         } finally {
-            firstPoseImage = crackBaseline = null; crackObservation = null;
+            firstPoseImage = crackBaseline = debrisBaseline = debrisEmptyImage = debrisFirstImage = debrisLastImage = debrisFadeImage = null;
+            crackObservation = null; debrisObservation = null;
             restoreClient();
             if (!cleanupQueued && action != null) { cleanupQueued = true; restoreServer(); }
             closed = true;
@@ -445,6 +620,15 @@ final class FixtureBlockEffects implements AutoCloseable {
             this.x = x; this.y = y; this.z = z;
             dark = new BlockPos(x - 2, y + 1, z + 2); bright = new BlockPos(x + 2, y + 1, z + 2);
             plant = new BlockPos(x - 2, y + 1, z + 5); stone = new BlockPos(x, y + 1, z + 5); grass = new BlockPos(x + 2, y + 1, z + 5);
+        }
+        BlockPos backdrop(int index) { return new BlockPos(x - 3 + index % 7, y + 1 + index / 7, z + 8); }
+        BlockPos hitSource() { return new BlockPos(x, y + 2, z + 8); }
+        BlockPos shadeReference() { return new BlockPos(x + 2, y + 2, z + 8); }
+        BlockPos shade(int index) {
+            if (index < 0 || index >= 153) throw new IndexOutOfBoundsException("Shade block " + index);
+            if (index < 81) return new BlockPos(x - 4 + index % 9, y + 5, z + 6 + index / 9);
+            int wall = index - 81;
+            return new BlockPos(x + (wall < 36 ? -4 : 4), y + 1 + wall % 36 / 9, z + 6 + wall % 9);
         }
     }
 }
