@@ -4,6 +4,8 @@
  */
 package com.nvidia.rtxremix.forge.effect;
 
+import com.nvidia.rtxremix.forge.texture.SpriteOpacity;
+
 import java.util.Arrays;
 import java.util.Collections;
 import net.minecraft.client.renderer.block.model.BakedQuad;
@@ -16,52 +18,52 @@ import static org.junit.Assert.*;
 
 public class PlacedBlockOpacityTest {
     @Test public void sourceFramesDistinguishOpaqueCutoutAndFractionalAlphaAcrossNewDraws() {
-        PlacedBlockOpacity proof = new PlacedBlockOpacity();
+        SpriteOpacity proof = new SpriteOpacity();
         TextureAtlasSprite sprite = sprite(2, 2);
         int[][] first = {{-1, -1, -1, -1}, {-1}}, second = {{-1, -1, -1, -1}, {-1}};
         sprite.setFramesTextureData(Arrays.asList(first, second));
-        assertEquals(PlacedBlockOpacity.OPAQUE, proof.quad(quad(sprite)));
+        assertEquals(SpriteOpacity.OPAQUE, proof.quad(quad(sprite)));
         proof.clear(); second[1][0] = 0x80ffffff;
-        assertEquals(PlacedBlockOpacity.UNKNOWN, proof.quad(quad(sprite)));
+        assertEquals(SpriteOpacity.UNKNOWN, proof.quad(quad(sprite)));
         proof.clear(); second[1][0] = -1; second[0][3] = 0;
-        assertEquals(PlacedBlockOpacity.CUTOUT, proof.quad(quad(sprite)));
+        assertEquals(SpriteOpacity.CUTOUT, proof.quad(quad(sprite)));
         proof.clear(); second[1][0] = 0x80ffffff;
-        assertEquals(PlacedBlockOpacity.CUTOUT, proof.quad(quad(sprite)));
+        assertEquals(SpriteOpacity.CUTOUT, proof.quad(quad(sprite)));
         proof.clear(); second[0][3] = 0xfeffffff;
-        assertEquals(PlacedBlockOpacity.UNKNOWN, proof.quad(quad(sprite)));
+        assertEquals(SpriteOpacity.UNKNOWN, proof.quad(quad(sprite)));
         proof.clear(); second[0][3] = -1; second[1][0] = -1;
-        assertEquals(PlacedBlockOpacity.OPAQUE, proof.quad(quad(sprite)));
-        proof.clear(); assertEquals(PlacedBlockOpacity.OPAQUE, proof.quad(quad(sprite(1, 1))));
+        assertEquals(SpriteOpacity.OPAQUE, proof.quad(quad(sprite)));
+        proof.clear(); assertEquals(SpriteOpacity.OPAQUE, proof.quad(quad(sprite(1, 1))));
     }
 
     @Test public void spriteProofCannotCoverUnknownPixelsOrMalformedCpuFrames() {
-        PlacedBlockOpacity proof = new PlacedBlockOpacity();
+        SpriteOpacity proof = new SpriteOpacity();
         TextureAtlasSprite sprite = sprite(2, 2);
         BakedQuad escaped = quad(sprite);
         escaped.getVertexData()[4] = Float.floatToIntBits(sprite.getMinU() - .01f);
-        assertEquals(PlacedBlockOpacity.UNKNOWN, proof.quad(escaped));
+        assertEquals(SpriteOpacity.UNKNOWN, proof.quad(escaped));
         escaped.getVertexData()[4] = Float.floatToIntBits(Float.NaN);
-        assertEquals(PlacedBlockOpacity.UNKNOWN, proof.quad(escaped));
+        assertEquals(SpriteOpacity.UNKNOWN, proof.quad(escaped));
         sprite.setFramesTextureData(Collections.singletonList(new int[][] {{-1}}));
-        assertEquals(PlacedBlockOpacity.UNKNOWN, proof.quad(quad(sprite))); proof.clear();
+        assertEquals(SpriteOpacity.UNKNOWN, proof.quad(quad(sprite))); proof.clear();
         sprite.setFramesTextureData(Collections.singletonList(new int[][] {null}));
-        assertEquals(PlacedBlockOpacity.UNKNOWN, proof.quad(quad(sprite))); proof.clear();
+        assertEquals(SpriteOpacity.UNKNOWN, proof.quad(quad(sprite))); proof.clear();
         sprite.setFramesTextureData(Collections.<int[][]>emptyList());
-        assertEquals(PlacedBlockOpacity.UNKNOWN, proof.quad(quad(sprite))); proof.clear();
-        assertEquals(PlacedBlockOpacity.UNKNOWN, proof.quad(quad(new UnknownSprite())));
+        assertEquals(SpriteOpacity.UNKNOWN, proof.quad(quad(sprite))); proof.clear();
+        assertEquals(SpriteOpacity.UNKNOWN, proof.quad(quad(new UnknownSprite())));
     }
 
     @Test public void repeatedFacesShareOneScanButTheFrameBudgetSurvivesNewDraws() {
-        PlacedBlockOpacity proof = new PlacedBlockOpacity();
+        SpriteOpacity proof = new SpriteOpacity();
         BakedQuad large = quad(sprite(1024, 1024)), small = quad(sprite(1, 1));
-        assertEquals(PlacedBlockOpacity.OPAQUE, proof.quad(large));
-        for (int face = 0; face < 6; face++) assertEquals(PlacedBlockOpacity.OPAQUE, proof.quad(large));
-        assertEquals(PlacedBlockOpacity.UNKNOWN, proof.quad(small));
-        proof.clear(); assertEquals(PlacedBlockOpacity.UNKNOWN, proof.quad(small));
-        proof.beginFrame(); assertEquals(PlacedBlockOpacity.OPAQUE, proof.quad(small));
+        assertEquals(SpriteOpacity.OPAQUE, proof.quad(large));
+        for (int face = 0; face < 6; face++) assertEquals(SpriteOpacity.OPAQUE, proof.quad(large));
+        assertEquals(SpriteOpacity.UNKNOWN, proof.quad(small));
+        proof.clear(); assertEquals(SpriteOpacity.UNKNOWN, proof.quad(small));
+        proof.beginFrame(); assertEquals(SpriteOpacity.OPAQUE, proof.quad(small));
         proof.beginFrame();
-        for (int i = 0; i < 32; i++) assertEquals(PlacedBlockOpacity.OPAQUE, proof.quad(quad(sprite(1, 1))));
-        assertEquals(PlacedBlockOpacity.UNKNOWN, proof.quad(quad(sprite(1, 1))));
+        for (int i = 0; i < 32; i++) assertEquals(SpriteOpacity.OPAQUE, proof.quad(quad(sprite(1, 1))));
+        assertEquals(SpriteOpacity.UNKNOWN, proof.quad(quad(sprite(1, 1))));
     }
 
     static TextureAtlasSprite sprite(int width, int height) {

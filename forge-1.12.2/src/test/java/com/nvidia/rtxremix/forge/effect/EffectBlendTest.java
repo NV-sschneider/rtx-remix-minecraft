@@ -4,6 +4,8 @@
  */
 package com.nvidia.rtxremix.forge.effect;
 
+import com.nvidia.rtxremix.forge.texture.SpriteOpacity;
+
 import com.nvidia.rtxremix.InstanceInfoBlendEXT;
 import org.junit.Test;
 import static org.junit.Assert.*;
@@ -11,7 +13,7 @@ import static org.junit.Assert.*;
 public class EffectBlendTest {
     @Test public void provenOpaquePlacementKeepsItsAlphaTestWithoutPromotingEmissionOrDamage() {
         long ordinary = EffectBlend.key(true, 770, 771, 32774, 1, 0, 32774, true, 516, 26);
-        InstanceInfoBlendEXT state = EffectBlend.extension(EffectBlend.opaquePlacement(ordinary, PlacedBlockOpacity.OPAQUE));
+        InstanceInfoBlendEXT state = EffectBlend.extension(EffectBlend.opaquePlacement(ordinary, SpriteOpacity.OPAQUE));
         assertEquals(0, state.alphaBlendEnabled);
         assertEquals(1, state.alphaTestEnabled);
         assertEquals(4, state.alphaTestCompareOp);
@@ -20,7 +22,7 @@ public class EffectBlendTest {
                 EffectBlend.key(true, 770, 1, 32774, 1, 0, 32774, true, 516, 26),
                 EffectBlend.key(true, 1, 1, 32774, 1, 1, 32774, true, 516, 26),
                 EffectBlend.key(true, true, 774, 768, 32774, 1, 0, 32774, true, 516, 26)})
-            assertEquals(key, EffectBlend.opaquePlacement(key, PlacedBlockOpacity.OPAQUE));
+            assertEquals(key, EffectBlend.opaquePlacement(key, SpriteOpacity.OPAQUE));
     }
 
     @Test public void binaryPlacementOnlyDropsBlendingWhenItsCapturedTestRejectsZero() {
@@ -28,14 +30,14 @@ public class EffectBlendTest {
             boolean[] zeroPasses = {false, 0 < reference, 0 == reference, 0 <= reference,
                     0 > reference, 0 != reference, 0 >= reference, true};
             long original = EffectBlend.key(true, 770, 771, 32774, 1, 0, 32774, true, compare, reference);
-            InstanceInfoBlendEXT state = EffectBlend.extension(EffectBlend.opaquePlacement(original, PlacedBlockOpacity.CUTOUT));
+            InstanceInfoBlendEXT state = EffectBlend.extension(EffectBlend.opaquePlacement(original, SpriteOpacity.CUTOUT));
             assertEquals(zeroPasses[compare - 512] ? 1 : 0, state.alphaBlendEnabled);
             assertEquals(compare - 512, state.alphaTestCompareOp);
             assertEquals(reference, state.alphaTestReferenceValue & 255);
-            assertEquals(original, EffectBlend.opaquePlacement(original, PlacedBlockOpacity.UNKNOWN));
+            assertEquals(original, EffectBlend.opaquePlacement(original, SpriteOpacity.UNKNOWN));
         }
         long disabled = EffectBlend.key(true, 770, 771, 32774, 1, 0, 32774, false, 516, 1);
-        assertEquals(disabled, EffectBlend.opaquePlacement(disabled, PlacedBlockOpacity.CUTOUT));
+        assertEquals(disabled, EffectBlend.opaquePlacement(disabled, SpriteOpacity.CUTOUT));
     }
 
     @Test public void damageUsesSupportedAlphaCracksOnlyInsideItsExactMultiplicativeScope() {

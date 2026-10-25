@@ -2,29 +2,35 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
-package com.nvidia.rtxremix.forge.effect;
+package com.nvidia.rtxremix.forge.texture;
 
-import com.nvidia.rtxremix.forge.texture.SpriteAnimationContract;
 import net.minecraft.client.renderer.block.model.BakedQuad;
 import net.minecraft.client.renderer.texture.TextureAtlasSprite;
 import net.minecraft.client.renderer.vertex.VertexFormat;
 import net.minecraft.client.renderer.vertex.VertexFormatElement;
 
-/** Scope-local alpha proof for placement draws, with one shared per-frame scan budget. */
-final class PlacedBlockOpacity {
-    static final int UNKNOWN = 0, CUTOUT = 1, OPAQUE = 2;
+/** Scope-local sprite alpha proof with a bounded pixel budget shared across that frame's draws. */
+public final class SpriteOpacity {
+    public static final int UNKNOWN = 0, CUTOUT = 1, OPAQUE = 2;
     static final int MAX_PIXELS = 1024 * 1024;
-    private final TextureAtlasSprite[] checked = new TextureAtlasSprite[32];
-    private final int[] coverage = new int[checked.length];
+    private final TextureAtlasSprite[] checked;
+    private final int[] coverage;
     private int count, remaining = MAX_PIXELS;
 
-    void beginFrame() { clear(); remaining = MAX_PIXELS; }
-    void clear() {
+    public SpriteOpacity() { this(32); }
+    /** Terrain visits more distinct sprites per frame; pixel work keeps the same shared bound. */
+    public SpriteOpacity(int capacity) {
+        if (capacity < 1 || capacity > 256) throw new IllegalArgumentException("Sprite proof cache capacity must be 1..256");
+        checked = new TextureAtlasSprite[capacity]; coverage = new int[capacity];
+    }
+
+    public void beginFrame() { clear(); remaining = MAX_PIXELS; }
+    public void clear() {
         for (int i = 0; i < count; i++) checked[i] = null;
         count = 0;
     }
 
-    int quad(BakedQuad quad) {
+    public int quad(BakedQuad quad) {
         TextureAtlasSprite sprite = quad.getSprite();
         VertexFormat format = quad.getFormat();
         if (sprite == null || !format.hasUvOffset(0)) return UNKNOWN;
@@ -47,14 +53,35 @@ final class PlacedBlockOpacity {
             if (!Float.isFinite(u) || !Float.isFinite(t) || u < minU || u > maxU || t < minV || t > maxV)
                 return UNKNOWN;
         }
+        return sprite(sprite);
+    }
+
+    /** Caller must separately prove all emitted UVs remain inside this sprite's bounds. */
+    public int sprite(TextureAtlasSprite sprite) {
+        if (sprite == null) return UNKNOWN;
         for (int i = 0; i < count; i++) if (checked[i] == sprite) return coverage[i];
         if (count == checked.length) return UNKNOWN;
-        int result = sprite(sprite);
+        int result = scanSprite(sprite);
         checked[count] = sprite; coverage[count++] = result;
         return result;
     }
 
-    private int sprite(TextureAtlasSprite sprite) {
+    /** Binary source coverage requires the draw's existing alpha test to reject zero. */
+    public static boolean unblended(int coverage, int compare, int reference) {
+        if (coverage == OPAQUE) return true;
+        if (coverage != CUTOUT) return false;
+        switch (compare) {
+            case 0: return true;
+            case 1: return reference == 0;
+            case 2: return reference != 0;
+            case 4: return true;
+            case 5: return reference == 0;
+            case 6: return reference != 0;
+            default: return false;
+        }
+    }
+
+    private int scanSprite(TextureAtlasSprite sprite) {
         if (SpriteAnimationContract.unsupportedPixels(sprite) != null) return UNKNOWN;
         int width = sprite.getIconWidth(), height = sprite.getIconHeight(), frames = sprite.getFrameCount();
         if (width <= 0 || height <= 0 || (long) width * height > remaining || frames <= 0 || frames > 256)
@@ -62,7 +89,7 @@ final class PlacedBlockOpacity {
         int result = OPAQUE;
         // Authored level-zero fractional alpha always keeps blending. Binary
         // sprites use the existing alpha test as cutouts, including filtered
-        // mip edges. No source proof survives this placement draw.
+        // mip edges. No source proof survives its owning draw scope.
         for (int frame = 0; frame < frames; frame++) {
             int[][] levels = sprite.getFrameTextureData(frame);
             if (levels == null || levels.length == 0 || levels.length > 31 || levels[0] == null) return UNKNOWN;

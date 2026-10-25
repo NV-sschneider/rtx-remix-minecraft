@@ -4,6 +4,8 @@
  */
 package com.nvidia.rtxremix.forge.effect;
 
+import com.nvidia.rtxremix.forge.texture.SpriteOpacity;
+
 import com.nvidia.rtxremix.InstanceInfoBlendEXT;
 
 /** Supported fixed-function surfaces, including the alpha approximation of vanilla's crack decal. */
@@ -54,21 +56,7 @@ final class EffectBlend {
         // The surrounding particle pass enables blending even for a fully
         // opaque or cutout block model. Keep fractional alpha and the alpha test.
         if (key < 0 || (key & DAMAGE) != 0 || emissive(key)) return key;
-        return coverage == PlacedBlockOpacity.OPAQUE || coverage == PlacedBlockOpacity.CUTOUT && rejectsZero(key)
-                ? key & ~1L : key;
-    }
-
-    private static boolean rejectsZero(long key) {
-        int reference = (int) (key >> 4) & 255;
-        switch ((int) (key >> 1) & 7) {
-            case 0: return true;
-            case 1: return reference == 0;
-            case 2: return reference != 0;
-            case 4: return true;
-            case 5: return reference == 0;
-            case 6: return reference != 0;
-            default: return false;
-        }
+        return SpriteOpacity.unblended(coverage, (int) (key >> 1) & 7, (int) (key >> 4) & 255) ? key & ~1L : key;
     }
 
     static InstanceInfoBlendEXT extension(long key) {

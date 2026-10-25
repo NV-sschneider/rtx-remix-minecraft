@@ -4,6 +4,8 @@
  */
 package com.nvidia.rtxremix.forge.effect;
 
+import com.nvidia.rtxremix.forge.texture.SpriteOpacity;
+
 import java.util.List;
 import net.minecraft.block.state.IBlockState;
 import net.minecraft.client.renderer.BufferBuilder;
@@ -27,7 +29,7 @@ final class PlacedBlockColors implements IBakedModel {
         }
     };
     private final int[] colors = new int[CapturedEffectBatch.MAX_QUADS * 4];
-    private final PlacedBlockOpacity opacity = new PlacedBlockOpacity();
+    private final SpriteOpacity opacity = new SpriteOpacity();
     private IBakedModel delegate;
     private Tint tint;
     private BufferBuilder pending;
@@ -38,7 +40,7 @@ final class PlacedBlockColors implements IBakedModel {
     void beginFrame() { clear(); opacity.beginFrame(); }
 
     void begin(IBakedModel model, Tint tint) {
-        clear(); delegate = model; this.tint = tint; valid = true; coverage = PlacedBlockOpacity.OPAQUE;
+        clear(); delegate = model; this.tint = tint; valid = true; coverage = SpriteOpacity.OPAQUE;
     }
 
     void finish(BufferBuilder buffer, boolean success) {
@@ -58,11 +60,11 @@ final class PlacedBlockColors implements IBakedModel {
 
     int coverage(BufferBuilder buffer) {
         return pending == buffer && valid && count != 0 && buffer.getVertexCount() == count
-                ? coverage : PlacedBlockOpacity.UNKNOWN;
+                ? coverage : SpriteOpacity.UNKNOWN;
     }
 
     void clear() {
-        delegate = null; tint = null; pending = null; count = 0; valid = false; coverage = PlacedBlockOpacity.UNKNOWN;
+        delegate = null; tint = null; pending = null; count = 0; valid = false; coverage = SpriteOpacity.UNKNOWN;
         opacity.clear();
     }
 
@@ -93,13 +95,13 @@ final class PlacedBlockColors implements IBakedModel {
                 }
             }
         }
-        if (coverage != PlacedBlockOpacity.UNKNOWN) coverage = Math.min(coverage, opacity.quad(quad));
+        if (coverage != SpriteOpacity.UNKNOWN) coverage = Math.min(coverage, opacity.quad(quad));
         for (int v = 0; v < 4; v++) {
             int at = v * stride + format.getColorOffset();
             colors[count++] = !format.hasColor() ? 0xff000000 | tint & 0xffffff
                     : channel(data, at + 3) << 24 | channel(data, at) * (tint >> 16 & 255) / 255 << 16
                     | channel(data, at + 1) * (tint >> 8 & 255) / 255 << 8 | channel(data, at + 2) * (tint & 255) / 255;
-            if (colors[count - 1] >>> 24 != 255) coverage = PlacedBlockOpacity.UNKNOWN;
+            if (colors[count - 1] >>> 24 != 255) coverage = SpriteOpacity.UNKNOWN;
         }
     }
 

@@ -4,6 +4,8 @@
  */
 package com.nvidia.rtxremix.forge.effect;
 
+import com.nvidia.rtxremix.forge.texture.SpriteOpacity;
+
 import java.util.Collections;
 import java.util.List;
 import net.minecraft.block.state.IBlockState;
@@ -25,18 +27,18 @@ public class PlacedBlockColorsTest {
         BufferBuilder draw = draw(4);
         observer.begin(new Model(Collections.singletonList(quad)), index -> 0xffffff);
         observer.getQuads(null, null, 0); observer.finish(draw, true);
-        assertEquals(PlacedBlockOpacity.UNKNOWN, observer.coverage(draw(4)));
-        assertEquals(PlacedBlockOpacity.OPAQUE, observer.coverage(draw));
-        assertNotNull(observer.consume(draw)); assertEquals(PlacedBlockOpacity.UNKNOWN, observer.coverage(draw));
+        assertEquals(SpriteOpacity.UNKNOWN, observer.coverage(draw(4)));
+        assertEquals(SpriteOpacity.OPAQUE, observer.coverage(draw));
+        assertNotNull(observer.consume(draw)); assertEquals(SpriteOpacity.UNKNOWN, observer.coverage(draw));
         quad.getVertexData()[3] = 0x80ffffff;
         observer.begin(new Model(Collections.singletonList(quad)), index -> 0xffffff);
         observer.getQuads(null, null, 0); observer.finish(draw, true);
-        assertEquals(PlacedBlockOpacity.UNKNOWN, observer.coverage(draw));
+        assertEquals(SpriteOpacity.UNKNOWN, observer.coverage(draw));
         assertEquals(0x80ffffff, observer.consume(draw)[0]);
         quad.getVertexData()[3] = 0x00ffffff;
         observer.begin(new Model(Collections.singletonList(quad)), index -> 0xffffff);
         observer.getQuads(null, null, 0); observer.finish(draw, true);
-        assertEquals("Mixed binary vertex alpha interpolates fractional coverage", PlacedBlockOpacity.UNKNOWN, observer.coverage(draw));
+        assertEquals("Mixed binary vertex alpha interpolates fractional coverage", SpriteOpacity.UNKNOWN, observer.coverage(draw));
     }
 
     @Test public void grassStyleOpaqueFacesAndBinaryOverlaysShareCutoutCoverageWithoutLosingColors() {
@@ -49,13 +51,13 @@ public class PlacedBlockColorsTest {
         BufferBuilder draw = draw(40);
         observer.begin(new Model(quads), index -> 0xffffff);
         observer.getQuads(null, null, 0); observer.finish(draw, true);
-        assertEquals(PlacedBlockOpacity.CUTOUT, observer.coverage(draw));
+        assertEquals(SpriteOpacity.CUTOUT, observer.coverage(draw));
         int[] colors = observer.consume(draw);
         for (int i = 0; i < 40; i++) assertEquals(-1, colors[i]);
         cutout.getFrameTextureData(0)[0][2] = 0x01ffffff;
         observer.begin(new Model(quads), index -> 0xffffff);
         observer.getQuads(null, null, 0); observer.finish(draw, true);
-        assertEquals(PlacedBlockOpacity.UNKNOWN, observer.coverage(draw));
+        assertEquals(SpriteOpacity.UNKNOWN, observer.coverage(draw));
         assertNotNull(observer.consume(draw));
     }
 
