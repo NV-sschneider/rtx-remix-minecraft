@@ -368,6 +368,12 @@ public final class ClientEvents {
     long terrainRetiredSectionCount() { return renderer.terrainRetiredSectionCount(); }
     long terrainDiscardedBuildCount() { return renderer.terrainDiscardedBuildCount(); }
     long terrainCapturedBytes() { return renderer.terrainCapturedBytes(); }
+    long terrainMeshBudgetBytes() { return renderer.terrainMeshBudgetBytes(); }
+    int terrainDeferredSectionCount() { return renderer.terrainDeferredSectionCount(); }
+    int terrainDiscoveryCycleFrames() { return renderer.terrainDiscoveryCycleFrames(); }
+    String terrainPressureDiagnostics() { return renderer.terrainPressureDiagnostics(); }
+    long terrainEvictedSectionCount() { return renderer.terrainEvictedSectionCount(); }
+    long terrainInvalidationCount() { return renderer.terrainInvalidationCount(); }
     boolean terrainCapacityLimited() { return renderer.terrainCapacityLimited(); }
     boolean terrainSectionReady(int x, int y, int z) { return renderer.terrainSectionReady(x, y, z); }
     long terrainSectionRevision(int x, int y, int z) { return renderer.terrainSectionRevision(x, y, z); }

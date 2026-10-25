@@ -415,6 +415,12 @@ final class PrototypeRenderer {
     boolean terrainColumnCaptured(int x, int z) { return terrain != null && terrain.isColumnCaptured(x, z); }
     int terrainSectionCount() { return terrain == null ? 0 : terrain.getSectionCount(); }
     int terrainPendingSectionCount() { return terrain == null ? 0 : terrain.getPendingSectionCount(); }
+    int terrainDeferredSectionCount() { return terrain == null ? 0 : terrain.getDeferredSectionCount(); }
+    int terrainDiscoveryCycleFrames() { return terrain == null ? 0 : terrain.getDiscoveryCycleFrames(); }
+    String terrainPressureDiagnostics() { return terrain == null ? "terrain=absent" : terrain.getPressureDiagnostics(); }
+    long terrainEvictedSectionCount() { return terrain == null ? 0 : terrain.getEvictedSectionCount(); }
+    long terrainInvalidationCount() { return terrain == null ? 0 : terrain.getInvalidationCount(); }
+    long terrainMeshBudgetBytes() { return terrain == null ? 0 : terrain.getMeshBudgetBytes(); }
     int terrainRetirementCount() { return terrain == null ? 0 : terrain.getRetirementCount(); }
     int terrainResourceCount() { return terrain == null ? 0 : terrain.getResourceCount(); }
     long terrainWaterVertexCount() { return terrain == null ? 0 : terrain.getWaterVertexCount(); }

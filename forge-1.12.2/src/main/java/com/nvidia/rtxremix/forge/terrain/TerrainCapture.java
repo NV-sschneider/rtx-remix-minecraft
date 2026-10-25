@@ -20,7 +20,6 @@ import com.nvidia.rtxremix.forge.texture.AtlasAnimations;
 import com.nvidia.rtxremix.forge.texture.AtlasMaterialMaps;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
-import java.util.ArrayDeque;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
 import net.minecraft.block.state.IBlockState;
@@ -62,7 +61,8 @@ import org.lwjgl.opengl.GL21;
  * <p>The 2 ms budget is cooperative: a model callback or native call cannot be preempted.
  * Each page is at most 1.1 MiB, each section at most 128 pages, and retirement is capped
  * at four pages per frame. Atomic section publication may add/remove up to 128 instances.
- * Mesh bytes include staging and retirement; reaching 512 MiB pauses capture explicitly.
+ * Mesh bytes include staging and retirement. Capacity pressure evicts farther sections
+ * and defers work that cannot improve residency, while block edits retain priority.
  */
 public final class TerrainCapture implements AutoCloseable {
     private static final Logger LOGGER = LogManager.getLogger("RLCraftRemixTerrain");
@@ -86,8 +86,10 @@ public final class TerrainCapture implements AutoCloseable {
     private final IWorldEventListener worldUpdates = new WorldUpdates();
     private final TerrainSchedule schedule = new TerrainSchedule();
     private final TerrainBudget budget = new TerrainBudget();
+    private final TerrainAdmission admission = new TerrainAdmission(schedule, budget);
     private final TerrainClose closing = new TerrainClose();
-    private final ArrayDeque<Page> retired = new ArrayDeque<Page>();
+    private final PageQueue retired = new PageQueue();
+    private final SectionLights noLights = new SectionLights();
     private final TerrainSchedule.RemovedColumn removeColumn = new TerrainSchedule.RemovedColumn() {
         @Override public void remove(TerrainSchedule.Column column) { retireColumn(column); }
     };
@@ -114,6 +116,9 @@ public final class TerrainCapture implements AutoCloseable {
     private long publishedSections;
     private long retiredSections;
     private long discardedBuilds;
+    private long evictedSections;
+    private long sourceChanges, rangeNotifications, blockNotifications;
+    private long coldPublications, refreshPublications;
     private long waterVertices;
     private long lavaVertices;
     private long clearGlassVertices;
@@ -159,9 +164,14 @@ public final class TerrainCapture implements AutoCloseable {
             if (System.nanoTime() >= deadline) break;
         }
         int probes = Math.min(TerrainBudget.COLUMNS_PER_FRAME, schedule.windowSize());
-        for (int i = 0; i < probes; i++) reconcile(schedule.nextDiscovery());
+        for (int i = 0; i < probes; i++) {
+            TerrainSchedule.Column column = schedule.nextDiscovery();
+            reconcile(column);
+            schedule.retryDeferred(column, budget.available());
+        }
         if (allDirty) { schedule.invalidateAll(); allDirty = false; }
         if (active != null && !valid(active)) discardBuild();
+        if (active != null && !active.replacement && schedule.hasRefresh()) discardBuild();
         if (System.nanoTime() >= deadline) return;
         capacityLimited = false;
         int blocks = 0;
@@ -172,6 +182,16 @@ public final class TerrainCapture implements AutoCloseable {
                 if (section == null) return;
                 reconcile(section.column);
                 if (section.column.source == null) { schedule.discard(section); continue; }
+                // A measured, deferred section cannot become admissible merely
+                // by recapturing the same revision. Avoid repeating that work.
+                if (!section.refresh && section.requiredBytes >= 0) {
+                    TerrainAdmission.Result result = admission.decide(section, section.requiredBytes);
+                    if (result == TerrainAdmission.Result.DEFER || result == TerrainAdmission.Result.WAIT) {
+                        schedule.defer(section, section.requiredBytes);
+                        if (++emptySections >= 64) return;
+                        continue;
+                    }
+                }
                 active = new Build(section, (Chunk) section.column.source);
                 active.completeSolidCoverage = baked.standardPipeline();
                 ExtendedBlockStorage storage = active.chunk.getBlockStorageArray()[section.y];
@@ -186,8 +206,11 @@ public final class TerrainCapture implements AutoCloseable {
                 blocks += visited;
                 continue;
             }
+            if (!active.admitted && !admitBuild()) {
+                if (active != null) return;
+                continue;
+            }
             if (uploadPage()) return; // At most one mesh allocation per frame.
-            if (capacityLimited) return;
             publishBuild();
         }
     }
@@ -230,6 +253,21 @@ public final class TerrainCapture implements AutoCloseable {
     public long getRetiredSectionCount() { return retiredSections; }
     public long getDiscardedBuildCount() { return discardedBuilds; }
     public long getCapturedBytes() { return budget.bytes(); }
+    public long getMeshBudgetBytes() { return budget.limit(); }
+    public int getDeferredSectionCount() { return schedule.deferred(); }
+    public int getDiscoveryCycleFrames() {
+        return (schedule.windowSize() + TerrainBudget.COLUMNS_PER_FRAME - 1) / TerrainBudget.COLUMNS_PER_FRAME;
+    }
+    public long getEvictedSectionCount() { return evictedSections; }
+    public long getInvalidationCount() { return sourceChanges + rangeNotifications + blockNotifications; }
+    /** Opt-in fixture diagnostics; callers format this only at their logging interval. */
+    public String getPressureDiagnostics() {
+        return "columns=" + columnCount + " sections=" + sectionCount + " sourceChanges=" + sourceChanges
+                + " rangeNotifications=" + rangeNotifications + " blockNotifications=" + blockNotifications
+                + " coldPublications=" + coldPublications + " refreshPublications=" + refreshPublications
+                + " discarded=" + discardedBuilds + " retiredSections=" + retiredSections
+                + " deferredRequeues=" + schedule.deferredRequeues() + " capacityRequeues=" + schedule.capacityRequeues();
+    }
     public long getWaterVertexCount() { return waterVertices; }
     public long getLavaVertexCount() { return lavaVertices; }
     public long getClearGlassVertexCount() { return clearGlassVertices; }
@@ -246,7 +284,7 @@ public final class TerrainCapture implements AutoCloseable {
         TerrainSchedule.Section section = section(x, y, z);
         return section == null || section.asset == null ? 0 : ((SectionAsset) section.asset).geometryHash;
     }
-    public boolean isCapacityLimited() { return capacityLimited || schedule.failures() != 0; }
+    public boolean isCapacityLimited() { return capacityLimited || schedule.deferred() != 0 || schedule.failures() != 0; }
     public int getResourceCount() {
         int result = lights.resourceCount() + pageResources + (atlas == 0 ? 0 : 1) + (vertexColorExtension == 0 ? 0 : 1)
                 + (materialMaps == null ? 0 : materialMaps.resourceCount());
@@ -280,6 +318,7 @@ public final class TerrainCapture implements AutoCloseable {
     private void reconcile(TerrainSchedule.Column column) {
         Chunk loaded = world.getChunkProvider().getLoadedChunk(column.x, column.z);
         if (loaded == column.source) return;
+        sourceChanges++;
         boolean wasLoaded = column.source != null;
         column.source = loaded;
         if (loaded != null) {
@@ -289,7 +328,7 @@ public final class TerrainCapture implements AutoCloseable {
             if (wasLoaded) columnCount--;
             retireColumnAssets(column);
             for (TerrainSchedule.Section section : column.sections) {
-                schedule.clearFailure(section);
+                schedule.forget(section);
                 section.revision++;
                 section.publication = 0;
                 section.revokeReplacement();
@@ -395,6 +434,35 @@ public final class TerrainCapture implements AutoCloseable {
         return count;
     }
 
+    private boolean admitBuild() {
+        Build build = active;
+        if (build.meshBytes < 0) {
+            long bytes = 0;
+            for (int i = 0; i < builders.length; i++) {
+                if (builders[i] != null) bytes = Math.addExact(bytes, TerrainBudget.bytes(builders[i].vertexCount()));
+            }
+            build.meshBytes = bytes;
+            build.section.requiredBytes = bytes;
+        }
+        TerrainAdmission.Result result = admission.decide(build.section, build.meshBytes);
+        if (result == TerrainAdmission.Result.ADMIT) { build.admitted = true; return true; }
+        capacityLimited = true;
+        if (!warnedCapacity) {
+            warnedCapacity = true;
+            LOGGER.warn("Terrain mesh budget {} MiB reached; prioritizing edits and nearby sections, deferring farther terrain",
+                    budget.limit() / (1024 * 1024));
+        }
+        if (result == TerrainAdmission.Result.EVICT) {
+            TerrainSchedule.Section victim = admission.victim();
+            evict(victim, victim != build.section);
+        } else if (result == TerrainAdmission.Result.DEFER) {
+            schedule.defer(build.section, build.meshBytes);
+            active = null;
+            resetBuilders();
+        }
+        return false;
+    }
+
     private boolean uploadPage() {
         Build build = active;
         while (build.layer < builders.length) {
@@ -407,13 +475,7 @@ public final class TerrainCapture implements AutoCloseable {
             int count = Math.min(TerrainBudget.PAGE_VERTICES, packed.vertexCount() - build.vertex);
             long bytes = TerrainBudget.bytes(count);
             if (!budget.canReserve(bytes)) {
-                capacityLimited = true;
-                if (!warnedCapacity) {
-                    warnedCapacity = true;
-                    LOGGER.warn("Terrain capture paused at the {} MiB mesh budget; reduce Minecraft render distance to free meshes",
-                            TerrainBudget.MAX_MESH_BYTES / (1024 * 1024));
-                }
-                return false;
+                throw new IllegalStateException("An admitted terrain section exceeded its complete mesh reservation");
             }
             MeshInfoSurfaceTriangles surface = new MeshInfoSurfaceTriangles();
             surface.vertexBuffer = packed.vertices(build.vertex, count);
@@ -426,6 +488,7 @@ public final class TerrainCapture implements AutoCloseable {
             mesh.surfaces = new MeshInfoSurfaceTriangles[] {surface};
             long handle = api.createMesh(mesh);
             budget.reserve(bytes);
+            build.uploadedBytes += bytes;
             pageResources++;
             build.pages.add(new Page(handle, bytes));
             build.vertex += count;
@@ -447,7 +510,7 @@ public final class TerrainCapture implements AutoCloseable {
         SectionAsset old = (SectionAsset) section.asset;
         if (old != null) {
             for (Page page : old.pages) detach(page);
-            retire(old);
+            retire(old, true);
         }
         if (build.pages.isEmpty()) {
             section.asset = null;
@@ -461,7 +524,7 @@ public final class TerrainCapture implements AutoCloseable {
             long clearGlassCount = builders[CLEAR_GLASS] == null ? 0 : builders[CLEAR_GLASS].vertexCount();
             long stainedGlassCount = builders[STAINED_GLASS] == null ? 0 : builders[STAINED_GLASS].vertexCount();
             section.asset = new SectionAsset(build.pages, waterCount, lavaCount, clearGlassCount, stainedGlassCount,
-                    build.foliageVertices, build.geometryHash);
+                    build.foliageVertices, build.geometryHash, build.uploadedBytes);
             waterVertices += waterCount;
             lavaVertices += lavaCount;
             clearGlassVertices += clearGlassCount;
@@ -474,6 +537,8 @@ public final class TerrainCapture implements AutoCloseable {
         }
         lights.publish(section.column.x, section.y, section.column.z, build.lights);
         schedule.publish(section, build.revision, build.chunk, build.completeSolidCoverage);
+        if (build.replacement) refreshPublications++;
+        else coldPublications++;
         publishedSections++;
         active = null;
         resetBuilders();
@@ -481,7 +546,7 @@ public final class TerrainCapture implements AutoCloseable {
 
     private void discardBuild() {
         if (active == null) return;
-        retired.addAll(active.pages);
+        retirePages(active.pages, active.uploadedBytes, true);
         schedule.discard(active.section);
         active = null;
         discardedBuilds++;
@@ -579,22 +644,44 @@ public final class TerrainCapture implements AutoCloseable {
     private void retireColumnAssets(TerrainSchedule.Column column) {
         lights.removeColumn(column.x, column.z);
         for (TerrainSchedule.Section section : column.sections) {
+            schedule.forget(section);
             if (section.asset == null) continue;
-            retire((SectionAsset) section.asset);
+            retire((SectionAsset) section.asset, true);
             section.asset = null;
             sectionCount--;
         }
         if (column.capturedSections != 0) capturedColumns--;
         column.capturedSections = 0;
     }
-    private void retire(SectionAsset asset) {
-        retired.addAll(asset.pages);
+    private void evict(TerrainSchedule.Section section, boolean defer) {
+        SectionAsset asset = (SectionAsset) section.asset;
+        schedule.removeAsset(section);
+        section.publication = 0;
+        section.revokeReplacement();
+        retire(asset, false);
+        section.asset = null;
+        sectionCount--;
+        if (--section.column.capturedSections == 0) capturedColumns--;
+        lights.publish(section.column.x, section.y, section.column.z, noLights);
+        if (defer) schedule.defer(section, asset.bytes);
+        evictedSections++;
+    }
+    private void retire(SectionAsset asset, boolean reconsider) {
+        retirePages(asset.pages, asset.bytes, reconsider);
         waterVertices -= asset.waterVertices;
         lavaVertices -= asset.lavaVertices;
         clearGlassVertices -= asset.clearGlassVertices;
         stainedGlassVertices -= asset.stainedGlassVertices;
         foliageVertices -= asset.foliageVertices;
         retiredSections++;
+    }
+    private void retirePages(List<Page> pages, long bytes, boolean reconsider) {
+        budget.retire(bytes);
+        for (int i = 0; i < pages.size(); i++) {
+            Page page = pages.get(i);
+            page.reconsiderOnRelease = reconsider;
+            retired.addLast(page);
+        }
     }
     private void detach(Page page) {
         if (page.instance == 0) return;
@@ -611,7 +698,8 @@ public final class TerrainCapture implements AutoCloseable {
                 api.destroyMesh(page.mesh);
                 page.mesh = 0;
                 pageResources--;
-                budget.release(page.bytes);
+                budget.releaseRetired(page.bytes);
+                if (page.reconsiderOnRelease) schedule.capacityChanged();
             } catch (RuntimeException | LinkageError error) { failure = appendFailure(failure, error); }
         }
         if (failure != null) throw new IllegalStateException("Cannot release terrain page", failure);
@@ -690,10 +778,11 @@ public final class TerrainCapture implements AutoCloseable {
     private final class WorldUpdates implements IWorldEventListener {
         @Override public void notifyBlockUpdate(World source, BlockPos pos, IBlockState oldState,
                                                 IBlockState newState, int flags) {
-            if (source == world) markBlock(pos);
+            if (source == world) { blockNotifications++; markBlock(pos); }
         }
         @Override public void markBlockRangeForRenderUpdate(int minX, int minY, int minZ,
                                                             int maxX, int maxY, int maxZ) {
+            rangeNotifications++;
             markRange(minX, minY, minZ, maxX, maxY, maxZ);
         }
         @Override public void notifyLightSet(BlockPos pos) { }
@@ -716,6 +805,7 @@ public final class TerrainCapture implements AutoCloseable {
         final TerrainSchedule.Section section;
         final Chunk chunk;
         final long revision;
+        final boolean replacement;
         final List<Page> pages = new ArrayList<Page>();
         final SectionLights lights = new SectionLights();
         int block;
@@ -724,17 +814,45 @@ public final class TerrainCapture implements AutoCloseable {
         long foliageVertices;
         long geometryHash = 0xcbf29ce484222325L;
         boolean completeSolidCoverage;
+        boolean admitted;
+        long meshBytes = -1;
+        long uploadedBytes;
         Build(TerrainSchedule.Section section, Chunk chunk) {
             this.section = section;
             this.chunk = chunk;
             this.revision = section.revision;
+            this.replacement = section.refresh;
         }
     }
     private static final class Page {
         long mesh;
         final long bytes;
         long instance;
+        Page nextRetired;
+        boolean reconsiderOnRelease;
         Page(long mesh, long bytes) { this.mesh = mesh; this.bytes = bytes; }
+    }
+    /** Intrusive retirement links keep pressure eviction allocation-free. */
+    private static final class PageQueue {
+        private Page first, last;
+        private int size;
+        boolean isEmpty() { return first == null; }
+        int size() { return size; }
+        Page peekFirst() { return first; }
+        void addLast(Page page) {
+            if (last == null) first = page;
+            else last.nextRetired = page;
+            last = page;
+            size++;
+        }
+        Page removeFirst() {
+            Page page = first;
+            first = page.nextRetired;
+            page.nextRetired = null;
+            if (first == null) last = null;
+            size--;
+            return page;
+        }
     }
     private static final class SectionAsset {
         final List<Page> pages;
@@ -744,8 +862,9 @@ public final class TerrainCapture implements AutoCloseable {
         final long stainedGlassVertices;
         final long foliageVertices;
         final long geometryHash;
+        final long bytes;
         SectionAsset(List<Page> pages, long waterVertices, long lavaVertices,
-                     long clearGlassVertices, long stainedGlassVertices, long foliageVertices, long geometryHash) {
+                     long clearGlassVertices, long stainedGlassVertices, long foliageVertices, long geometryHash, long bytes) {
             this.pages = pages;
             this.waterVertices = waterVertices;
             this.lavaVertices = lavaVertices;
@@ -753,6 +872,7 @@ public final class TerrainCapture implements AutoCloseable {
             this.stainedGlassVertices = stainedGlassVertices;
             this.foliageVertices = foliageVertices;
             this.geometryHash = geometryHash;
+            this.bytes = bytes;
         }
     }
 }

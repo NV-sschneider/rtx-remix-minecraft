@@ -10,6 +10,7 @@ import java.util.PriorityQueue;
 
 /** Render-thread window and revision queue, independent of Minecraft and native handles. */
 final class TerrainSchedule {
+    private static final int MAX_SECTIONS = 65 * 65 * 16;
     interface RemovedColumn { void remove(Column column); }
 
     static final class Column {
@@ -34,6 +35,11 @@ final class TerrainSchedule {
         boolean queued;
         boolean building;
         boolean failed;
+        boolean refresh;
+        boolean retained;
+        boolean deferred;
+        long deferredCapacityRevision;
+        long requiredBytes = -1;
         boolean completeSolidCoverage;
         Object publishedSource;
         Object asset;
@@ -52,7 +58,10 @@ final class TerrainSchedule {
     private int cursor;
     private long publication;
     private int failures;
-    private final Comparator<Section> priority = new Comparator<Section>() {
+    private int deferred;
+    private long capacityRevision;
+    private long deferredRequeues, capacityRequeues;
+    private final Comparator<Section> spatial = new Comparator<Section>() {
         @Override public int compare(Section a, Section b) {
             long da = distance(a.column.x, a.y, a.column.z);
             long db = distance(b.column.x, b.y, b.column.z);
@@ -62,7 +71,17 @@ final class TerrainSchedule {
             return result == 0 ? Integer.compare(a.y, b.y) : result;
         }
     };
-    private final PriorityQueue<Section> dirty = new PriorityQueue<Section>(64, priority);
+    private final Comparator<Section> priority = new Comparator<Section>() {
+        @Override public int compare(Section a, Section b) {
+            return a.refresh != b.refresh ? (a.refresh ? -1 : 1) : spatial.compare(a, b);
+        }
+    };
+    // Admission and pressure eviction never grow heap storage on the render thread.
+    private final PriorityQueue<Section> dirty = new PriorityQueue<Section>(MAX_SECTIONS, priority);
+    private final PriorityQueue<Section> retained = new PriorityQueue<Section>(MAX_SECTIONS,
+            new Comparator<Section>() {
+                @Override public int compare(Section a, Section b) { return spatial.compare(b, a); }
+            });
 
     boolean move(int nextX, int nextY, int nextZ, int nextRadius, RemovedColumn removed) {
         if (nextRadius < 0 || nextRadius > 32) {
@@ -85,7 +104,7 @@ final class TerrainSchedule {
             for (Column old : previous) {
                 if (!contains(old.x, old.z)) {
                     old.resident = false;
-                    for (Section section : old.sections) clearFailure(section);
+                    for (Section section : old.sections) forget(section);
                     removed.remove(old);
                 }
             }
@@ -99,9 +118,15 @@ final class TerrainSchedule {
         }
         // Mutable camera coordinates affect the heap ordering; rebuild only when they change.
         dirty.clear();
+        retained.clear();
         for (Column column : columns) {
             for (Section section : column.sections) {
+                if (section.deferred) {
+                    clearDeferred(section);
+                    section.queued = true;
+                }
                 if (section.queued) dirty.add(section);
+                if (section.retained) retained.add(section);
             }
         }
         return true;
@@ -125,6 +150,10 @@ final class TerrainSchedule {
     int centerZ() { return z; }
     int pending() { return dirty.size(); }
     int failures() { return failures; }
+    int deferred() { return deferred; }
+    long deferredRequeues() { return deferredRequeues; }
+    long capacityRequeues() { return capacityRequeues; }
+    boolean hasRefresh() { return !dirty.isEmpty() && dirty.peek().refresh; }
     boolean contains(int cx, int cz) {
         return radius >= 0 && Math.abs((long) cx - x) <= radius && Math.abs((long) cz - z) <= radius;
     }
@@ -136,6 +165,13 @@ final class TerrainSchedule {
     void invalidate(Section section) {
         if (section.column.source == null || !section.column.resident) return;
         clearFailure(section);
+        clearDeferred(section);
+        section.requiredBytes = -1;
+        if (!section.refresh && section.asset != null) {
+            if (section.queued) dirty.remove(section);
+            section.queued = false;
+            section.refresh = true;
+        }
         section.revokeReplacement();
         section.revision++;
         if (!section.queued && !section.building) {
@@ -171,15 +207,78 @@ final class TerrainSchedule {
     }
     void publish(Section section, long revision, Object source, boolean completeSolidCoverage) {
         clearFailure(section);
+        clearDeferred(section);
         section.building = false;
+        section.refresh = false;
         section.publishedRevision = revision;
         section.publication = ++publication;
         section.publishedSource = source;
         section.completeSolidCoverage = completeSolidCoverage;
+        if (section.asset != null && !section.retained) {
+            section.retained = true;
+            retained.add(section);
+        } else if (section.asset == null) removeAsset(section);
+    }
+    /** The strict spatial order prevents equal-priority sections exchanging places at steady capacity. */
+    Section evictionCandidate(Section incoming) {
+        Section candidate = retained.peek();
+        return candidate != null && spatial.compare(candidate, incoming) > 0 ? candidate : null;
+    }
+    void removeAsset(Section section) {
+        if (section.retained) {
+            retained.remove(section);
+            section.retained = false;
+        }
+    }
+    void defer(Section section, long requiredBytes) {
+        if (requiredBytes < 0) throw new IllegalArgumentException("Deferred terrain requires a measured size");
+        section.building = false;
+        section.refresh = false;
+        if (section.queued) dirty.remove(section);
+        section.queued = false;
+        section.requiredBytes = requiredBytes;
+        section.deferredCapacityRevision = capacityRevision;
+        section.publication = 0;
+        section.revokeReplacement();
+        if (section.column.resident && section.column.source != null && !section.deferred) {
+            section.deferred = true;
+            deferred++;
+        }
+    }
+    /** Pressure's own evictions do not reopen deferred work and cannot create a residency cycle. */
+    void capacityChanged() { capacityRevision++; }
+    /** Reconsider only columns visited by bounded discovery after actual capacity changes. */
+    void retryDeferred(Column column, long availableBytes) {
+        if (column.source == null) return;
+        for (Section section : column.sections) {
+            if (section.deferred && (section.requiredBytes <= availableBytes
+                    || section.deferredCapacityRevision != capacityRevision)) {
+                deferredRequeues++;
+                if (section.requiredBytes > availableBytes) capacityRequeues++;
+                clearDeferred(section);
+                section.queued = true;
+                dirty.add(section);
+            }
+        }
+    }
+    private void clearDeferred(Section section) {
+        if (section.deferred) { section.deferred = false; deferred--; }
+    }
+    void forget(Section section) {
+        clearFailure(section);
+        clearDeferred(section);
+        removeAsset(section);
+        if (section.queued) dirty.remove(section);
+        section.queued = false;
+        section.refresh = false;
+        section.requiredBytes = -1;
+        section.publication = 0;
+        section.revokeReplacement();
     }
     void fail(Section section) {
         section.revokeReplacement();
         section.building = false;
+        clearDeferred(section);
         if (section.queued) dirty.remove(section);
         section.queued = false;
         if (!section.failed) { section.failed = true; failures++; }
@@ -194,9 +293,11 @@ final class TerrainSchedule {
         }
         columns = discovery = new Column[0];
         dirty.clear();
+        retained.clear();
         radius = -1;
         cursor = 0;
         failures = 0;
+        deferred = 0;
     }
     private long distance(int cx, int cy, int cz) {
         long dx = (long) cx - x, dy = (long) cy - y, dz = (long) cz - z;

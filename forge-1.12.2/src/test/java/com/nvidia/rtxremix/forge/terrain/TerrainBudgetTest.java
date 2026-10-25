@@ -33,4 +33,61 @@ public class TerrainBudgetTest {
         budget.release(280);
         budget.release(280);
     }
+
+    @Test public void retirementPlansCapacityWithoutReleasingFailedNativeOwners() {
+        TerrainBudget budget = new TerrainBudget(1000);
+        budget.reserve(1000);
+        budget.retire(600);
+        assertFalse(budget.canReserve(500));
+        assertTrue(budget.canReserveAfterRetirement(500));
+        assertFalse(budget.canReserveAfterRetirement(601));
+        assertEquals(1000, budget.bytes());
+        // A failed destroy does not call releaseRetired: ownership remains charged.
+        budget.releaseRetired(200);
+        assertEquals(800, budget.bytes());
+        assertFalse(budget.canReserve(500));
+        assertTrue(budget.canReserveAfterRetirement(500));
+        budget.releaseRetired(400);
+        assertTrue(budget.canReserve(500));
+        budget.reserve(500);
+        assertEquals(100, budget.available());
+        budget.retire(900);
+        budget.releaseRetired(900);
+        assertEquals(0, budget.bytes());
+    }
+
+    @Test public void diagnosticBudgetIsBoundedAndLeavesTheDefaultUnchanged() {
+        assertEquals(TerrainBudget.MAX_MESH_BYTES, TerrainBudget.configuredLimit(null));
+        assertEquals(16L * 1024 * 1024, TerrainBudget.configuredLimit("16"));
+        assertEquals(8L * 1024 * 1024, TerrainBudget.configuredLimit("8"));
+        assertEquals(TerrainBudget.MAX_MESH_BYTES, TerrainBudget.configuredLimit("512"));
+        for (String invalid : new String[] {"7", "513", "0", "-1", "16.5", "", "2147483648"}) {
+            try {
+                TerrainBudget.configuredLimit(invalid);
+                fail("Accepted invalid mesh budget " + invalid);
+            } catch (IllegalArgumentException expected) { }
+        }
+    }
+
+    @Test(expected = IllegalStateException.class) public void refusesDoubleRetirement() {
+        TerrainBudget budget = new TerrainBudget(1000);
+        budget.reserve(1000);
+        budget.retire(700);
+        budget.retire(400);
+    }
+
+    @Test(expected = IllegalStateException.class) public void refusesReleaseOfUndestroyedRetirement() {
+        TerrainBudget budget = new TerrainBudget(1000);
+        budget.reserve(1000);
+        budget.retire(700);
+        budget.release(400);
+    }
+
+    @Test(expected = IllegalStateException.class) public void refusesDoubleRetiredRelease() {
+        TerrainBudget budget = new TerrainBudget(1000);
+        budget.reserve(700);
+        budget.retire(700);
+        budget.releaseRetired(700);
+        budget.releaseRetired(1);
+    }
 }
