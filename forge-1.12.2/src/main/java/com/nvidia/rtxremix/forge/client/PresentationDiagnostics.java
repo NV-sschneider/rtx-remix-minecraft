@@ -13,7 +13,7 @@ final class PresentationDiagnostics {
     private static final String[] PHASES = {"none", "submit", "acquire", "copy", "present"};
     private final boolean enabled;
     private final Consumer<String> output;
-    private int phase, width, height, imageWidth, imageHeight;
+    private int phase, width, height, imageWidth, imageHeight, depthWidth, depthHeight;
     private long phaseStarted, lastProgress, lastSlow, hwnd, submits, presents, worldFrames;
     private long runtimeValue, clientValue, imageHandle;
     private boolean haveWindow, haveFrame, active, visible, worldSubmitted, depthPresent, stalled;
@@ -48,9 +48,10 @@ final class PresentationDiagnostics {
         }
         phase = 0;
     }
-    void submitted(boolean world, long waitingValue, long colorHandle, int w, int h, boolean hasDepth) {
+    void submitted(boolean world, long waitingValue, long colorHandle, int w, int h, boolean hasDepth, int dw, int dh) {
         if (!enabled) return;
         submits++; worldSubmitted = world; imageHandle = colorHandle; imageWidth = w; imageHeight = h; depthPresent = hasDepth;
+        depthWidth = dw; depthHeight = dh;
         if (haveFrame && waitingValue <= runtimeValue) {
             if (!stalled) emit("timeline-not-advancing", " nextRuntime=" + waitingValue);
             stalled = true;
@@ -67,6 +68,7 @@ final class PresentationDiagnostics {
                 + " worldSubmitted=" + worldSubmitted + " worldFrames=" + worldFrames
                 + " submits=" + submits + " presents=" + presents + " runtimeWait=" + runtimeValue
                 + " clientDone=" + clientValue + " color=" + Long.toHexString(imageHandle)
-                + " image=" + imageWidth + "x" + imageHeight + " depthPresent=" + depthPresent);
+                + " image=" + imageWidth + "x" + imageHeight + " depthPresent=" + depthPresent
+                + " depth=" + depthWidth + "x" + depthHeight);
     }
 }

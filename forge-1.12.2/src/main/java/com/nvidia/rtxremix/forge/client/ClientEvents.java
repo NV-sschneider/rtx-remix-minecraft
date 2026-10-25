@@ -113,7 +113,7 @@ public final class ClientEvents {
             com.nvidia.rtxremix.forge.fog.FogCaptureHooks.beginFrame(enabled && mc.world != null);
             MobHudHooks.beginFrame(enabled && mc.world != null && Display.isVisible());
         } else {
-            try { renderer.finishTerrainFrame(false); }
+            try { renderer.finishTerrainFrame(false); renderer.finishFogFrame(); }
             catch (RuntimeException | LinkageError ex) { renderingFailed(ex); }
             submission.clear();
             discardCaptures();
@@ -255,6 +255,8 @@ public final class ClientEvents {
     long windowChanges() { return renderer.windowChanges(); }
     long fogAppliedFrames() { return renderer.fogAppliedFrames(); }
     long fogMissingDepthFrames() { return renderer.fogMissingDepthFrames(); }
+    int fogHistorySamples() { return renderer.fogHistorySamples(); }
+    long fogHistoryResets() { return renderer.fogHistoryResets(); }
     com.nvidia.rtxremix.forge.fog.FogState fogState() { return renderer.fogState(); }
     boolean terrainSuppressionRequested() { return renderer.terrainSuppressionRequested(); }
     boolean terrainSuppressionSupported() { return renderer.terrainSuppressionSupported(); }
@@ -377,6 +379,9 @@ public final class ClientEvents {
     int terrainDeferredSectionCount() { return renderer.terrainDeferredSectionCount(); }
     int terrainDiscoveryCycleFrames() { return renderer.terrainDiscoveryCycleFrames(); }
     String terrainPressureDiagnostics() { return renderer.terrainPressureDiagnostics(); }
+    boolean itemOrdinaryLighting(UUID id) { return renderer.itemOrdinaryLighting(id); }
+    long terrainOverlayVertexCount() { return renderer.terrainOverlayVertexCount(); }
+    long terrainSectionOverlayVertices(int x, int y, int z) { return renderer.terrainSectionOverlayVertices(x, y, z); }
     long terrainEvictedSectionCount() { return renderer.terrainEvictedSectionCount(); }
     long terrainInvalidationCount() { return renderer.terrainInvalidationCount(); }
     boolean terrainCapacityLimited() { return renderer.terrainCapacityLimited(); }

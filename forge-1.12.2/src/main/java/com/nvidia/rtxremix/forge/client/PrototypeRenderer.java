@@ -91,6 +91,7 @@ final class PrototypeRenderer {
     private boolean windowClosing;
     private boolean initialized;
     private boolean nativeFramePending;
+    private boolean fogFrameRendered;
     private VisibilitySettings visibility;
     private long visibilityRevision = -1;
     private final PresentInfo present = new PresentInfo();
@@ -107,6 +108,7 @@ final class PrototypeRenderer {
     }
 
     void beginTerrainFrame(boolean eligible) {
+        fogFrameRendered = false;
         terrainFrame.begin();
         // Disarm before any window/context inspection that could itself fail.
         VanillaTerrainDraws.beginFrame(false, solidReplacement);
@@ -140,6 +142,9 @@ final class PrototypeRenderer {
     }
 
     void invalidateTerrainFallback() { VanillaTerrainDraws.endFrame(); lastGoodFrame.invalidate(); }
+
+    /** A hidden/skipped world frame must not reuse old coverage when rendering resumes. */
+    void finishFogFrame() { if (!fogFrameRendered && fog != null) fog.discardHistory(); }
 
     private void captureTerrainFallback() {
         if (!SUPPRESS_SOLID || fallbackFault) return;
@@ -200,8 +205,9 @@ final class PrototypeRenderer {
         finally { presentationDiagnostics.end(); }
         terrainFrame.copied();
         // Native underwater attenuation also affects miss/sky rays, which primary depth does not describe.
-        if (!medium.isUnderwater()) fog.draw(capturedFog, interop.getDepthTexture(),
-                mc.displayWidth, mc.displayHeight, captured.parameterizedExt);
+        if (!medium.isUnderwater()) fogFrameRendered = fog.draw(capturedFog, interop.getDepthTexture(),
+                frame.depthWidth, frame.depthHeight, mc.displayWidth, mc.displayHeight, captured.parameterizedExt);
+        else fog.discardHistory();
         captureTerrainFallback();
         overlayFrame.capture(mc.getFramebuffer().framebufferObject, mc.displayWidth, mc.displayHeight);
         if (++frames == 1) {
@@ -251,6 +257,7 @@ final class PrototypeRenderer {
 
     void refreshTextures() {
         invalidateTerrainFallback();
+        if (fog != null) fog.discardHistory();
         EntityCaptureHooks.clearVboCache();
         if (medium != null) { medium.close(); medium = null; }
         // These scenes borrow the terrain atlas. Release their materials first.
@@ -280,6 +287,8 @@ final class PrototypeRenderer {
     long windowChanges() { return windowChanges; }
     long fogAppliedFrames() { return fog == null ? 0 : fog.appliedFrames(); }
     long fogMissingDepthFrames() { return fog == null ? 0 : fog.missingDepthFrames(); }
+    int fogHistorySamples() { return fog == null ? 0 : fog.historySamples(); }
+    long fogHistoryResets() { return fog == null ? 0 : fog.historyResets(); }
     com.nvidia.rtxremix.forge.fog.FogState fogState() { return fog == null ? null : fog.lastApplied(); }
     boolean terrainSuppressionRequested() { return SUPPRESS_SOLID; }
     boolean terrainSuppressionSupported() { return VanillaTerrainDraws.supported(); }
@@ -298,6 +307,9 @@ final class PrototypeRenderer {
     double heldLightLocalDistance(UUID id, int hand) { return heldLights == null ? Double.NaN : heldLights.localDistance(id, hand); }
     int entityCategoryCount(int flags) { return entities == null ? 0 : entities.categoryCount(flags); }
     int itemCategoryCount(int flags) { return items == null ? 0 : items.categoryCount(flags); }
+    boolean itemOrdinaryLighting(UUID id) { return items != null && items.ordinaryLighting(id); }
+    long terrainOverlayVertexCount() { return terrain == null ? 0 : terrain.getOverlayVertexCount(); }
+    long terrainSectionOverlayVertices(int x, int y, int z) { return terrain == null ? 0 : terrain.getSectionOverlayVertices(x, y, z); }
     int tileTrianglePartCount(net.minecraft.util.math.BlockPos pos) { return entities == null ? 0 : entities.tileTrianglePartCount(pos); }
     long tileGeometryUpdates(net.minecraft.util.math.BlockPos pos) { return entities == null ? 0 : entities.tileGeometryUpdates(pos); }
     boolean tileTextureCurrent(net.minecraft.util.math.BlockPos pos, int glId) { return entities != null && entities.tileTextureCurrent(pos, glId); }
@@ -330,7 +342,7 @@ final class PrototypeRenderer {
         finally { presentationDiagnostics.end(); }
         InteropInfo frame = api.dxvkGetInteropInfo();
         presentationDiagnostics.submitted(worldFrame, frame.dxvkDoneSemaphore_ValueToWait,
-                frame.imageMemory_Handle, frame.width, frame.height, frame.depthImageMemory_Handle != 0);
+                frame.imageMemory_Handle, frame.width, frame.height, frame.depthImageMemory_Handle != 0, frame.depthWidth, frame.depthHeight);
         return frame;
     }
 
