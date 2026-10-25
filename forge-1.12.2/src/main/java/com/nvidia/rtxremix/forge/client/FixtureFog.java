@@ -15,6 +15,7 @@ import java.util.concurrent.TimeUnit;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.WorldClient;
 import net.minecraft.client.renderer.GlStateManager;
+import net.minecraft.block.BlockLeaves;
 import net.minecraft.entity.player.EntityPlayerMP;
 import net.minecraft.init.Blocks;
 import net.minecraft.server.integrated.IntegratedServer;
@@ -31,7 +32,7 @@ import org.lwjgl.opengl.GLContext;
 
 /** Owned Forge fog callbacks and two depth targets, measured separately under Remix and vanilla. */
 public final class FixtureFog implements AutoCloseable {
-    private enum Phase { SETUP, ARRIVE, NATIVE, VANILLA, RESTORE, RETURN, DONE }
+    private enum Phase { SETUP, ARRIVE, NATIVE, VANILLA, EDGE_CLEAR, EDGE_LINEAR, EDGE_MOVE, EDGE_RESTABILIZE, RESTORE, RETURN, DONE }
     private enum Preset {
         NONE(FogState.EXP, 0, 0, 1, 0.1f, 0.6f, 0.2f),
         LINEAR(FogState.LINEAR, 0, 10, 22, 0.1f, 0.6f, 0.2f),
@@ -58,6 +59,7 @@ public final class FixtureFog implements AutoCloseable {
     private final int originalView;
     private final boolean originalHud, originalFlying, originalBobbing, originalEnabled;
     private final float originalFov;
+    private final boolean edgeDiagnostics = Boolean.getBoolean("rlcraftremix.smoke.fogEdges");
     private final double returnX, returnY, returnZ;
     private final float returnYaw, returnPitch;
     private final FloatBuffer projection = BufferUtils.createFloatBuffer(16);
@@ -75,6 +77,11 @@ public final class FixtureFog implements AutoCloseable {
     private boolean serverConfigured, serverFlying;
     private double nearError, farError, nearTransmissionError, farTransmissionError;
     private double[] nearPixels, farPixels;
+    private FogEdgeProbe leafEdges, solidEdge;
+    private BufferedImage edgeFirst;
+    private long edgeSampleFrame;
+    private long historyResetBaseline;
+    private int motionSteps, motionMinSamples = Integer.MAX_VALUE;
 
     FixtureFog(Minecraft mc, ClientEvents events, IntegratedServer server, WorldServer world,
             String save, Layout layout, double x, double y, double z, float yaw, float pitch, FixtureTerrain.Output output) {
@@ -93,7 +100,8 @@ public final class FixtureFog implements AutoCloseable {
         FixtureCompatibility.requireSmokeSave(world.getMinecraftServer().getFolderName());
         if (!world.getMinecraftServer().isCallingFromMinecraftThread() || world.provider.getDimension() != 0 || y < 1 || y > 230)
             throw new IllegalStateException("Fog arena requires its owned overworld server thread and bounded height");
-        for (int dx = -12; dx <= 12; dx++) for (int dz = -12; dz <= 20; dz++) {
+        boolean edges = Boolean.getBoolean("rlcraftremix.smoke.fogEdges");
+        for (int dx = -12; dx <= (edges ? 16 : 12); dx++) for (int dz = -12; dz <= 20; dz++) {
             world.setBlockState(new BlockPos(x + dx, y, z + dz), Blocks.STONE.getDefaultState(), 3);
             int top = Math.min(255, Math.max(y + 13, world.getHeight(new BlockPos(x + dx, y, z + dz)).getY()));
             for (int yy = y + 1; yy <= top; yy++) world.setBlockToAir(new BlockPos(x + dx, yy, z + dz));
@@ -102,6 +110,12 @@ public final class FixtureFog implements AutoCloseable {
             world.setBlockState(new BlockPos(x + dx, y + dy, z + 10), Blocks.QUARTZ_BLOCK.getDefaultState(), 3);
         for (int dx = 4; dx <= 10; dx++) for (int dy = 1; dy <= 10; dy++)
             world.setBlockState(new BlockPos(x + dx, y + dy, z - 10), Blocks.QUARTZ_BLOCK.getDefaultState(), 3);
+        // The left side is occluded by the near quartz target. Keep this panel
+        // beyond the far target's right edge so its cutout silhouette is visible.
+        if (edges)
+            for (int dx = 12; dx <= 15; dx++) for (int dy = 1; dy <= 8; dy++)
+                world.setBlockState(new BlockPos(x + dx, y + dy, z - 5), Blocks.LEAVES.getDefaultState()
+                        .withProperty(BlockLeaves.DECAYABLE, false).withProperty(BlockLeaves.CHECK_DECAY, false), 3);
         return new Layout(x, y, z);
     }
 
@@ -117,6 +131,8 @@ public final class FixtureFog implements AutoCloseable {
         if (phase != Phase.SETUP && phase != Phase.RETURN && phase != Phase.DONE) holdPose();
         switch (phase) {
             case SETUP:
+                if (edgeDiagnostics && !mc.gameSettings.fancyGraphics)
+                    throw new IllegalStateException("Fog edge diagnostic requires fancy leaves for its cutout control");
                 configured = true; mc.gameSettings.thirdPersonView = 0; mc.gameSettings.hideGUI = true;
                 mc.gameSettings.fovSetting = 70; mc.gameSettings.viewBobbing = false;
                 MinecraftForge.EVENT_BUS.register(this); registered = true; preset = Preset.NONE;
@@ -136,10 +152,37 @@ public final class FixtureFog implements AutoCloseable {
                     captureAndCheck();
                     if (++caseIndex < CASES.length) { select(caseIndex); transition(phase); }
                     else if (phase == Phase.NATIVE) { events.setEnabled(false); select(0); transition(Phase.VANILLA); }
-                    else {
+                    else if (edgeDiagnostics) {
+                        events.setEnabled(true); select(0); transition(Phase.EDGE_CLEAR);
+                    } else {
                         unregister(); events.setEnabled(true); appliedBaseline = events.fogAppliedFrames();
                         transition(Phase.RESTORE);
                     }
+                }
+                break;
+            case EDGE_CLEAR:
+            case EDGE_LINEAR:
+            case EDGE_RESTABILIZE:
+                if (settled(ready() && (nearestControl() || phase == Phase.EDGE_CLEAR
+                        || events.fogHistorySamples() == 32), worldFrames) && worldFrames - edgeSampleFrame >= 3) {
+                    if (sampleEdges()) {
+                        if (phase == Phase.EDGE_CLEAR) { select(1); transition(Phase.EDGE_LINEAR); }
+                        else if (phase == Phase.EDGE_LINEAR && !nearestControl()) {
+                            historyResetBaseline = events.fogHistoryResets(); motionSteps = 0;
+                            motionMinSamples = Integer.MAX_VALUE; transition(Phase.EDGE_MOVE);
+                        }
+                        else {
+                            unregister(); appliedBaseline = events.fogAppliedFrames(); transition(Phase.RESTORE);
+                        }
+                    }
+                }
+                break;
+            case EDGE_MOVE:
+                if (settled(ready(), worldFrames)) {
+                    if (events.fogHistoryResets() <= historyResetBaseline || motionMinSamples != 1)
+                        throw new IllegalStateException("Fog history was retained across moving camera: " + status());
+                    output.capture("fog-moving-reset", output.image()); log("MOTION_RESET_PASS");
+                    select(1); transition(Phase.EDGE_RESTABILIZE);
                 }
                 break;
             case RESTORE:
@@ -177,6 +220,7 @@ public final class FixtureFog implements AutoCloseable {
     @SubscribeEvent(priority = EventPriority.LOWEST)
     public void frame(RenderWorldLastEvent event) {
         if (!registered || !ownsClient()) return;
+        if (phase == Phase.EDGE_MOVE) motionMinSamples = Math.min(motionMinSamples, events.fogHistorySamples());
         projection.clear(); GL11.glGetFloat(GL11.GL_PROJECTION_MATRIX, projection);
         projectionX = projection.get(0); projectionY = projection.get(5); worldFrames++;
     }
@@ -189,7 +233,39 @@ public final class FixtureFog implements AutoCloseable {
     private void select(int index) {
         caseIndex = index; preset = CASES[index]; densityBaseline = densityCalls; colorBaseline = colorCalls;
         appliedBaseline = events.fogAppliedFrames(); nearError = farError = 0;
+        leafEdges = solidEdge = null; edgeFirst = null; edgeSampleFrame = worldFrames;
     }
+
+    private boolean sampleEdges() throws Exception {
+        BufferedImage image = output.image();
+        if (leafEdges == null) {
+            double eye = cameraY() + mc.player.getEyeHeight();
+            double marginX = 4.0 / image.getWidth(), marginY = 4.0 / image.getHeight();
+            leafEdges = new FogEdgeProbe(image,
+                    projectX(11.5, 22.5) - marginX, projectY(layout.y + 9 - eye, 22.5) - marginY,
+                    projectX(15.5, 22.5) + marginX, projectY(layout.y + 1 - eye, 22.5) + marginY);
+            double edge = projectX(3.5, 27.5);
+            solidEdge = new FogEdgeProbe(image, edge - marginX,
+                    projectY(layout.y + 9 - eye, 27.5), edge + marginX,
+                    projectY(layout.y + 5 - eye, 27.5));
+            edgeFirst = image;
+        }
+        leafEdges.sample(image); solidEdge.sample(image); edgeSampleFrame = worldFrames;
+        if (leafEdges.samples() != FogEdgeProbe.SAMPLES) return false;
+        String name = preset == Preset.NONE ? "clear" : phase == Phase.EDGE_RESTABILIZE ? "linear-restabilized" : "linear";
+        output.log("FOG_EDGE_OBSERVATION", "preset=" + name
+                + " resolve=" + (nearestControl() ? "nearest-control" : "temporal-coverage")
+                + " historySamples=" + events.fogHistorySamples() + " historyResets=" + events.fogHistoryResets()
+                + " leaf=" + leafEdges.summary()
+                + " solid=" + solidEdge.summary() + " output=" + image.getWidth() + "x" + image.getHeight());
+        // PNG encoding happens only after the last sample, so it cannot select the sampled frame spacing.
+        output.capture("fog-edges-" + name + "-first", edgeFirst);
+        output.capture("fog-edges-" + name + "-last", image);
+        edgeFirst = null;
+        return true;
+    }
+    private double projectX(double relative, double distance) { return 0.5 + 0.5 * relative / distance * projectionX; }
+    private double projectY(double relative, double distance) { return 0.5 - 0.5 * relative / distance * projectionY; }
 
     private boolean ready() {
         if (!arenaReady() || densityCalls <= densityBaseline || colorCalls <= colorBaseline
@@ -248,6 +324,13 @@ public final class FixtureFog implements AutoCloseable {
     private boolean arenaReady() {
         if (mc.world.getBlockState(layout.near).getBlock() != Blocks.QUARTZ_BLOCK
                 || mc.world.getBlockState(layout.far).getBlock() != Blocks.QUARTZ_BLOCK) return false;
+        if (edgeDiagnostics) {
+            for (int dx = 12; dx <= 15; dx++) for (int dy = 1; dy <= 8; dy++) {
+                BlockPos leaf = new BlockPos(layout.x + dx, layout.y + dy, layout.z - 5);
+                if (clientWorld.getBlockState(leaf).getBlock() != Blocks.LEAVES
+                        || phase != Phase.VANILLA && !events.terrainSectionReady(leaf.getX() >> 4, leaf.getY() >> 4, leaf.getZ() >> 4)) return false;
+            }
+        }
         return phase == Phase.VANILLA || events.terrainSectionReady(layout.near.getX() >> 4, layout.near.getY() >> 4, layout.near.getZ() >> 4)
                 && events.terrainSectionReady(layout.far.getX() >> 4, layout.far.getY() >> 4, layout.far.getZ() >> 4)
                 && events.terrainPendingSectionCount() == 0 && events.terrainRetirementCount() == 0;
@@ -255,10 +338,12 @@ public final class FixtureFog implements AutoCloseable {
     private double cameraX() { return layout.x + 0.5; }
     private double cameraY() { return layout.y + 2; }
     private double cameraZ() { return layout.z + 18.5; }
+    private boolean nearestControl() { return Boolean.getBoolean("rlcraftremix.smoke.fogNearest"); }
     private void holdPose() {
-        mc.player.setPositionAndRotation(cameraX(), cameraY(), cameraZ(), 180, 0);
+        float yaw = phase == Phase.EDGE_MOVE ? 180 + (motionSteps++ % 20) * 0.05f : 180;
+        mc.player.setPositionAndRotation(cameraX(), cameraY(), cameraZ(), yaw, 0);
         mc.player.prevPosX = mc.player.lastTickPosX = cameraX(); mc.player.prevPosY = mc.player.lastTickPosY = cameraY();
-        mc.player.prevPosZ = mc.player.lastTickPosZ = cameraZ(); mc.player.prevRotationYaw = 180; mc.player.prevRotationPitch = 0;
+        mc.player.prevPosZ = mc.player.lastTickPosZ = cameraZ(); mc.player.prevRotationYaw = yaw; mc.player.prevRotationPitch = 0;
         mc.player.motionX = mc.player.motionY = mc.player.motionZ = 0; mc.player.capabilities.isFlying = true;
     }
     private boolean ownsClient() {
@@ -287,7 +372,7 @@ public final class FixtureFog implements AutoCloseable {
         preset = null; if (registered) { MinecraftForge.EVENT_BUS.unregister(this); registered = false; }
     }
     private void restoreClient() {
-        unregister(); if (!configured) return;
+        unregister(); edgeFirst = null; leafEdges = solidEdge = null; if (!configured) return;
         mc.gameSettings.thirdPersonView = originalView; mc.gameSettings.hideGUI = originalHud;
         mc.gameSettings.fovSetting = originalFov; mc.gameSettings.viewBobbing = originalBobbing;
         if (ownsClient()) {
@@ -311,7 +396,9 @@ public final class FixtureFog implements AutoCloseable {
                 + " registered=" + registered + " capturedMode=" + (state == null ? -1 : state.mode())
                 + " capturedDensity=" + (state == null ? -1 : state.density()) + " nearPixels=" + Arrays.toString(nearPixels)
                 + " farPixels=" + Arrays.toString(farPixels) + " nearError=" + nearError + " farError=" + farError
-                + " nearTransmissionError=" + nearTransmissionError + " farTransmissionError=" + farTransmissionError;
+                + " nearTransmissionError=" + nearTransmissionError + " farTransmissionError=" + farTransmissionError
+                + " edgeSamples=" + (leafEdges == null ? 0 : leafEdges.samples())
+                + " historySamples=" + events.fogHistorySamples() + " historyResets=" + events.fogHistoryResets();
     }
     @Override public void close() {
         if (closed) return; closed = true;

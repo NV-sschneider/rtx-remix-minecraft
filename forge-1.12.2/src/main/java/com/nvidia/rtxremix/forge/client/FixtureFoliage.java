@@ -22,7 +22,7 @@ import net.minecraft.world.WorldServer;
 /** Isolated foliage scene checks unlit material stability, resource reload, and native retirement. */
 final class FixtureFoliage implements AutoCloseable {
     private static final long TIMEOUT = TimeUnit.SECONDS.toNanos(240), PROGRESS = TimeUnit.SECONDS.toNanos(10);
-    private enum Phase { ARRIVE, AO_ON, AO_OFF, RELOAD, REMOVE, REMOVED, RETURN, DONE }
+    private enum Phase { ARRIVE, AO_ON, AO_OFF, RELOAD, GRASS_FRONT, GRASS_ANGLED, REMOVE, REMOVED, RETURN, DONE }
     private final Minecraft mc;
     private final ClientEvents events;
     private final IntegratedServer server;
@@ -40,8 +40,8 @@ final class FixtureFoliage implements AutoCloseable {
     private String actionName = "arrive", serverBlocks = "not-sampled";
     private boolean actionComplete;
     private long since = System.nanoTime(), lastProgress = since, readyFrame = -1;
-    private long reloadBaseline, revisionBaseline, geometryHash, foliageVertices;
-    private boolean closed;
+    private long reloadBaseline, revisionBaseline, geometryHash, foliageVertices, overlayVertices;
+    private boolean closed, sideView, angled;
 
     FixtureFoliage(Minecraft mc, ClientEvents events, IntegratedServer server, WorldServer world,
             String saveName, Layout layout, double x, double y, double z, float yaw, float pitch,
@@ -79,7 +79,7 @@ final class FixtureFoliage implements AutoCloseable {
             });
             log("PROGRESS"); lastProgress = System.nanoTime();
         }
-        if (phase != Phase.RETURN && phase != Phase.DONE) holdPose(cameraX(), cameraY(), cameraZ(), 180f, 12f);
+        if (phase != Phase.RETURN && phase != Phase.DONE) holdPose(cameraX(), cameraY(), cameraZ(), cameraYaw(), cameraPitch());
         switch (phase) {
             case ARRIVE:
                 if (complete() && blocksReady()) {
@@ -87,20 +87,33 @@ final class FixtureFoliage implements AutoCloseable {
                 }
                 break;
             case AO_ON:
-                if (settled(reloaded() && vertices() > 0)) {
-                    geometryHash = hash(); foliageVertices = vertices(); capture("foliage-unlit-ao-on"); log("GEOMETRY_PASS");
+                if (settled(reloaded() && vertices() > 0 && overlays() > 0)) {
+                    geometryHash = hash(); foliageVertices = vertices(); overlayVertices = overlays();
+                    capture("foliage-unlit-ao-on"); log("GEOMETRY_PASS");
                     reloadWithAo(0); transition(Phase.AO_OFF);
                 }
                 break;
             case AO_OFF:
-                if (settled(reloaded() && vertices() > 0)) {
+                if (settled(reloaded() && vertices() > 0 && overlays() > 0)) {
                     requireSameGeometry(); capture("foliage-unlit-ao-off"); log("AO_INVARIANCE_PASS");
                     reloadBaseline = events.textureReloadCount(); events.reload(); transition(Phase.RELOAD);
                 }
                 break;
             case RELOAD:
-                if (settled(reloaded() && vertices() > 0)) {
+                if (settled(reloaded() && vertices() > 0 && overlays() > 0)) {
                     requireSameGeometry(); capture("foliage-reloaded"); log("RELOAD_PASS");
+                    sideView = true; moveView("grass-front"); transition(Phase.GRASS_FRONT);
+                }
+                break;
+            case GRASS_FRONT:
+                if (settled(complete() && ready() && overlays() == overlayVertices)) {
+                    capture("grass-side-overlay-front"); log("OVERLAY_FRONT_PASS");
+                    angled = true; moveView("grass-angled"); transition(Phase.GRASS_ANGLED);
+                }
+                break;
+            case GRASS_ANGLED:
+                if (settled(complete() && ready() && overlays() == overlayVertices)) {
+                    capture("grass-side-overlay-angled"); log("OVERLAY_ANGLED_PASS");
                     revisionBaseline = revision();
                     actionName = "clear-features"; actionComplete = false;
                     action = server.callFromMainThread(() -> {
@@ -113,7 +126,7 @@ final class FixtureFoliage implements AutoCloseable {
                 if (complete()) transition(Phase.REMOVED);
                 break;
             case REMOVED:
-                if (settled(ready() && revision() > revisionBaseline && vertices() == 0 && blocksRemoved())) {
+                if (settled(ready() && revision() > revisionBaseline && vertices() == 0 && overlays() == 0 && blocksRemoved())) {
                     capture("foliage-removed"); log("REMOVAL_PASS"); restoreAo();
                     actionName = "restore-player"; actionComplete = false;
                     action = server.callFromMainThread(() -> {
@@ -141,25 +154,28 @@ final class FixtureFoliage implements AutoCloseable {
     }
     private boolean reloaded() { return events.textureReloadCount() > reloadBaseline && ready(); }
     private void requireSameGeometry() {
-        if (geometryHash != hash() || foliageVertices != vertices())
+        if (geometryHash != hash() || foliageVertices != vertices() || overlayVertices != overlays())
             throw new IllegalStateException("Foliage unlit geometry changed across AO/reload: " + status());
     }
     private boolean blocksReady() {
         return clientWorld.isBlockLoaded(layout.leaf) && clientWorld.isBlockLoaded(layout.cactus)
                 && clientWorld.getBlockState(layout.leaf).getBlock() == Blocks.LEAVES
                 && clientWorld.getBlockState(layout.grass).getBlock() == Blocks.GRASS
+                && clientWorld.getBlockState(layout.grassSide).getBlock() == Blocks.GRASS
+                && clientWorld.getBlockState(layout.grassSide.down()).getBlock() == Blocks.DIRT
                 && clientWorld.getBlockState(layout.cactus).getBlock() == Blocks.CACTUS
                 && clientWorld.getBlockState(layout.cactus.up(2)).getBlock() == Blocks.CACTUS
                 && clientWorld.getBlockState(layout.sand).getBlock() == Blocks.SAND
                 && clientWorld.getBlockState(layout.support).getBlock() == Blocks.QUARTZ_BLOCK;
     }
     private boolean blocksRemoved() {
-        return clientWorld.isAirBlock(layout.leaf) && clientWorld.isAirBlock(layout.cactus)
+        return clientWorld.isAirBlock(layout.leaf) && clientWorld.isAirBlock(layout.cactus) && clientWorld.isAirBlock(layout.grassSide)
                 && clientWorld.getBlockState(layout.grass).getBlock() == Blocks.QUARTZ_BLOCK;
     }
     private boolean ready() { return events.terrainSectionReady(layout.x >> 4, layout.y >> 4, layout.z >> 4); }
     private long revision() { return events.terrainSectionRevision(layout.x >> 4, layout.y >> 4, layout.z >> 4); }
     private long vertices() { return events.sectionBetterFoliageVertices(layout.x >> 4, layout.y >> 4, layout.z >> 4); }
+    private long overlays() { return events.terrainSectionOverlayVertices(layout.x >> 4, layout.y >> 4, layout.z >> 4); }
     private long hash() { return events.sectionGeometryHash(layout.x >> 4, layout.y >> 4, layout.z >> 4); }
     private boolean settled(boolean ready) {
         if (!ready) { readyFrame = -1; return false; }
@@ -171,9 +187,18 @@ final class FixtureFoliage implements AutoCloseable {
         if (!action.isDone()) return false;
         serverBlocks = action.get(); actionComplete = true; return true;
     }
-    private double cameraX() { return layout.x + 8.0; }
-    private double cameraY() { return layout.y + 4.0; }
+    private double cameraX() { return layout.x + (angled ? 12.0 : 8.0); }
+    private double cameraY() { return layout.y + (sideView ? 1.05 : 4.0); }
     private double cameraZ() { return layout.z + 14.5; }
+    private float cameraYaw() { return angled ? 140f : 180f; }
+    private float cameraPitch() { return sideView ? 2f : 12f; }
+    private void moveView(String name) {
+        actionName = name; actionComplete = false;
+        double x = cameraX(), y = cameraY(), z = cameraZ(); float yaw = cameraYaw(), pitch = cameraPitch();
+        action = server.callFromMainThread(() -> {
+            requireWorld(); player().connection.setPlayerLocation(x, y, z, yaw, pitch); return describeBlocks(world);
+        });
+    }
     private void holdPose(double x, double y, double z, float yaw, float pitch) {
         mc.player.setPositionAndRotation(x, y, z, yaw, pitch);
         mc.player.prevPosX = mc.player.lastTickPosX = x; mc.player.prevPosY = mc.player.lastTickPosY = y;
@@ -203,6 +228,7 @@ final class FixtureFoliage implements AutoCloseable {
                 + " actionObserved=" + actionComplete + " samplePending=" + (serverSample != null)
                 + " stableFrames=" + (readyFrame < 0 ? 0 : events.renderedFrames() - readyFrame)
                 + " sectionVertices=" + vertices() + " sectionHash=" + Long.toHexString(hash())
+                + " sectionOverlayVertices=" + overlays() + " sceneOverlayVertices=" + events.terrainOverlayVertexCount()
                 + " sceneVertices=" + events.betterFoliageVertexCount() + " captures=" + events.betterFoliageCaptureCount()
                 + " reloads=" + events.textureReloadCount() + " reloadBaseline=" + reloadBaseline
                 + " sectionRevision=" + revision() + " revisionBaseline=" + revisionBaseline
@@ -213,6 +239,7 @@ final class FixtureFoliage implements AutoCloseable {
     private String describeBlocks(World source) {
         return "tick=" + source.getTotalWorldTime() + " leaf=" + describeBlock(source, layout.leaf)
                 + " grass=" + describeBlock(source, layout.grass) + " cactus=" + describeBlock(source, layout.cactus)
+                + " grassSide=" + describeBlock(source, layout.grassSide)
                 + " cactusMiddle=" + describeBlock(source, layout.cactus.up())
                 + " cactusTop=" + describeBlock(source, layout.cactus.up(2))
                 + " sand=" + describeBlock(source, layout.sand) + " support=" + describeBlock(source, layout.support);
@@ -245,6 +272,11 @@ final class FixtureFoliage implements AutoCloseable {
                     Blocks.LEAVES.getDefaultState().withProperty(BlockLeaves.CHECK_DECAY, false).withProperty(BlockLeaves.DECAYABLE, false), 3);
         for (int dx = 6; dx <= 9; dx++) for (int dz = 5; dz <= 8; dz++)
             world.setBlockState(new BlockPos(layout.x + dx, layout.y, layout.z + dz), Blocks.GRASS.getDefaultState(), 3);
+        // Expose the four grass/dirt side transitions to fixed front and angled views.
+        for (int dx = 6; dx <= 9; dx++) {
+            world.setBlockState(new BlockPos(layout.x + dx, layout.y + 1, layout.z + 9), Blocks.DIRT.getDefaultState(), 3);
+            world.setBlockState(new BlockPos(layout.x + dx, layout.y + 2, layout.z + 9), Blocks.GRASS.getDefaultState(), 3);
+        }
         // Sand uses scheduled ticks even when randomTickSpeed is zero. Give the elevated
         // fixture a permanent support block, including in a four-layer flat world.
         world.setBlockState(layout.support, Blocks.QUARTZ_BLOCK.getDefaultState(), 3);
@@ -266,10 +298,11 @@ final class FixtureFoliage implements AutoCloseable {
     }
     static final class Layout {
         final int x, y, z;
-        final BlockPos leaf, grass, cactus, sand, support;
+        final BlockPos leaf, grass, grassSide, cactus, sand, support;
         Layout(int x, int y, int z) {
             this.x = x; this.y = y; this.z = z;
             leaf = new BlockPos(x + 3, y + 2, z + 6); grass = new BlockPos(x + 7, y, z + 6);
+            grassSide = new BlockPos(x + 7, y + 2, z + 9);
             cactus = new BlockPos(x + 12, y + 1, z + 6);
             sand = cactus.down(); support = sand.down();
         }

@@ -9,6 +9,7 @@ import java.awt.image.BufferedImage;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.nio.FloatBuffer;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -29,13 +30,18 @@ import net.minecraft.util.math.BlockPos;
 import net.minecraft.world.World;
 import net.minecraft.world.WorldServer;
 import net.minecraftforge.fml.relauncher.ReflectionHelper;
+import net.minecraftforge.client.event.RenderWorldLastEvent;
+import net.minecraftforge.common.MinecraftForge;
+import net.minecraftforge.fml.common.eventhandler.SubscribeEvent;
+import org.lwjgl.BufferUtils;
+import org.lwjgl.opengl.GL11;
 
 /** Real FBP debris/placement and vanilla crack decals in a controller-owned smoke arena. */
 final class FixtureBlockEffects implements AutoCloseable {
     private static final String DIGGING = "com.TominoCZ.FBP.particle.FBPParticleDigging";
     private static final String PLACEMENT = "com.TominoCZ.FBP.particle.FBPParticleBlock";
     private static final int BREAKER = Integer.MIN_VALUE + 7290;
-    private enum Phase { SETUP, ARRIVE, BASELINE, CRACK_EARLY, CRACK_LATE, CRACK_CLEAR, PLANT, STONE,
+    private enum Phase { SETUP, ARRIVE, BASELINE, BASELINE_STABLE, CRACK_EARLY, CRACK_LATE, CRACK_CLEAR, PLANT, STONE,
         PLACE_STONE_READY, PLACE_STONE, PLACE_STONE_REST, PLACE_GRASS_READY, PLACE_GRASS, PLACE_GRASS_REST, RETURN, DONE }
     private final Minecraft mc;
     private final ClientEvents events;
@@ -47,7 +53,8 @@ final class FixtureBlockEffects implements AutoCloseable {
     private final FixtureTerrain.Output output;
     private final UUID playerId;
     private final int originalView, originalParticles;
-    private final boolean originalHud, originalFlying;
+    private final boolean originalHud, originalFlying, originalBobbing;
+    private final float originalFov;
     private final double returnX, returnY, returnZ;
     private final float returnYaw, returnPitch;
     private Constructor<?> placementConstructor;
@@ -58,6 +65,11 @@ final class FixtureBlockEffects implements AutoCloseable {
     private Future<?> action;
     private Particle placement;
     private BufferedImage firstPoseImage;
+    private BufferedImage crackBaseline;
+    private CrackImageObservation crackObservation;
+    private final FloatBuffer projection = BufferUtils.createFloatBuffer(16);
+    private float projectionX, projectionY;
+    private boolean registered;
     private BlockEffectObservation observation;
     private long since = System.nanoTime(), progress = since, readyFrame = -1, lastFrame = -1, damageHash, debrisHash;
     private int debrisSamples, bursts, attempts, lastBurstTick = Integer.MIN_VALUE;
@@ -78,6 +90,7 @@ final class FixtureBlockEffects implements AutoCloseable {
         returnX = x; returnY = y; returnZ = z; returnYaw = yaw; returnPitch = pitch;
         originalView = mc.gameSettings.thirdPersonView; originalHud = mc.gameSettings.hideGUI;
         originalParticles = mc.gameSettings.particleSetting; originalFlying = mc.player.capabilities.isFlying;
+        originalFov = mc.gameSettings.fovSetting; originalBobbing = mc.gameSettings.viewBobbing;
     }
 
     private void setup() throws ReflectiveOperationException {
@@ -96,6 +109,8 @@ final class FixtureBlockEffects implements AutoCloseable {
         placementHeight = ReflectionHelper.findField(placementType, "prevHeight");
         clientConfigured = true;
         mc.gameSettings.thirdPersonView = 0; mc.gameSettings.hideGUI = true; mc.gameSettings.particleSetting = 0;
+        mc.gameSettings.fovSetting = 70; mc.gameSettings.viewBobbing = false;
+        MinecraftForge.EVENT_BUS.register(this); registered = true;
         action = server.callFromMainThread(() -> {
             requireWorld(); EntityPlayerMP player = player();
             serverFlying = player.capabilities.isFlying; serverConfigured = true;
@@ -142,24 +157,39 @@ final class FixtureBlockEffects implements AutoCloseable {
                 break;
             case BASELINE:
                 if (settled(arenaReady() && events.terrainPendingSectionCount() == 0 && events.terrainRetirementCount() == 0, 20)) {
-                    capture("block-effects-baseline-obsidian-quartz-plant-stone-grass");
+                    crackBaseline = output.image();
+                    output.capture("block-effects-baseline-obsidian-quartz-plant-stone-grass", crackBaseline);
+                    transition(Phase.BASELINE_STABLE);
+                }
+                break;
+            case BASELINE_STABLE:
+                if (settled(projectionX > 0 && projectionY > 0, 20)) {
+                    BufferedImage stable = output.image();
+                    crackObservation = new CrackImageObservation(crackBaseline, stable,
+                            face(layout.bright, stable), face(layout.stone, stable));
+                    crackBaseline = null;
                     cracks(1); transition(Phase.CRACK_EARLY);
                 }
                 break;
             case CRACK_EARLY:
                 if (settled(events.damageQuads() >= 2, 20)) {
-                    capture("block-effects-cracks-stage-1-obsidian-quartz"); damageHash = events.damageGeometryHash();
+                    checkCracks("block-effects-cracks-stage-1-obsidian-quartz", false); damageHash = events.damageGeometryHash();
                     cracks(8); transition(Phase.CRACK_LATE);
                 }
                 break;
             case CRACK_LATE:
                 if (settled(events.damageQuads() >= 2 && events.damageGeometryHash() != damageHash, 20)) {
-                    capture("block-effects-cracks-stage-8-obsidian-quartz"); log("CRACKS_PASS");
+                    checkCracks("block-effects-cracks-stage-8-obsidian-quartz", true); log("CRACKS_PASS");
                     cracks(-1); transition(Phase.CRACK_CLEAR);
                 }
                 break;
             case CRACK_CLEAR:
-                if (settled(events.damageQuads() == 0, 10)) { transition(Phase.PLANT); seedDebris(plantState(), layout.plant); }
+                if (settled(events.damageQuads() == 0, 20)) {
+                    BufferedImage image = output.image(); output.capture("block-effects-cracks-cleared", image);
+                    if (!crackObservation.restored(image)) throw new IllegalStateException("Cancelled cracks did not restore the block image");
+                    crackObservation = null; log("CRACKS_CLEAR_PASS");
+                    transition(Phase.PLANT); seedDebris(plantState(), layout.plant);
+                }
                 break;
             case PLANT:
             case STONE:
@@ -292,6 +322,22 @@ final class FixtureBlockEffects implements AutoCloseable {
     }
     private static IBlockState plantState() { return Blocks.TALLGRASS.getDefaultState().withProperty(BlockTallGrass.TYPE, BlockTallGrass.EnumType.GRASS); }
     private void cracks(int stage) { mc.renderGlobal.sendBlockBreakProgress(BREAKER, layout.dark, stage); mc.renderGlobal.sendBlockBreakProgress(BREAKER + 1, layout.bright, stage); }
+    @SubscribeEvent public void frame(RenderWorldLastEvent event) {
+        if (!registered || !ownsClient()) return;
+        projection.clear(); GL11.glGetFloat(GL11.GL_PROJECTION_MATRIX, projection);
+        projectionX = projection.get(0); projectionY = projection.get(5);
+    }
+    private int[] face(BlockPos position, BufferedImage image) {
+        return CrackImageObservation.face(image.getWidth(), image.getHeight(), position.getX() - cameraX(),
+                position.getY() - cameraY() - mc.player.getEyeHeight(), cameraZ() - position.getZ() - 1,
+                projectionX, projectionY);
+    }
+    private void checkCracks(String name, boolean late) throws Exception {
+        BufferedImage image = output.image(); output.capture(name, image);
+        CrackImageObservation.Result proof = crackObservation.stage(image, late);
+        output.log("BLOCK_EFFECTS_CRACK_PIXELS", "late=" + late + " " + proof.describe());
+        if (!proof.visible) throw new IllegalStateException("Mining stage is not visibly readable: " + proof.describe());
+    }
     private int liveDebris() { int count = 0; for (Particle particle : debris) if (particle.isAlive()) count++; return count; }
     private void clearDebris() { for (Particle particle : debris) particle.setExpired(); debris.clear(); }
     private boolean ownsClient() { return mc.getIntegratedServer() == server && mc.world == clientWorld && mc.player != null && playerId.equals(mc.player.getUniqueID()); }
@@ -343,9 +389,11 @@ final class FixtureBlockEffects implements AutoCloseable {
         });
     }
     private void restoreClient() {
+        if (registered) { MinecraftForge.EVENT_BUS.unregister(this); registered = false; }
         if (!clientConfigured) return;
         mc.gameSettings.thirdPersonView = originalView; mc.gameSettings.hideGUI = originalHud;
         mc.gameSettings.particleSetting = originalParticles;
+        mc.gameSettings.fovSetting = originalFov; mc.gameSettings.viewBobbing = originalBobbing;
         if (ownsClient()) mc.player.capabilities.isFlying = originalFlying;
         clientConfigured = false;
     }
@@ -383,7 +431,7 @@ final class FixtureBlockEffects implements AutoCloseable {
                 catch (ReflectiveOperationException error) { throw new IllegalStateException("Owned FBP animation cleanup failed", error); }
             }
         } finally {
-            firstPoseImage = null;
+            firstPoseImage = crackBaseline = null; crackObservation = null;
             restoreClient();
             if (!cleanupQueued && action != null) { cleanupQueued = true; restoreServer(); }
             closed = true;
