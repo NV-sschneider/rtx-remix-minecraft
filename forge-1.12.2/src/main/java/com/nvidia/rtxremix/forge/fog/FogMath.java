@@ -49,10 +49,51 @@ final class FogMath {
                 + (upperLeft * (1 - x) + upperRight * x) * y;
     }
 
-    /** Neighborhood clipping immediately rejects stale interiors while preserving fractional edge coverage. */
+    /** Supremum over all nonnegative distances, without sampling an arbitrary depth range. */
+    static double maximumOpacityDifference(FogState first, FogState second) {
+        if (!first.enabled() && !second.enabled()) return 0;
+        if (first.enabled() != second.enabled() || first.mode() != second.mode() || first.radial() != second.radial())
+            return 1;
+        if (first.mode() == FogState.LINEAR) {
+            if (first.start() == second.start() && first.end() == second.end()) return 0;
+            // The difference of two clamped affine laws is piecewise affine. Its
+            // extrema lie at zero or one of the four nonnegative breakpoints.
+            double difference = differenceAt(first, second, 0);
+            difference = Math.max(difference, differenceAt(first, second, Math.max(0, first.start())));
+            difference = Math.max(difference, differenceAt(first, second, Math.max(0, first.end())));
+            difference = Math.max(difference, differenceAt(first, second, Math.max(0, second.start())));
+            return Math.max(difference, differenceAt(first, second, Math.max(0, second.end())));
+        }
+        if (first.density() == second.density()) return 0;
+        double low = Math.min(first.density(), second.density()), high = Math.max(first.density(), second.density());
+        if (low == 0) return 1; // The other law approaches full opacity at infinity.
+        if (first.mode() == FogState.EXP2) { low *= low; high *= high; }
+        // EXP2 uses distance squared as the independent variable; the same
+        // unique extremum of exp(-low*x)-exp(-high*x) applies to both laws.
+        double separation = high - low;
+        double at = Math.log1p(separation / low) / separation;
+        return Math.exp(-low * at) * -Math.expm1(-separation * at);
+    }
+
+    private static double differenceAt(FogState first, FogState second, double distance) {
+        return Math.abs(transmission(first, distance) - transmission(second, distance));
+    }
+
+    /** Sign records which side of the current neighborhood contradicts the retained coverage. */
+    static int rejectionStreak(double previous, double neighborhoodMin, double neighborhoodMax, int lastStreak) {
+        if (previous < neighborhoodMin - FogHistory.COVERAGE_EPSILON)
+            return lastStreak < 0 ? Math.max(-FogHistory.REJECTION_FRAMES, lastStreak - 1) : -1;
+        if (previous > neighborhoodMax + FogHistory.COVERAGE_EPSILON)
+            return lastStreak > 0 ? Math.min(FogHistory.REJECTION_FRAMES, lastStreak + 1) : 1;
+        return 0;
+    }
+
+    /** Isolated misses retain coverage; sustained disocclusion clips on its third confirming frame. */
     static double accumulate(double previous, double current, double neighborhoodMin, double neighborhoodMax,
-                             double weight) {
-        double clipped = Math.max(neighborhoodMin, Math.min(neighborhoodMax, previous));
+                             double weight, int rejectionStreak) {
+        if (weight == 1) return current;
+        double clipped = Math.abs(rejectionStreak) >= FogHistory.REJECTION_FRAMES
+                ? Math.max(neighborhoodMin, Math.min(neighborhoodMax, previous)) : previous;
         return clipped * (1 - weight) + current * weight;
     }
 

@@ -19,7 +19,7 @@ import org.lwjgl.opengl.GL30;
 
 /**
  * Applies observed world fog to finite primary hits before Minecraft UI is composited.
- * The depth texture is borrowed from the currently acquired native frame. Two bounded R16F images
+ * The depth texture is borrowed from the currently acquired native frame. Two bounded RG16F images
  * retain fog coverage only for an unchanged camera; they never retain native color or depth ownership.
  * Fog opacity is reconstructed before resolving its coverage to output resolution. Interpolating
  * projected depth instead would invent intermediate surfaces at silhouettes and sky boundaries.
@@ -51,6 +51,7 @@ public final class FogScene implements AutoCloseable {
             + " float alpha;\n"
             + " if(HistoryPass==1){\n"
             + "  alpha=opacity(screen);\n"
+            + "  float rejected=0.0;\n"
             + "  if(HistoryWeight<1.0){\n"
             + "   float low=alpha, high=alpha;\n"
             + "   vec2 pixel=floor(gl_FragCoord.xy);\n"
@@ -58,10 +59,18 @@ public final class FogScene implements AutoCloseable {
             + "    float current=opacityAt(pixel+vec2(float(x),float(y)));\n"
             + "    low=min(low,current);high=max(high,current);\n"
             + "   }\n"
-            + "   float previous=clamp(texture2D(HistoryOpacity,screen).r,low,high);\n"
+            + "   vec2 retained=texture2D(HistoryOpacity,screen).rg;\n"
+            + "   float previous=retained.r;\n"
+            + "   float lastReject=sign(retained.g)*floor(abs(retained.g)+0.5);\n"
+            + "   if(previous<low-" + FogHistory.COVERAGE_EPSILON + "){\n"
+            + "    rejected=lastReject<0.0 ? max(-" + FogHistory.REJECTION_FRAMES + ".0,lastReject-1.0) : -1.0;\n"
+            + "   }else if(previous>high+" + FogHistory.COVERAGE_EPSILON + "){\n"
+            + "    rejected=lastReject>0.0 ? min(" + FogHistory.REJECTION_FRAMES + ".0,lastReject+1.0) : 1.0;\n"
+            + "   }\n"
+            + "   if(abs(rejected)>=" + FogHistory.REJECTION_FRAMES + ".0)previous=clamp(previous,low,high);\n"
             + "   alpha=mix(previous,alpha,HistoryWeight);\n"
             + "  }\n"
-            + "  gl_FragColor=vec4(alpha,0.0,0.0,1.0);return;\n"
+            + "  gl_FragColor=vec4(alpha,rejected,0.0,1.0);return;\n"
             + " }\n"
             + " if(HistoryPass==2)alpha=texture2D(HistoryOpacity,screen).r;\n"
             + " else if(NearestControl!=0)alpha=opacity(screen);\n"
@@ -194,7 +203,7 @@ public final class FogScene implements AutoCloseable {
     private boolean ensureHistory(int width, int height) {
         if (failedWidth == width && failedHeight == height) return false;
         if (historyFramebuffer != 0 && historyWidth == width && historyHeight == height) return true;
-        history.discard(); releaseHistory();
+        history.resized(); releaseHistory();
         failedWidth = width; failedHeight = height;
         if (!FogHistory.fits(width, height)) {
             LOGGER.warn("Fog coverage history {}x{} exceeds its bounded pixel capacity; using spatial coverage", width, height);
@@ -218,8 +227,8 @@ public final class FogScene implements AutoCloseable {
                 GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_MAG_FILTER, GL11.GL_LINEAR);
                 GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_WRAP_S, GL12.GL_CLAMP_TO_EDGE);
                 GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_WRAP_T, GL12.GL_CLAMP_TO_EDGE);
-                GL11.glTexImage2D(GL11.GL_TEXTURE_2D, 0, GL30.GL_R16F, width, height, 0,
-                        GL11.GL_RED, GL11.GL_FLOAT, (ByteBuffer) null);
+                GL11.glTexImage2D(GL11.GL_TEXTURE_2D, 0, GL30.GL_RG16F, width, height, 0,
+                        GL30.GL_RG, GL11.GL_FLOAT, (ByteBuffer) null);
                 GL30.glFramebufferTexture2D(GL30.GL_DRAW_FRAMEBUFFER, GL30.GL_COLOR_ATTACHMENT0,
                         GL11.GL_TEXTURE_2D, historyTextures[i], 0);
                 if (GL30.glCheckFramebufferStatus(GL30.GL_DRAW_FRAMEBUFFER) != GL30.GL_FRAMEBUFFER_COMPLETE)
@@ -289,6 +298,13 @@ public final class FogScene implements AutoCloseable {
     public void discardHistory() { checkThread(); history.discard(); }
     public int historySamples() { return history.samples(); }
     public long historyResets() { return history.resets(); }
+    public long historyPoseResets() { return history.poseResets(); }
+    public long historyLawResets() { return history.lawResets(); }
+    public long historySizeResets() { return history.sizeResets(); }
+    /** Explicit invalidations include skipped draws, resource reloads and underwater transitions. */
+    public long historyDiscardResets() { return history.discardResets(); }
+    public double historyLawError() { return history.lawError(); }
+    public float historyWeight() { return history.weight(); }
     public int historyResourceCount() {
         return (historyFramebuffer == 0 ? 0 : 1) + (historyTextures[0] == 0 ? 0 : 1) + (historyTextures[1] == 0 ? 0 : 1);
     }

@@ -6,43 +6,74 @@ package com.nvidia.rtxremix.forge.fog;
 
 import com.nvidia.rtxremix.CameraInfoParameterizedEXT;
 
-/** Exact stationary-camera admission. Camera motion never borrows another pose's fog coverage. */
+/** Stationary-camera admission with a bounded contribution from earlier fog laws. */
 final class FogHistory {
     static final int MAX_SAMPLES = 32;
-    static final long MAX_PIXELS = 8L * 1024 * 1024;
+    static final int REJECTION_FRAMES = 3;
+    // More than one half-float rounding step in [0,1], below one 8-bit color step.
+    static final double COVERAGE_EPSILON = 1.0 / 1024;
+    static final double MAX_LAW_ERROR = 1.0 / 255;
+    static final long MAX_BYTES = 64L * 1024 * 1024;
+    static final int BYTES_PER_PIXEL = 2 * 2 * 2; // Two RG16F images: opacity plus signed rejection streak.
+    static final long MAX_PIXELS = MAX_BYTES / BYTES_PER_PIXEL;
     private final CameraInfoParameterizedEXT previous = new CameraInfoParameterizedEXT();
     private final FogState last = new FogState();
     private int width, height, depthWidth, depthHeight, samples;
-    private long resets;
+    private long resets, poseResets, lawResets, sizeResets, discardResets;
+    private double lawError;
+    private float weight;
 
     float observe(FogState fog, CameraInfoParameterizedEXT camera, int width, int height,
                   int depthWidth, int depthHeight) {
-        if (samples != 0 && (this.width != width || this.height != height
-                || this.depthWidth != depthWidth || this.depthHeight != depthHeight
-                || !sameCamera(camera) || !sameFog(fog))) discard();
+        double lawDifference = 0;
+        if (samples != 0) {
+            boolean size = this.width != width || this.height != height
+                    || this.depthWidth != depthWidth || this.depthHeight != depthHeight;
+            boolean pose = !sameCamera(camera);
+            lawDifference = FogMath.maximumOpacityDifference(last, fog);
+            boolean law = last.enabled() != fog.enabled() || last.mode() != fog.mode() || last.radial() != fog.radial()
+                    || lawDifference > MAX_LAW_ERROR;
+            if (size || pose || law) {
+                if (size) sizeResets++;
+                if (pose) poseResets++;
+                if (law) lawResets++;
+                reset(); lawDifference = 0;
+            }
+        }
         this.width = width; this.height = height; this.depthWidth = depthWidth; this.depthHeight = depthHeight;
         copyCamera(camera);
         last.set(fog.enabled(), fog.mode(), fog.radial(), fog.red(), fog.green(), fog.blue(),
                 fog.density(), fog.start(), fog.end());
         samples = Math.min(MAX_SAMPLES, samples + 1);
-        // Initial samples form an arithmetic average. At the cap this becomes a
-        // running exponential average, retaining bounded state rather than a frame ring.
-        return 1.0f / samples;
+        // The previous aggregate's law error grows by at most the exact
+        // supremum between consecutive laws. Blending current-law coverage with
+        // weight w leaves at most (1-w)*(E+delta). Increase w only as needed to
+        // stay within one 8-bit opacity step; continuous morning fog need not
+        // periodically discard a stable silhouette. This bound covers law drift,
+        // independently of depth sampling and half-float storage error.
+        double uncertainty = lawError + lawDifference;
+        double minimum = uncertainty > MAX_LAW_ERROR ? 1 - MAX_LAW_ERROR / uncertainty : 0;
+        weight = Math.max(1.0f / samples, (float) minimum);
+        if (weight < minimum) weight = Math.nextUp(weight);
+        lawError = (1.0 - weight) * uncertainty;
+        return weight;
     }
 
-    void discard() { if (samples != 0) resets++; samples = 0; }
+    void discard() { if (samples != 0) { discardResets++; reset(); } }
+    void resized() { if (samples != 0) { sizeResets++; reset(); } }
+    private void reset() { resets++; samples = 0; lawError = 0; weight = 0; }
     int samples() { return samples; }
     long resets() { return resets; }
+    long poseResets() { return poseResets; }
+    long lawResets() { return lawResets; }
+    long sizeResets() { return sizeResets; }
+    long discardResets() { return discardResets; }
+    double lawError() { return lawError; }
+    float weight() { return weight; }
     static boolean fits(int width, int height) {
         return width > 0 && height > 0 && (long) width * height <= MAX_PIXELS;
     }
 
-    private boolean sameFog(FogState fog) {
-        // Color is applied to the final coverage every frame. Daylight-driven
-        // color changes must not restart an otherwise stationary opacity average.
-        return last.enabled() == fog.enabled() && last.mode() == fog.mode() && last.radial() == fog.radial()
-                && last.density() == fog.density() && last.start() == fog.start() && last.end() == fog.end();
-    }
     private boolean sameCamera(CameraInfoParameterizedEXT camera) {
         return previous.position.x == camera.position.x && previous.position.y == camera.position.y
                 && previous.position.z == camera.position.z
