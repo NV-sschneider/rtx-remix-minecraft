@@ -30,8 +30,8 @@ installations leave it unbound to avoid modpack shortcuts.
 Remix developer menu. Opening either menu releases held Minecraft inputs and
 mouse capture; closing it restores the current gameplay or screen session.
 An inventory remains the same open container while the native menu is shown.
-The configured test instances use windowed mode; the launcher preserves their
-display settings. Once Remix initializes, F11 uses desktop borderless fullscreen
+The launcher preserves each instance's display settings. Once Remix initializes,
+F11 uses desktop borderless fullscreen
 so OpenGL does not hold an exclusive display mode over the native swapchain.
 Minecraft's fullscreen setting and remembered window size are preserved. This
 presentation ownership continues while `/mrtx off` displays vanilla frames.
@@ -249,11 +249,18 @@ instead of applying the atmospheric composite a second time.
 Depth is usually lower resolution than the final upscaled color. The composite
 reconstructs fog opacity at depth texels before filtering coverage; interpolating
 projected depth would invent surfaces between a tree edge and the sky. An unchanged
-camera accumulates coverage, using a new-frame weight of 1/32 after warmup, clamped to
-the current 3 × 3 opacity neighborhood. Motion, projection or fog-law changes,
-resize, resource reload, skipped frames, underwater entry and world teardown discard
+camera accumulates coverage, using a new-frame weight of 1/32 after warmup. Three
+consecutive contradictions on the same side of the current 3 × 3 opacity
+neighborhood clip retained coverage; an isolated missed leaf sample no longer
+discards it. Newly uncovered pixels can retain coverage for two extra frames.
+Gradual fog-distance or density changes retain history with an adaptive weight
+that bounds accumulated fog-law error to 1/255 opacity, independently of depth
+noise and texture rounding. This lets Dynamic Surroundings' changing morning fog
+keep accumulating. Abrupt law changes, mode changes, motion, projection, resize,
+resource reload, skipped frames, underwater entry and world teardown discard
 history. Fog color changes use the current color without restarting accumulation.
-Two R16F images use at most 32 MiB; unsupported sizes or allocation failure fall
+Two RG16F images store opacity and rejection streaks, using at most 64 MiB;
+unsupported sizes or allocation failure fall
 back to spatial coverage. This reduces stationary shimmer, but does not provide
 motion-vector reconstruction: the pinned runtime exposes raw depth without its
 temporal jitter or resolved coverage, so moving silhouettes remain a limitation.
@@ -354,7 +361,13 @@ with a warning. Stage changes, resource reload, and cancellation retain their
 normal lifecycle; ordinary particle textures use their original atlas.
 
 Fancy Block Particles 2.4.1 cube debris preserves and transforms its supplied
-outward lighting normals. Its placement animation records original model colors
+outward lighting normals. Its observed digging draw uses ordinary world lighting
+when its exact six-face buffer, original sprite, alpha test, and fully opaque
+vertex colors prove an opaque or binary-cutout cube. Full source-sprite bounds
+also keep the small debris UV patches inside their atlas sprite. Fractional
+sprites, unknown contracts, and the animation's actual alpha fade retain blending;
+neither brightness nor emission is substituted for lighting.
+Its placement animation records original model colors
 and biome tint before Minecraft bakes lighting into them, while the mod evaluates
 and draws its model once. A bounded color stream is used only when the standard
 renderer, buffer, vertex count, and quad contract match. FBP settings, animation,
@@ -489,10 +502,10 @@ focused run; their presence describes an available check, not a recorded pass.
 | `-SurvivalSmokeTest` | Server damage, client melee/projectile/eating actions, native capture, and restored player state, including First Aid when installed. |
 | `-FallingTreeSmokeTest` | Installed Dynamic Trees generation, player chopping, falling branch capture/animation, and retirement. |
 | `-MobHudSmokeTest` | Installed Neat health-bar pixels, disabled/focused/F1 visibility rules, and settings restoration. |
-| `-BlockEffectSmokeTest` | Contrasting crack stages 1/8, real FBP plant/stone debris, intermediate stone/tinted-grass placement poses, and cleanup. |
+| `-BlockEffectSmokeTest` | Contrasting crack stages 1/8, lit-pixel checks for real FBP plant/stone/hit debris in open sky and shade, natural fade observations, intermediate stone/tinted-grass placement poses, and cleanup. |
 | `-VisibilitySmokeTest` | Same-room shadow controls at 2 and 2.5, image comparison including highlights, and exact native-setting restoration. |
 | `-FogSmokeTest` | Owned Forge fog callbacks, near/far pixel measurements for LINEAR/EXP/EXP2 and changed color under Remix and vanilla, then callback/settings/pose restoration. |
-| `-FogEdgeSmokeTest` | Adds stationary leaf/quartz edge samples with fog disabled and enabled, camera-motion history reset and restabilization, and logs output/depth dimensions and temporal image measurements. |
+| `-FogEdgeSmokeTest` | Adds near/distant leaf and quartz edge samples, continuous fog-law drift and adaptive weighting, camera-motion reset and restabilization, and leaf-removal cleanup. Logs output/depth dimensions and temporal image measurements. |
 | `-DroppedItemSmokeTest` | Real ItemPhysic sticks, stone, and quartz on the ground in sun and shade; lit surface pixels, ordinary lighting, reload, and retirement. |
 | `-DimensionSmokeTest` | Server-owned Overworld/Nether/End/Overworld transitions with rendering enabled. |
 | `-WindowSmokeTest` | Native menus in gameplay/inventory, input release, repeated enabled/disabled states in fullscreen and windowed mode, resize, and restoration. |
@@ -733,6 +746,33 @@ at the solid edge. Camera movement discarded history, and returning to the pose
 reproduced the improvement. LINEAR/EXP/EXP2, color changes, callback restoration
 and world teardown also passed. These measurements establish stationary fixture
 improvement, not elimination of moving-edge shimmer or all pack-specific effects.
+
+The remaining stationary-fog report was reproduced by continuously changing the
+LINEAR range, as Dynamic Surroundings' morning fog does. At the same output/depth
+sizes, baseline `20261025-031734-7fc6409c` repeatedly reset history to one sample;
+candidate `20261025-032616-af89a669` retained 32 samples without a reset during
+either gentle or faster range drift. Distant-leaf mean frame variation during
+gentle drift fell from 1.820 to 0.142 (about 92%). With a constant law, large
+distant-leaf changes above eight color levels fell from 0.0703% to 0.0294%, while
+mean variation increased from 0.104 to 0.142: the rejection delay trades sharp
+resets for smaller gradual changes. Faster drift exercised adaptive weighting
+up to 0.298, with the analytic law-error bound at or below 1/255. Removing the
+distant leaves left no green fog pixels after terrain publication and three
+additional native frames, without resetting history. Motion reset, all three fog
+equations, callback restoration, and world teardown passed.
+
+Debris run `20261025-033153-7a568051` checked actual FBP plant, stone, and block-hit
+particles in open sky and under a temporary stone shelter. Three distinct native
+frames per case showed colored, lit pixels against an empty-frame baseline;
+sheltered stone/hit samples measured about 29/36 luminance against a 37-luminance
+stone reference. Capture counters exercised both opaque/cutout promotion and
+retained fractional blending, and screenshots observed the natural alpha fade.
+These checks establish visible debris in those scenes. The old open-sky path also
+passed, so they do not establish reproduction of every reported black-particle
+case. Fading debris under first-person held-light-only illumination remains
+unverified: those lights deliberately omit cached volumetric radiance, which the
+runtime's blended lighting can use. Neither the fade nor the held-light policy
+is overridden by this change.
 
 ## RLCraft test instance
 
