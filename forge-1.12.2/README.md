@@ -31,7 +31,11 @@ Remix developer menu. Opening either menu releases held Minecraft inputs and
 mouse capture; closing it restores the current gameplay or screen session.
 An inventory remains the same open container while the native menu is shown.
 The configured test instances use windowed mode; the launcher preserves their
-display settings. Fullscreen, resize, and minimize/restore
+display settings. Once Remix initializes, F11 uses desktop borderless fullscreen
+so OpenGL does not hold an exclusive display mode over the native swapchain.
+Minecraft's fullscreen setting and remembered window size are preserved. This
+presentation ownership continues while `/mrtx off` displays vanilla frames.
+Fullscreen, resize, and minimize/restore
 have dedicated optional fixtures below.
 
 New installs use a modest local tone-mapping shadow level of `2.5`, with the
@@ -144,6 +148,12 @@ Reload and exit from water clear the selected medium safely. Custom fluids using
 baked models keep that path; custom `LIQUID` renderers outside `BlockLiquid` are
 reported and skipped.
 
+Exactly coincident baked cutout faces over a proven opaque face, including the
+vanilla grass-side overlay, use static decals instead of competing ordinary
+surfaces. The bounded classification preserves vertex positions, UVs, tint, and
+paint order. Unknown alpha, escaped UVs, reversed faces, and custom Better Foliage
+geometry retain their original path.
+
 Vanilla clear/stained glass blocks and panes use refraction with an index of
 1.52. Pane models provide closed geometry with physical thickness, so they use
 the same volume material as blocks rather than applying a thin-wall model to both
@@ -236,6 +246,18 @@ distances. Custom shader fog and explicit per-vertex fog coordinates are outside
 this contract. Underwater rendering keeps the existing native medium attenuation
 instead of applying the atmospheric composite a second time.
 
+Depth is usually lower resolution than the final upscaled color. The composite
+reconstructs fog opacity at depth texels before filtering coverage; interpolating
+projected depth would invent surfaces between a tree edge and the sky. An unchanged
+camera accumulates coverage, using a new-frame weight of 1/32 after warmup, clamped to
+the current 3 × 3 opacity neighborhood. Motion, projection or fog-law changes,
+resize, resource reload, skipped frames, underwater entry and world teardown discard
+history. Fog color changes use the current color without restarting accumulation.
+Two R16F images use at most 32 MiB; unsupported sizes or allocation failure fall
+back to spatial coverage. This reduces stationary shimmer, but does not provide
+motion-vector reconstruction: the pinned runtime exposes raw depth without its
+temporal jitter or resolved coverage, so moving silhouettes remain a limitation.
+
 ## Entities, items, and tile renderers
 
 Model capture observes existing draws on the render thread. Live model-view
@@ -274,7 +296,11 @@ poses. Local body geometry
 uses a separate category for shadows and reflections. Third-person, hidden-HUD,
 and inventory transitions release the relevant occurrences. Dropped items use
 actual `RenderItem` vertices, stack copies, tint, and ItemPhysic transforms and
-borrow the animated block atlas. Nonliving entity CPU buffers cover conventional
+borrow the animated block atlas. Proven opaque or binary-cutout dropped-item
+sprites use ordinary surface lighting even when ItemPhysic enables blending.
+Fractional alpha, unknown sprite data, escaped UVs, and unsupported alpha tests
+retain their original blending. Valid sprite bounds also constrain atlas sampling.
+Nonliving entity CPU buffers cover conventional
 projectiles and sprites. Known armor/item glint scopes preserve their animated
 texture transforms and additive emission; arbitrary custom item renderers and
 shader glints still require adapters.
@@ -317,7 +343,10 @@ and `ONE/ONE` additive draws use emission and retain the source-alpha distinctio
 Known additive entity eyes/projectile sprites use the corresponding material
 rules. Vanilla block-breaking overlays use a static black decal whose alpha is
 derived from the destroy texture's grayscale darkening, preserving the underlying
-block color. Remix cannot represent vanilla's multiplicative crack material:
+block color. The display-space multiplier is converted to linear attenuation;
+the black conductor decal adds no dielectric reflection over the crack. Source
+alpha controls rejection rather than the strength of vanilla's multiplicative
+blend. Remix cannot represent vanilla's complete multiplicative crack material:
 source values above half brightness contribute no decal, so their brightening is
 omitted. The compact damage atlas supports static grayscale destroy sprites up to
 512 pixels per side; colored, animated, rotated, or malformed sources are omitted
@@ -455,7 +484,7 @@ focused run; their presence describes an available check, not a recorded pass.
 | `-CombatSmokeTest` | Nonliving projectiles and offscreen entity capture. |
 | `-EffectSmokeTest` | Particles/rain, additive strips/fans, CPU texture revisions/deletion/replacement, camera movement, and reload. |
 | `-CloudSmokeTest` | Clouds and an owned custom sky renderer, motion, weather, and cleanup. |
-| `-FoliageSmokeTest` | Installed Better Foliage geometry, AO independence, reload, and removal. |
+| `-FoliageSmokeTest` | Installed Better Foliage geometry, grass-side overlay front/angled views, AO independence, reload, and removal. |
 | `-CompatibilitySmokeTest` | Actual installed mod creatures, animation, offscreen capture, reload, and removal. |
 | `-SurvivalSmokeTest` | Server damage, client melee/projectile/eating actions, native capture, and restored player state, including First Aid when installed. |
 | `-FallingTreeSmokeTest` | Installed Dynamic Trees generation, player chopping, falling branch capture/animation, and retirement. |
@@ -463,8 +492,10 @@ focused run; their presence describes an available check, not a recorded pass.
 | `-BlockEffectSmokeTest` | Contrasting crack stages 1/8, real FBP plant/stone debris, intermediate stone/tinted-grass placement poses, and cleanup. |
 | `-VisibilitySmokeTest` | Same-room shadow controls at 2 and 2.5, image comparison including highlights, and exact native-setting restoration. |
 | `-FogSmokeTest` | Owned Forge fog callbacks, near/far pixel measurements for LINEAR/EXP/EXP2 and changed color under Remix and vanilla, then callback/settings/pose restoration. |
+| `-FogEdgeSmokeTest` | Adds stationary leaf/quartz edge samples with fog disabled and enabled, camera-motion history reset and restabilization, and logs output/depth dimensions and temporal image measurements. |
+| `-DroppedItemSmokeTest` | Real ItemPhysic sticks, stone, and quartz on the ground in sun and shade; lit surface pixels, ordinary lighting, reload, and retirement. |
 | `-DimensionSmokeTest` | Server-owned Overworld/Nether/End/Overworld transitions with rendering enabled. |
-| `-WindowSmokeTest` | Native menus in gameplay/inventory, input release, fullscreen, resize, and restoration. |
+| `-WindowSmokeTest` | Native menus in gameplay/inventory, input release, repeated enabled/disabled states in fullscreen and windowed mode, resize, and restoration. |
 | `-TerrainOptimizationSmokeTest` | Supported SOLID draw suppression, injected failure with pixel-exact pre-HUD recovery, release, reload, and resize. |
 | `-SoakSmokeTest` | Repeated loaded-chunk travel, reload, renderer disable/re-enable, and bounded-resource observations. |
 | `-TerrainSmokeTest` | Travel, a published edit, view-distance changes, retirement, and recovery. |
@@ -475,6 +506,22 @@ focused run; their presence describes an available check, not a recorded pass.
 with the same `-InstanceName`/`-LauncherDirectory`; it waits for the fixture's
 request and validates the owning game process/window before minimizing and
 restoring it. It does not select an unrelated desktop window.
+
+`-WindowCaptureAck C:/path/without-spaces/window.ack` requires `-WindowSmokeTest`
+and holds startup and each enabled/disabled display checkpoint for an external
+window capture. Capture the owned Minecraft client area with desktop capture,
+then write the exact `token=` value from `WINDOW_CAPTURE_READY` to that file.
+An earlier run's token cannot release a checkpoint. Focus the loading game before
+native initialization and do not switch focus to obtain a passing screenshot:
+Minecraft's framebuffer screenshots alone cannot prove native presentation.
+
+`-FogNearestSmokeTest` requires `-FogEdgeSmokeTest` and selects the original
+nearest-depth composite as a diagnostic control. Compare the same output/depth
+sizes and camera: `FOG_EDGE_OBSERVATION` reports mean frame change, the fraction
+of pixels changing by more than eight channel values, and the 95th percentile
+temporal deviation. A sparse cutout can have a zero percentile despite visible
+flicker, so inspect the other measurements and images too. This control does not
+exercise the history-reset checks.
 
 The falling-tree, mob-HUD, and block-effect fixtures require their corresponding
 installed mods; the FBP fixture uses its enabled, unfrozen placement configuration
@@ -664,6 +711,28 @@ world geometry: alpha-255 samples occlude contrasting backgrounds, alpha-128
 samples reveal them, and a same-handle texture patch restores coverage. This
 rules out a blanket inability to render opaque pixels on a blended surface; it
 does not reproduce Flowersaur's mesh, texture footprint, or temporal behavior.
+
+The October 24 playthrough follow-up was checked in RLCraft 2.9.3 on Windows x64
+with the unchanged `minecraft-rtx2-71a581da` runtime. Run
+`20261025-021017-3cf1c11e` passed ItemPhysic stick/stone/quartz surface-pixel checks
+in sun and shade, texture reload and retirement. Mining stages 1/8 produced
+29/222 darkened pixels in a 1,558-pixel target, with cancellation restoring the
+surface. Grass-side overlays retained 40 local vertices across AO changes and
+reload, then zero after removal; front/angled screenshots were inspected.
+
+Fullscreen run `20261025-022636-54db2d03` captured the owned desktop window at
+initial native activation and repeated off/on states in both display modes.
+The scene and native UI were visible without a focus change after initialization;
+all ten capture checkpoints and the menu/resize fixture completed.
+
+For fog, identical 2560 × 1440 output and 1485 × 835 primary depth were compared
+using nearest control `20261025-021810-964ca8d1` and temporal coverage
+`20261025-023847-8ff4ab9c`. Mean per-channel frame variation over 32 stationary
+samples fell from 0.541 to 0.031 in the leaf cutout region and from 2.129 to 0.121
+at the solid edge. Camera movement discarded history, and returning to the pose
+reproduced the improvement. LINEAR/EXP/EXP2, color changes, callback restoration
+and world teardown also passed. These measurements establish stationary fixture
+improvement, not elimination of moving-edge shimmer or all pack-specific effects.
 
 ## RLCraft test instance
 
