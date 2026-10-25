@@ -208,6 +208,10 @@ public final class EffectScene implements AutoCloseable {
     private static MaterialInfo material(Texture texture, boolean emissive) {
         MaterialInfo material = material(texture.handle, emissive);
         material.wrapModeU = texture.wrapU; material.wrapModeV = texture.wrapV; material.filterMode = texture.filter;
+        // A black conductor contributes neither diffuse albedo nor dielectric F0.
+        // The crack therefore attenuates the underlying material instead of adding
+        // a lit gray coating to it, including on an otherwise dark block.
+        if (texture.damage) material.opaqueExt.metallicConstant = 1;
         return material;
     }
 

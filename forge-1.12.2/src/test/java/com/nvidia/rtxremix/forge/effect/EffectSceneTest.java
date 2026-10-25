@@ -186,6 +186,10 @@ public class EffectSceneTest {
         @Override public void destroyTexture(long handle) { assertTrue(meshes.isEmpty()); assertTrue(textures.remove(handle)); }
         @Override public long createMaterial(MaterialInfo info) {
             assertTrue(info.albedoTexture == 42 || textures.contains(info.albedoTexture));
+            assertEquals(info.albedoTexture == 42 ? 0 : 1, info.opaqueExt.metallicConstant, 0);
+            assertEquals(0, info.emissiveTexture);
+            assertEquals(1, info.opaqueExt.roughnessConstant, 0);
+            assertEquals(1, info.opaqueExt.useDrawCallAlphaState);
             long handle = next++; materials.add(handle); return handle;
         }
     }

@@ -79,12 +79,16 @@ final class DamageAtlas {
         }
     }
 
-    /** The darkening half of 2*source*destination; values above one cannot be alpha darkening. */
+    /** The darkening half of vanilla's display-space multiply, expressed as linear decal coverage. */
     static int coverage(int argb) {
-        int alpha = argb >>> 24;
         // Pinned RenderGlobal rejects source alpha <= 0.1 before the multiply.
-        if (alpha <= 25) return 0;
-        return (Math.max(0, 255 - 2 * (argb & 255)) * alpha + 127) / 255;
+        // Its DST_COLOR/SRC_COLOR factors do not otherwise weight RGB by alpha.
+        if ((argb >>> 24) <= 25) return 0;
+        double transmission = Math.min(1, 2 * (argb & 255) / 255.0);
+        // Remix blends decal albedo in linear space and uses a 2.2 gamma transfer.
+        // Keeping the encoded transmission as linear opacity washes out dark cracks.
+        // Brightening texels still cannot be represented by a black coverage decal.
+        return (int) Math.round(255 * (1 - Math.pow(transmission, 2.2)));
     }
 
     ByteBuffer remap(CapturedEffectBatch batch) {

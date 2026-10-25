@@ -10,19 +10,34 @@ import org.junit.Test;
 import static org.junit.Assert.*;
 
 public class DamageAtlasTest {
-    @Test public void blackAlphaPreservesTheDarkeningFactorWithoutPaintingNeutralGray() {
+    @Test public void coveragePreservesDisplaySpaceDarkeningAfterTheRuntimeGammaTransfer() {
         assertEquals(255, DamageAtlas.coverage(0xff000000));
-        assertEquals(133, DamageAtlas.coverage(0xff3d3d3d));
+        assertEquals(205, DamageAtlas.coverage(0xff3d3d3d));
         assertEquals(0, DamageAtlas.coverage(0xff9b9b9b));
         assertEquals(0, DamageAtlas.coverage(0xff808080));
         assertEquals(0, DamageAtlas.coverage(0x01ffffff));
         assertEquals(0, DamageAtlas.coverage(0x19000000));
-        assertEquals(26, DamageAtlas.coverage(0x1a000000));
-        assertEquals(27, DamageAtlas.coverage(0x1b000000));
-        assertEquals(128, DamageAtlas.coverage(0x80000000));
-        for (int gray = 0; gray < 128; gray++) {
+        assertEquals(255, DamageAtlas.coverage(0x1a000000));
+        assertEquals(255, DamageAtlas.coverage(0x1b000000));
+        assertEquals(255, DamageAtlas.coverage(0x80000000));
+        for (int gray = 0; gray <= 255; gray++) {
+            double transmission = Math.min(1, 2 * gray / 255.0);
             double retainedBase = 1 - DamageAtlas.coverage(0xff000000 | gray * 0x010101) / 255.0;
-            assertEquals(2 * gray / 255.0, retainedBase, .000001);
+            assertEquals(Math.pow(transmission, 2.2), retainedBase, .5 / 255 + 1e-12);
+            // Check the material-space multiplication, not just the lookup formula.
+            for (double displayBase : new double[] {.1, .4, 1}) {
+                double expectedLinear = Math.pow(displayBase * transmission, 2.2);
+                double actualLinear = Math.pow(displayBase, 2.2) * retainedBase;
+                assertEquals(expectedLinear, actualLinear, .5 / 255 + 1e-12);
+            }
+        }
+    }
+
+    @Test public void sourceAlphaIsOnlyTheCapturedRejectGateNotASecondBlendWeight() {
+        for (int gray : new int[] {0, 61, 100, 127, 128, 155, 255}) for (int alpha = 0; alpha <= 255; alpha++) {
+            int rgb = gray * 0x010101;
+            assertEquals(alpha <= 25 ? 0 : DamageAtlas.coverage(0xff000000 | rgb),
+                    DamageAtlas.coverage(alpha << 24 | rgb));
         }
     }
 
@@ -34,7 +49,7 @@ public class DamageAtlasTest {
         assertEquals(40, atlas.width); assertEquals(4, atlas.height);
         int pixel = (atlas.width + 13) * 4;
         assertEquals(0, atlas.pixels.get(pixel)); assertEquals(255, atlas.pixels.get(pixel + 3) & 255);
-        assertEquals(133, atlas.pixels.get(pixel + 7) & 255);
+        assertEquals(205, atlas.pixels.get(pixel + 7) & 255);
         assertEquals(255, atlas.pixels.get(12 * 4 + 3) & 255); // repeated corner padding
         CapturedEffectBatch batch = damage(.2f, .3f, .4f, .5f);
         byte[] original = new byte[batch.vertices.limit()];
