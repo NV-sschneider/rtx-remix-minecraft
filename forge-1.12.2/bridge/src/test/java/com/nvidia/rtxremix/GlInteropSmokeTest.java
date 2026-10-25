@@ -15,6 +15,7 @@ import javax.imageio.ImageIO;
 public final class GlInteropSmokeTest {
     private static native int createContext();
     private static native byte[] readImageAndVerifyState();
+    private static native float[] readDepthTexture(int texture, int width, int height);
     private static native void destroyContext();
 
     public static void main(String[] args) throws Exception {
@@ -74,6 +75,8 @@ public final class GlInteropSmokeTest {
                 api.setupCamera(camera);
                 api.submit(null);
                 InteropInfo info = api.dxvkGetInteropInfo();
+                // A temporarily absent optional image must retire only its GL import.
+                if (i == 27) info.depthImageMemory_Handle = 0;
                 long done;
                 if (i < 10) {
                     done = interop.copyToFramebuffer(info, framebuffer, 320, 240, true);
@@ -87,12 +90,16 @@ public final class GlInteropSmokeTest {
                     if (i == 29) interop.acquire(info);
                     else interop.acquireToFramebuffer(info, framebuffer, 320, 240, true);
                     BridgeContractTest.check(interop.hasAcquiredFrame(), "Split interop must retain ownership through client UI");
+                    if (i == 27) BridgeContractTest.check(interop.getDepthTexture() == 0, "Unavailable depth retained a stale GL texture");
+                    if (i == 28) verifyPrimaryDepth(interop, info);
                     try { interop.acquire(info); throw new AssertionError("Double acquire was allowed"); }
                     catch (IllegalStateException expected) { }
                     readImageAndVerifyState();
                     done = interop.finishFromFramebuffer(framebuffer, 320, 240, true);
                     BridgeContractTest.check(!interop.hasAcquiredFrame(), "Final client copy must release shared ownership");
                     BridgeContractTest.check(done == interop.releaseAcquired(), "Already released frame must not advance its semaphore");
+                    try { interop.getDepthTexture(); throw new AssertionError("Post-release depth access was allowed"); }
+                    catch (IllegalStateException expected) { }
                     try { interop.finishFromFramebuffer(framebuffer, 320, 240, true); throw new AssertionError("Post-release image write was allowed"); }
                     catch (IllegalStateException expected) { }
                 }
@@ -189,6 +196,25 @@ public final class GlInteropSmokeTest {
                 }
             }
         }
+    }
+
+    private static void verifyPrimaryDepth(LegacyGlInterop interop, InteropInfo info) {
+        int texture = interop.getDepthTexture();
+        BridgeContractTest.check(texture != 0, "Rendered frame must expose primary depth");
+        float[] depth = readDepthTexture(texture, info.depthWidth, info.depthHeight);
+        float center = depth[(info.depthHeight / 2) * info.depthWidth + info.depthWidth / 2];
+        float sky = depth[0];
+        float upper = depth[(int) (info.depthHeight * 0.30f) * info.depthWidth + (int) (info.depthWidth * 0.63f)];
+        float lower = depth[(int) (info.depthHeight * 0.70f) * info.depthWidth + (int) (info.depthWidth * 0.63f)];
+        float expected = 100f / 99.9f - 10f / (99.9f * 3f);
+        System.out.println("GPU: primary depth " + info.depthWidth + "x" + info.depthHeight
+                + " center=" + center + " expected=" + expected + " miss=" + sky
+                + " upper=" + upper + " lower=" + lower);
+        BridgeContractTest.check(Math.abs(center - expected) < 0.0001f,
+                "Primary depth must use the submitted non-reversed [0,1] projection at z=3");
+        BridgeContractTest.check(Math.abs(sky - 1f) < 0.0001f && Math.abs(upper - 1f) < 0.0001f
+                && Math.abs(lower - expected) < 0.0001f,
+                "Depth misses must be 1 and its upper/lower orientation must match native color");
     }
 
     private static ByteBuffer solidPixels(int red, int green, int blue) {
@@ -545,7 +571,12 @@ public final class GlInteropSmokeTest {
                                 InteropInfo info = api.dxvkGetInteropInfo();
                                 if (frame == 0) firstTimeline = info.dxvkDoneSemaphore_ValueToWait;
                                 lastTimeline = info.dxvkDoneSemaphore_ValueToWait;
-                                long done = interop.copyToFramebuffer(info, framebuffer, 320, 240, true);
+                                long done;
+                                if (frame == 29 && rotated == 0 && origin == 0 && baked == 1 && step == 0) {
+                                    interop.acquireToFramebuffer(info, framebuffer, 320, 240, true);
+                                    try { observeViewModelDepth(interop, info, world.parameterizedExt, 0.03f); }
+                                    finally { done = interop.releaseAcquired(); }
+                                } else done = interop.copyToFramebuffer(info, framebuffer, 320, 240, true);
                                 PresentInfo present = new PresentInfo(); present.hwndOverride = hwnd;
                                 present.skipVulkanSwapchain = 1; present.clientDoneSemaphore_ValueToWait = done; api.present(present);
                             }
@@ -586,6 +617,24 @@ public final class GlInteropSmokeTest {
             for (long mesh : meshes) if (mesh != 0) api.destroyMesh(mesh);
             if (material != 0) api.destroyMaterial(material);
         }
+    }
+
+    private static void observeViewModelDepth(LegacyGlInterop interop, InteropInfo info,
+            CameraInfoParameterizedEXT camera, float geometryDepth) {
+        int texture = interop.getDepthTexture();
+        BridgeContractTest.check(texture != 0, "Visible view model must retain the shared primary-depth image");
+        float[] depth = readDepthTexture(texture, info.depthWidth, info.depthHeight);
+        float sampled = depth[(info.depthHeight / 2) * info.depthWidth + info.depthWidth / 2];
+        float expected = camera.farPlane / (camera.farPlane - camera.nearPlane)
+                - camera.farPlane * camera.nearPlane / ((camera.farPlane - camera.nearPlane) * geometryDepth);
+        double reconstructed = camera.nearPlane * (double) camera.farPlane
+                / (camera.farPlane - sampled * (camera.farPlane - camera.nearPlane));
+        // Geometry lies before the world near plane. Observe the pinned runtime's
+        // near-depth policy without assuming that it leaves negative depth unclamped.
+        BridgeContractTest.check(Float.isFinite(sampled), "View-model depth sample must be finite");
+        System.out.println("GPU VIEW_MODEL DEPTH: geometryZ=" + geometryDepth + ", near=" + camera.nearPlane
+                + ", far=" + camera.farPlane + ", projectedGeometry=" + expected + ", sampled=" + sampled
+                + ", reconstructedZ=" + reconstructed + ", worldRange=" + (sampled > 0 && sampled < 1));
     }
 
     private static long viewModelTriangle(RemixAPI api, long material, long hash, float scale, float offset,

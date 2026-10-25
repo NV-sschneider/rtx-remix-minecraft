@@ -5,9 +5,10 @@
 package com.nvidia.rtxremix.forge.interop;
 
 import com.nvidia.rtxremix.InteropInfo;
+import com.nvidia.rtxremix.TextureFormat;
 
 /**
- * Imports a Remix color image into the current Windows OpenGL context.
+ * Imports Remix color and optional primary-depth images into the current Windows OpenGL context.
  * All methods must run on the creating render thread with that context current.
  * The bridge DLL must already be loaded through RemixAPI before use.
  */
@@ -54,7 +55,9 @@ public final class LegacyGlInterop implements AutoCloseable {
     public void acquire(InteropInfo frame) {
         validateFrame(frame);
         acquire(nativeState, frame.imageMemory_Handle, frame.allocationSize, frame.width, frame.height,
-                frame.interopImageFormat, frame.dxvkDoneSemaphore_ValueToWait, 0, 0, 0, false, false);
+                frame.interopImageFormat, frame.depthImageMemory_Handle, frame.depthAllocationSize,
+                frame.depthWidth, frame.depthHeight, frame.interopDepthImageFormat,
+                frame.dxvkDoneSemaphore_ValueToWait, 0, 0, 0, false, false);
         acquired = true;
     }
 
@@ -63,7 +66,9 @@ public final class LegacyGlInterop implements AutoCloseable {
         validateFrame(frame);
         if (width <= 0 || height <= 0) throw new IllegalArgumentException("Target framebuffer must be nonempty");
         acquire(nativeState, frame.imageMemory_Handle, frame.allocationSize, frame.width, frame.height,
-                frame.interopImageFormat, frame.dxvkDoneSemaphore_ValueToWait, targetFbo, width, height, flipY, true);
+                frame.interopImageFormat, frame.depthImageMemory_Handle, frame.depthAllocationSize,
+                frame.depthWidth, frame.depthHeight, frame.interopDepthImageFormat,
+                frame.dxvkDoneSemaphore_ValueToWait, targetFbo, width, height, flipY, true);
         acquired = true;
     }
 
@@ -84,6 +89,18 @@ public final class LegacyGlInterop implements AutoCloseable {
     }
     public boolean hasAcquiredFrame() { checkThread(); return acquired; }
 
+    /**
+     * Borrows the read-only GL_R32F primary-depth texture while this frame is acquired.
+     * Returns zero when Remix supplies no depth. Its image orientation matches the
+     * unflipped native color; consumers using a flipped color blit must flip depth UVs too.
+     * The name must not be retained past finishFromFramebuffer or releaseAcquired.
+     */
+    public int getDepthTexture() {
+        validateContext();
+        if (!acquired) throw new IllegalStateException("No acquired OpenGL interop frame");
+        return depthTexture(nativeState);
+    }
+
     private void validateFrame(InteropInfo frame) {
         checkThread();
         if (nativeState == 0) throw new IllegalStateException("OpenGL interop is closed");
@@ -95,6 +112,11 @@ public final class LegacyGlInterop implements AutoCloseable {
         if (frame.imageMemory_Handle == 0 || frame.allocationSize <= 0 || frame.width <= 0
                 || frame.height <= 0) {
             throw new IllegalArgumentException("Submit must allocate a nonempty interop color image");
+        }
+        if (frame.depthImageMemory_Handle != 0 && (frame.depthAllocationSize <= 0
+                || frame.depthWidth <= 0 || frame.depthHeight <= 0
+                || frame.interopDepthImageFormat != TextureFormat.R32_SFLOAT)) {
+            throw new IllegalArgumentException("Interop primary depth must be a nonempty R32_SFLOAT image");
         }
     }
 
@@ -116,9 +138,12 @@ public final class LegacyGlInterop implements AutoCloseable {
     private static native void validateContext(long state);
     private static native void acquire(long state, long imageHandle, long allocationSize,
                                     int imageWidth, int imageHeight, int imageFormat,
+                                    long depthHandle, long depthAllocationSize,
+                                    int depthWidth, int depthHeight, int depthFormat,
                                     long runtimeDoneValue, int targetFbo,
                                     int targetWidth, int targetHeight, boolean flipY, boolean copy);
     private static native long finish(long state, int sourceFbo, int width, int height, boolean flipY);
     private static native long release(long state);
+    private static native int depthTexture(long state);
     private static native void destroy(long state);
 }

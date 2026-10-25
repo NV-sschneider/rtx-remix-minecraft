@@ -28,6 +28,7 @@ constexpr GLenum SEMAPHORE_TYPE = 0x95B3;
 constexpr GLint SEMAPHORE_TIMELINE = 0x95B5;
 constexpr GLenum TIMELINE_VALUE = 0x9595;
 constexpr GLenum SRGB8_ALPHA8 = 0x8C43;
+constexpr GLenum R32F = 0x822E;
 constexpr GLint CLAMP_TO_EDGE = 0x812F;
 using UInt64 = std::uint64_t;
 
@@ -96,8 +97,11 @@ struct InteropState {
     DWORD ownerThread = GetCurrentThreadId();
     GLuint runtimeDone = 0, clientDone = 0;
     GLuint memory = 0, texture = 0, framebuffer = 0;
+    GLuint depthMemory = 0, depthTexture = 0;
     UInt64 imageHandle = 0, allocationSize = 0, clientValue = 0;
+    UInt64 depthHandle = 0, depthAllocationSize = 0;
     int width = 0, height = 0, format = -1;
+    int depthWidth = 0, depthHeight = 0;
     bool acquired = false;
 
     void requireOwner() const {
@@ -112,8 +116,16 @@ struct InteropState {
         framebuffer = texture = memory = 0;
         imageHandle = 0;
     }
+    void deleteDepth() {
+        if (depthTexture) glDeleteTextures(1, &depthTexture);
+        if (depthMemory) gl.deleteMemory(1, &depthMemory);
+        depthTexture = depthMemory = 0;
+        depthHandle = depthAllocationSize = 0;
+        depthWidth = depthHeight = 0;
+    }
     ~InteropState() {
         deleteImage();
+        deleteDepth();
         if (runtimeDone) gl.deleteSemaphores(1, &runtimeDone);
         if (clientDone) gl.deleteSemaphores(1, &clientDone);
     }
@@ -159,7 +171,31 @@ struct InteropState {
         height = h;
         format = imageFormat;
     }
+    void ensureDepth(UInt64 handle, UInt64 size, int w, int h, int imageFormat) {
+        if (!handle) {
+            if (depthTexture) { glFinish(); deleteDepth(); }
+            return;
+        }
+        if (imageFormat != 8 || !size || w <= 0 || h <= 0)
+            throw std::runtime_error("Unsupported Remix interop primary depth image");
+        if (depthHandle == handle && depthAllocationSize == size && depthWidth == w && depthHeight == h) return;
+        if (depthTexture) glFinish();
+        deleteDepth();
+        gl.createMemory(1, &depthMemory);
+        gl.importMemory(depthMemory, size, HANDLE_OPAQUE_WIN32, reinterpret_cast<void*>(handle));
+        checkGl("depth memory import");
+        glGenTextures(1, &depthTexture);
+        glBindTexture(GL_TEXTURE_2D, depthTexture);
+        gl.textureStorage(GL_TEXTURE_2D, 1, R32F, w, h, depthMemory, 0);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, CLAMP_TO_EDGE);
+        checkGl("depth texture storage");
+        depthHandle = handle; depthAllocationSize = size; depthWidth = w; depthHeight = h;
+    }
     void acquire(UInt64 handle, UInt64 size, int w, int h, int imageFormat,
+                 UInt64 depth, UInt64 depthSize, int depthW, int depthH, int depthFormat,
                  UInt64 runtimeValue, GLuint target, int targetW, int targetH, bool flipY, bool copyColor) {
         requireOwner();
         if (acquired) throw std::runtime_error("Previous OpenGL interop frame is still acquired");
@@ -167,9 +203,12 @@ struct InteropState {
         while (glGetError() != GL_NO_ERROR) {}
         SavedGlState saved(gl);
         ensureImage(handle, size, w, h, imageFormat);
+        ensureDepth(depth, depthSize, depthW, depthH, depthFormat);
+        const GLuint textures[] = {texture, depthTexture};
+        const GLenum layouts[] = {LAYOUT_GENERAL, LAYOUT_GENERAL};
         gl.semaphoreValue(runtimeDone, TIMELINE_VALUE, &runtimeValue);
-        gl.waitSemaphore(runtimeDone, 0, nullptr, 1, &texture, &LAYOUT_GENERAL);
-        checkGl("waiting for Remix color");
+        gl.waitSemaphore(runtimeDone, 0, nullptr, depthTexture ? 2 : 1, textures, layouts);
+        checkGl("waiting for Remix images");
         acquired = true;
         if (!copyColor) return;
         gl.bindFramebuffer(READ_FRAMEBUFFER, framebuffer);
@@ -188,8 +227,10 @@ struct InteropState {
         requireOwner();
         if (!acquired) return clientValue;
         ++clientValue;
+        const GLuint textures[] = {texture, depthTexture};
+        const GLenum layouts[] = {LAYOUT_GENERAL, LAYOUT_GENERAL};
         gl.semaphoreValue(clientDone, TIMELINE_VALUE, &clientValue);
-        gl.signalSemaphore(clientDone, 0, nullptr, 1, &texture, &LAYOUT_GENERAL);
+        gl.signalSemaphore(clientDone, 0, nullptr, depthTexture ? 2 : 1, textures, layouts);
         glFlush();
         acquired = false;
         checkGl("signaling GL completion");
@@ -255,14 +296,26 @@ Java_com_nvidia_rtxremix_forge_interop_LegacyGlInterop_create(JNIEnv* env, jclas
 extern "C" JNIEXPORT void JNICALL
 Java_com_nvidia_rtxremix_forge_interop_LegacyGlInterop_acquire(JNIEnv* env, jclass, jlong handle,
     jlong imageHandle, jlong size, jint width, jint height, jint format,
+    jlong depthHandle, jlong depthSize, jint depthWidth, jint depthHeight, jint depthFormat,
     jlong runtimeValue, jint target, jint targetWidth, jint targetHeight, jboolean flipY, jboolean copyColor) {
     try {
         auto* state = reinterpret_cast<InteropState*>(handle);
-        state->acquire(imageHandle, size, width, height, format, runtimeValue,
+        state->acquire(imageHandle, size, width, height, format,
+                       depthHandle, depthSize, depthWidth, depthHeight, depthFormat, runtimeValue,
                        target, targetWidth, targetHeight, flipY != JNI_FALSE, copyColor != JNI_FALSE);
     } catch (const std::exception& error) {
         throwJava(env, error.what());
     }
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_nvidia_rtxremix_forge_interop_LegacyGlInterop_depthTexture(JNIEnv* env, jclass, jlong handle) {
+    try {
+        auto* state = reinterpret_cast<InteropState*>(handle);
+        state->requireOwner();
+        if (!state->acquired) throw std::runtime_error("No acquired OpenGL interop frame");
+        return static_cast<jint>(state->depthTexture);
+    } catch (const std::exception& error) { throwJava(env, error.what()); return 0; }
 }
 
 extern "C" JNIEXPORT jlong JNICALL

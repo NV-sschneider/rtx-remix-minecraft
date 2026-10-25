@@ -31,7 +31,8 @@ public final class RemixCorePlugin implements IFMLLoadingPlugin {
             "com.nvidia.rtxremix.forge.core.BetterFoliageCaptureTransformer",
             "com.nvidia.rtxremix.forge.core.TerrainDrawTransformer",
             "com.nvidia.rtxremix.forge.core.WorldFallbackTransformer",
-            "com.nvidia.rtxremix.forge.core.MobHudTransformer"
+            "com.nvidia.rtxremix.forge.core.MobHudTransformer",
+            "com.nvidia.rtxremix.forge.core.FogCaptureTransformer"
         };
     }
 

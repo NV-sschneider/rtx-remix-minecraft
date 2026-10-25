@@ -98,6 +98,34 @@ Java_com_nvidia_rtxremix_GlInteropSmokeTest_readImageAndVerifyState(JNIEnv* env,
     return result;
 }
 
+extern "C" JNIEXPORT jfloatArray JNICALL
+Java_com_nvidia_rtxremix_GlInteropSmokeTest_readDepthTexture(JNIEnv* env, jclass, jint textureName,
+    jint width, jint height) {
+    if (textureName <= 0 || width <= 0 || height <= 0 || width > 4096 || height > 4096) {
+        fail(env, "Invalid depth readback dimensions or texture");
+        return nullptr;
+    }
+    GLint previous = 0;
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &previous);
+    glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(textureName));
+    GLint actualWidth = 0, actualHeight = 0, internalFormat = 0;
+    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &actualWidth);
+    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &actualHeight);
+    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_INTERNAL_FORMAT, &internalFormat);
+    if (actualWidth != width || actualHeight != height || internalFormat != 0x822E) {
+        glBindTexture(GL_TEXTURE_2D, previous);
+        fail(env, "Imported depth does not match the runtime's R32F image");
+        return nullptr;
+    }
+    std::vector<jfloat> values(static_cast<size_t>(width) * height);
+    glGetTexImage(GL_TEXTURE_2D, 0, GL_RED, GL_FLOAT, values.data());
+    glBindTexture(GL_TEXTURE_2D, previous);
+    if (glGetError() != GL_NO_ERROR) { fail(env, "Depth texture readback failed"); return nullptr; }
+    jfloatArray result = env->NewFloatArray(static_cast<jsize>(values.size()));
+    if (result) env->SetFloatArrayRegion(result, 0, static_cast<jsize>(values.size()), values.data());
+    return result;
+}
+
 extern "C" JNIEXPORT void JNICALL
 Java_com_nvidia_rtxremix_GlInteropSmokeTest_destroyContext(JNIEnv*, jclass) {
     if (context) {

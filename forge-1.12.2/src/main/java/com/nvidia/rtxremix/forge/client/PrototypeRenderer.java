@@ -82,6 +82,7 @@ final class PrototypeRenderer {
     private CloudScene clouds;
     private SkyScene sky;
     private CameraMedium medium;
+    private com.nvidia.rtxremix.forge.fog.FogScene fog;
     private WorldClient world;
     private long hwnd;
     private long frames;
@@ -172,11 +173,13 @@ final class PrototypeRenderer {
             clouds = new CloudScene(api);
             sky = new SkyScene(api);
             medium = new CameraMedium(api);
+            fog = new com.nvidia.rtxremix.forge.fog.FogScene();
         }
         if (preparedWorld != mc.world || preparedCamera == null) {
             throw new IllegalStateException("No camera was prepared for this world frame");
         }
         CameraInfo captured = preparedCamera;
+        com.nvidia.rtxremix.forge.fog.FogState capturedFog = com.nvidia.rtxremix.forge.fog.FogCaptureHooks.finishFrame();
         FirstPersonCapture.prepareCamera(captured.parameterizedExt);
         terrain.update();
         entities.sync(capturedParts);
@@ -196,6 +199,9 @@ final class PrototypeRenderer {
                 mc.displayWidth, mc.displayHeight, true); }
         finally { presentationDiagnostics.end(); }
         terrainFrame.copied();
+        // Native underwater attenuation also affects miss/sky rays, which primary depth does not describe.
+        if (!medium.isUnderwater()) fog.draw(capturedFog, interop.getDepthTexture(),
+                mc.displayWidth, mc.displayHeight, captured.parameterizedExt);
         captureTerrainFallback();
         overlayFrame.capture(mc.getFramebuffer().framebufferObject, mc.displayWidth, mc.displayHeight);
         if (++frames == 1) {
@@ -271,6 +277,9 @@ final class PrototypeRenderer {
     }
     long frameCount() { return api == null ? 0 : frames; }
     long windowChanges() { return windowChanges; }
+    long fogAppliedFrames() { return fog == null ? 0 : fog.appliedFrames(); }
+    long fogMissingDepthFrames() { return fog == null ? 0 : fog.missingDepthFrames(); }
+    com.nvidia.rtxremix.forge.fog.FogState fogState() { return fog == null ? null : fog.lastApplied(); }
     boolean terrainSuppressionRequested() { return SUPPRESS_SOLID; }
     boolean terrainSuppressionSupported() { return VanillaTerrainDraws.supported(); }
     int terrainSkippedDraws() { return terrainFrame.skipped(); }
@@ -502,6 +511,7 @@ final class PrototypeRenderer {
         ItemCaptureHooks.discard();
         EffectCaptureHooks.discard();
         CloudCaptureHooks.discard();
+        com.nvidia.rtxremix.forge.fog.FogCaptureHooks.discard();
         try { releaseScene(); }
         catch (RuntimeException | LinkageError ex) { failure = append(failure, ex); }
         try { overlayFrame.close(); }
@@ -532,6 +542,8 @@ final class PrototypeRenderer {
         Throwable failure = null;
         try { if (medium != null) { medium.close(); medium = null; } }
         catch (RuntimeException | LinkageError ex) { failure = ex; }
+        try { if (fog != null) { fog.close(); fog = null; } }
+        catch (RuntimeException | LinkageError ex) { failure = append(failure, ex); }
         try { closeAtlasBorrowers(); }
         catch (RuntimeException | LinkageError ex) { failure = append(failure, ex); }
         // Keep the borrowed atlas alive if a consumer failed to release it.

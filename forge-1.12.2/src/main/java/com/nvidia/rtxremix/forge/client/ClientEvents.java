@@ -110,6 +110,7 @@ public final class ClientEvents {
             ItemCaptureHooks.beginFrame(enabled && mc.world != null);
             EffectCaptureHooks.beginFrame(enabled && mc.world != null);
             CloudCaptureHooks.beginFrame(enabled && mc.world != null);
+            com.nvidia.rtxremix.forge.fog.FogCaptureHooks.beginFrame(enabled && mc.world != null);
             MobHudHooks.beginFrame(enabled && mc.world != null && Display.isVisible());
         } else {
             try { renderer.finishTerrainFrame(false); }
@@ -247,10 +248,14 @@ public final class ClientEvents {
         EntityCaptureHooks.discard(); ItemCaptureHooks.discard(); EffectCaptureHooks.discard();
         FastTileCaptureHooks.discard();
         CloudCaptureHooks.discard();
+        com.nvidia.rtxremix.forge.fog.FogCaptureHooks.discard();
     }
 
     long renderedFrames() { return renderer.frameCount(); }
     long windowChanges() { return renderer.windowChanges(); }
+    long fogAppliedFrames() { return renderer.fogAppliedFrames(); }
+    long fogMissingDepthFrames() { return renderer.fogMissingDepthFrames(); }
+    com.nvidia.rtxremix.forge.fog.FogState fogState() { return renderer.fogState(); }
     boolean terrainSuppressionRequested() { return renderer.terrainSuppressionRequested(); }
     boolean terrainSuppressionSupported() { return renderer.terrainSuppressionSupported(); }
     int terrainSkippedDraws() { return renderer.terrainSkippedDraws(); }
