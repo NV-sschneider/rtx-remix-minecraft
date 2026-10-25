@@ -40,6 +40,7 @@ public final class EffectCaptureHooks {
     private static final CapturedEffectBatch[] POOL = new CapturedEffectBatch[MAX_BATCHES];
     private static final EffectVertexDecoder DECODER = new EffectVertexDecoder();
     private static final PlacedBlockColors PLACED_COLORS = new PlacedBlockColors();
+    private static final DebrisCapture DEBRIS = new DebrisCapture();
     private static IBlockState placedState;
     private static IBlockAccess placedWorld;
     private static BlockPos placedPosition;
@@ -59,12 +60,14 @@ public final class EffectCaptureHooks {
     private static long placedColorQuads, lastPlacedColorQuads;
     private static long placedColorQuadTotal;
     private static long placedOpaqueCutoutQuadTotal;
+    private static long debrisQuadTotal, debrisOpaqueCutoutQuadTotal, debrisFadedQuadTotal;
 
     private EffectCaptureHooks() {}
 
     public static void beginFrame(boolean enabled) {
         discard();
         PLACED_COLORS.beginFrame();
+        DEBRIS.beginFrame();
         renderThread = Thread.currentThread();
         armed = enabled;
         world = enabled ? Minecraft.getMinecraft().world : null;
@@ -74,6 +77,7 @@ public final class EffectCaptureHooks {
     public static List<CapturedEffectBatch> finishFrame() {
         armed = false; depth = 0; texture = null;
         PLACED_COLORS.clear();
+        DEBRIS.clear();
         if (world != Minecraft.getMinecraft().world) { discard(); return VIEW; }
         if (failure != null) throw new IllegalStateException("Effect draw observation failed", failure);
         lastSkippedBatches = skippedBatches; lastSkippedQuads = skippedQuads;
@@ -88,6 +92,7 @@ public final class EffectCaptureHooks {
         lastSkippedBatches = lastSkippedQuads = 0;
         placedColorQuads = lastPlacedColorQuads = 0;
         PLACED_COLORS.clear(); placedState = null; placedWorld = null; placedPosition = null;
+        DEBRIS.clear();
     }
     public static long skippedBatchCount() { return lastSkippedBatches; }
     public static long skippedQuadCount() { return lastSkippedQuads; }
@@ -96,6 +101,17 @@ public final class EffectCaptureHooks {
     public static long placedColorQuadTotal() { return placedColorQuadTotal; }
     /** Corrected placement quads whose opaque/cutout source removed inherited particle blending. */
     public static long placedOpaqueCutoutQuadTotal() { return placedOpaqueCutoutQuadTotal; }
+    public static long debrisQuadTotal() { return debrisQuadTotal; }
+    public static long debrisOpaqueCutoutQuadTotal() { return debrisOpaqueCutoutQuadTotal; }
+    public static long debrisFadedQuadTotal() { return debrisFadedQuadTotal; }
+
+    /** Exact optional FBP digging renderer scope; smoke and other particle renderers never enter it. */
+    public static void beginDebris(Object sprite) {
+        if (observing() && depth == 1 && !damage && !weather) DEBRIS.begin(sprite);
+    }
+    public static void endDebris() {
+        if (armed && Thread.currentThread() == renderThread) DEBRIS.end();
+    }
 
     /** Original FBP call site only: preserve its draw and observe colors before vanilla bakes light into them. */
     public static boolean renderPlacedSmooth(BlockModelRenderer renderer, IBlockAccess access, IBakedModel model,
@@ -154,7 +170,7 @@ public final class EffectCaptureHooks {
     }
     public static void endPass() {
         if (!armed || Thread.currentThread() != renderThread || depth == 0) return;
-        if (--depth == 0) { texture = null; scopeValid = false; PLACED_COLORS.clear(); }
+        if (--depth == 0) { texture = null; scopeValid = false; PLACED_COLORS.clear(); DEBRIS.clear(); }
     }
 
     public static void boundTexture(Object location) {
@@ -201,11 +217,20 @@ public final class EffectCaptureHooks {
                     || !identityTextureMatrix()) { omit(attempted); return; }
         } finally { GlStateManager.setActiveTexture(oldActive); }
         boolean atlas = texture == Minecraft.getMinecraft().getTextureMapBlocks();
+        float[] spriteBounds = null;
+        boolean opaqueDebris = false, fadedDebris = false;
         if (atlas && unlitColors != null && !damage && !weather) {
             long replacement = EffectBlend.opaquePlacement(blendKey, placementCoverage);
             opaquePlacement = replacement != blendKey;
             blendKey = replacement;
-        } else opaquePlacement = false;
+        } else if (atlas && !damage && !weather) {
+            int coverage = DEBRIS.prepare(buffer);
+            spriteBounds = DEBRIS.bounds();
+            fadedDebris = DEBRIS.faded();
+            long replacement = EffectBlend.opaqueGeometry(blendKey, coverage);
+            opaqueDebris = replacement != blendKey;
+            blendKey = replacement;
+        }
         // Lit particles run before renderParticles updates these fields. Read the origin
         // that the actual particle renderer subtracted, not a newly inferred camera origin.
         double x = weather || damage ? weatherX : Particle.interpPosX;
@@ -239,11 +264,15 @@ public final class EffectCaptureHooks {
         }
         int accepted;
         try {
-            accepted = FinishedEffectBuffer.append(DECODER, buffer, unlitColors, color, RELATIVE, MAX_QUADS - quads, batch);
+            accepted = FinishedEffectBuffer.append(DECODER, buffer, unlitColors, color, RELATIVE,
+                    MAX_QUADS - quads, batch, spriteBounds);
         } catch (IllegalArgumentException unsupported) { omit(attempted); return; }
         quads += accepted;
         if (unlitColors != null) { placedColorQuads += accepted; placedColorQuadTotal += accepted; }
         if (opaquePlacement) placedOpaqueCutoutQuadTotal += accepted;
+        if (spriteBounds != null) debrisQuadTotal += accepted;
+        if (opaqueDebris) debrisOpaqueCutoutQuadTotal += accepted;
+        if (fadedDebris) debrisFadedQuadTotal += accepted;
         if (accepted != attempted) { skippedBatches++; skippedQuads += attempted - accepted; }
     }
 

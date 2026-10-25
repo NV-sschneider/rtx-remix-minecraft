@@ -30,20 +30,17 @@ final class FinishedEffectBuffer {
 
     static int append(EffectVertexDecoder decoder, BufferBuilder buffer, int[] unlitColors, int fallbackColor,
                       Matrix4f transform, int allowed, CapturedEffectBatch target) {
+        return append(decoder, buffer, unlitColors, fallbackColor, transform, allowed, target, null);
+    }
+
+    static int append(EffectVertexDecoder decoder, BufferBuilder buffer, int[] unlitColors, int fallbackColor,
+                      Matrix4f transform, int allowed, CapturedEffectBatch target, float[] spriteBounds) {
         ByteBuffer source = buffer.getByteBuffer();
         VertexFormat format = buffer.getVertexFormat();
         int vertices = buffer.getVertexCount(), stride = format.getSize();
         int position = source.position(), limit = source.limit();
-        long extent = (long) vertices * stride;
-        boolean expanded = extent > limit && buffer.getDrawMode() == 7 && vertices > 0 && vertices % 4 == 0
-                && stride == 31 && UNPADDED_PARTICLE.equals(format)
-                && source.isDirect() && source.order() == ByteOrder.nativeOrder() && position == 0
-                && limit == (long) vertices * 28 && extent <= source.capacity();
-        // Pinned finishDrawing uses vertexCount * getIntegerSize() * 4, rounding
-        // each 31-byte vertex down to 28. The uploader nevertheless passes the
-        // full 31-byte stride and vertex count to glDrawArrays. Only normalize
-        // that exact completed-buffer shape; arbitrary truncated inputs stay invalid.
-        if (expanded) source.limit((int) extent);
+        int readable = readableLimit(buffer);
+        if (readable != limit) source.limit(readable);
         try {
             int normalOffset = -1;
             boolean floatNormal = false;
@@ -58,9 +55,28 @@ final class FinishedEffectBuffer {
             }
             return decoder.append(source, vertices, buffer.getDrawMode(), stride, format.getUvOffsetById(0),
                     format.hasColor() ? format.getColorOffset() : -1, normalOffset, floatNormal,
-                    unlitColors, fallbackColor, transform, allowed, target);
+                    unlitColors, fallbackColor, transform, allowed, target, spriteBounds);
         } finally {
-            if (expanded) { source.limit(limit); source.position(position); }
+            if (readable != limit) { source.limit(limit); source.position(position); }
         }
+    }
+
+    static boolean unpaddedCube(BufferBuilder buffer) {
+        return buffer.getDrawMode() == 7 && buffer.getVertexCount() == 24
+                && UNPADDED_PARTICLE.equals(buffer.getVertexFormat());
+    }
+
+    /** The actual uploader reads this extent; arbitrary truncation remains invalid. */
+    static int readableLimit(BufferBuilder buffer) {
+        ByteBuffer source = buffer.getByteBuffer();
+        int vertices = buffer.getVertexCount(), stride = buffer.getVertexFormat().getSize();
+        long extent = (long) vertices * stride;
+        // Pinned finishDrawing rounds each 31-byte vertex down to 28, while
+        // glDrawArrays still consumes the full vertex stride and count.
+        return extent > source.limit() && buffer.getDrawMode() == 7 && vertices > 0 && vertices % 4 == 0
+                && stride == 31 && UNPADDED_PARTICLE.equals(buffer.getVertexFormat())
+                && source.isDirect() && source.order() == ByteOrder.nativeOrder() && source.position() == 0
+                && source.limit() == (long) vertices * 28 && extent <= source.capacity()
+                ? (int) extent : source.limit();
     }
 }

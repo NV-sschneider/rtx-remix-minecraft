@@ -29,6 +29,13 @@ final class EffectVertexDecoder {
     int append(ByteBuffer source, int vertices, int mode, int stride, int uvOffset, int colorOffset,
                int normalOffset, boolean floatNormal, int[] unlitColors, int fallbackColor,
                Matrix4f transform, int allowedQuads, CapturedEffectBatch target) {
+        return append(source, vertices, mode, stride, uvOffset, colorOffset, normalOffset, floatNormal,
+                unlitColors, fallbackColor, transform, allowedQuads, target, null);
+    }
+
+    int append(ByteBuffer source, int vertices, int mode, int stride, int uvOffset, int colorOffset,
+               int normalOffset, boolean floatNormal, int[] unlitColors, int fallbackColor,
+               Matrix4f transform, int allowedQuads, CapturedEffectBatch target, float[] spriteBounds) {
         int primitives = primitiveCount(mode, vertices), corners = mode == 7 ? 4 : 3;
         if (primitives < 0 || target.triangles != (mode != 7) || stride < 20 || uvOffset < 12
                 || uvOffset + 8 > stride || colorOffset < -1 || colorOffset + 4 > stride
@@ -89,6 +96,14 @@ final class EffectVertexDecoder {
                 float length = (float) Math.sqrt(nx * nx + ny * ny + nz * nz);
                 if (!Float.isFinite(length) || length < 0.000001f) continue;
                 nx /= length; ny /= length; nz /= length;
+                // Keep atlas sampling inside the actual source sprite. Each
+                // cube face can use only a small part of that sprite's image.
+                if (spriteBounds != null && spriteBounds.length == 4
+                        && minU >= spriteBounds[0] && minV >= spriteBounds[1]
+                        && maxU <= spriteBounds[2] && maxV <= spriteBounds[3]) {
+                    minU = spriteBounds[0]; minV = spriteBounds[1];
+                    maxU = spriteBounds[2]; maxV = spriteBounds[3];
+                }
                 int minimum = HardcodedVertex.packHalf2x16(minU, minV), maximum = HardcodedVertex.packHalf2x16(maxU, maxV);
                 for (int v = 0; v < corners; v++) {
                     int n = v * 3;

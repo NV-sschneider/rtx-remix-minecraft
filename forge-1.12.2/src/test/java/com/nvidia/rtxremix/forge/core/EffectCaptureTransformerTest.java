@@ -31,6 +31,8 @@ public class EffectCaptureTransformerTest {
     private static final String DAMAGE_DESC = "(Lnet/minecraft/client/renderer/Tessellator;Lnet/minecraft/client/renderer/BufferBuilder;Lnet/minecraft/entity/Entity;F)V";
     private static final String UPLOADER = "net/minecraft/client/renderer/WorldVertexBufferUploader";
     private static final String TEXTURES = "net/minecraft/client/renderer/texture/TextureManager";
+    private static final String DEBRIS = "com/TominoCZ/FBP/particle/FBPParticleDigging";
+    private static final String DEBRIS_DESC = "(Lnet/minecraft/client/renderer/BufferBuilder;Lnet/minecraft/entity/Entity;FFFFFF)V";
     private static final String PARTICLE_DESC = "(Lnet/minecraft/entity/Entity;F)V";
     private static final String BUFFER_DESC = "(Lnet/minecraft/client/renderer/BufferBuilder;)V";
     private static final String TEXTURE_DESC = "(Lnet/minecraft/util/ResourceLocation;)V";
@@ -128,6 +130,33 @@ public class EffectCaptureTransformerTest {
         assertEquals(2, hooks.getField("ends").getInt(null));
     }
 
+    @Test public void realJvmClosesOptionalDebrisScopeOnEarlyReturnAndFailureForBothFieldMappings() throws Exception {
+        for (String field : new String[] {"particleTexture", "field_187119_C"}) {
+            byte[] patched = transform(DEBRIS, debrisFixture(field, true));
+            verify(read(patched)); assertArrayEquals(patched, transform(DEBRIS, patched));
+            FixtureLoader loader = new FixtureLoader();
+            loader.add(DEBRIS, patched); loader.add(HOOKS, hooksFixture());
+            Class<?> type = loader.loadClass(DEBRIS.replace('/', '.')), hooks = loader.loadClass(HOOKS.replace('/', '.'));
+            java.lang.reflect.Method render = type.getMethod("renderParticle", net.minecraft.client.renderer.BufferBuilder.class,
+                    net.minecraft.entity.Entity.class, float.class, float.class, float.class, float.class, float.class, float.class);
+            Object particle = type.newInstance();
+            render.invoke(particle, null, null, 0f, 0f, 0f, 0f, 0f, 0f);
+            assertEquals(1, hooks.getField("begins").getInt(null)); assertEquals(1, hooks.getField("ends").getInt(null));
+            try { render.invoke(particle, null, null, 1f, 0f, 0f, 0f, 0f, 0f); fail(); }
+            catch (InvocationTargetException expected) { assertTrue(expected.getCause() instanceof IllegalArgumentException); }
+            assertEquals(2, hooks.getField("begins").getInt(null)); assertEquals(2, hooks.getField("ends").getInt(null));
+        }
+    }
+
+    @Test public void unknownDebrisSpriteFieldAndUnrelatedSmokeNeverAcquireAnOpacityScope() {
+        byte[] absent = debrisFixture("particleTexture", false);
+        assertArrayEquals(absent, transform(DEBRIS, absent));
+        byte[] unknown = debrisFixture("customSprite", true);
+        assertArrayEquals(unknown, transform(DEBRIS, unknown));
+        byte[] smoke = debrisFixture("particleTexture", true);
+        assertArrayEquals(smoke, transform("com/TominoCZ/FBP/particle/FBPParticleSmokeNormal", smoke));
+    }
+
     private byte[] transform(String name, byte[] bytes) { return transformer.transform("obfuscated", name.replace('/', '.'), bytes); }
     private static byte[] bytes(String name) throws Exception {
         try (InputStream input = EffectCaptureTransformerTest.class.getClassLoader().getResourceAsStream(name + ".class")) {
@@ -173,15 +202,32 @@ public class EffectCaptureTransformerTest {
     }
     private static byte[] hooksFixture() {
         ClassWriter writer = fixture(HOOKS);
-        String[] names = {"beginWeather", "endPass"}, descriptors = {"(F)V", "()V"}, fields = {"begins", "ends"};
+        String[] names = {"beginWeather", "endPass", "beginDebris", "endDebris"};
+        String[] descriptors = {"(F)V", "()V", "(Ljava/lang/Object;)V", "()V"}, fields = {"begins", "ends", "begins", "ends"};
         for (int i = 0; i < names.length; i++) {
-            writer.visitField(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, fields[i], "I", null, null).visitEnd();
+            if (i < 2) writer.visitField(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, fields[i], "I", null, null).visitEnd();
             MethodVisitor method = writer.visitMethod(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, names[i], descriptors[i], null, null);
             method.visitCode(); method.visitFieldInsn(Opcodes.GETSTATIC, HOOKS, fields[i], "I"); method.visitInsn(Opcodes.ICONST_1);
             method.visitInsn(Opcodes.IADD); method.visitFieldInsn(Opcodes.PUTSTATIC, HOOKS, fields[i], "I");
             method.visitInsn(Opcodes.RETURN); method.visitMaxs(0, 0); method.visitEnd();
         }
         writer.visitEnd(); return writer.toByteArray();
+    }
+    private static byte[] debrisFixture(String field, boolean readsSprite) {
+        ClassWriter writer = fixture(DEBRIS);
+        String sprite = "Lnet/minecraft/client/renderer/texture/TextureAtlasSprite;";
+        writer.visitField(Opcodes.ACC_PRIVATE, field, sprite, null, null).visitEnd();
+        MethodVisitor method = writer.visitMethod(Opcodes.ACC_PUBLIC, "renderParticle", DEBRIS_DESC, null, null);
+        method.visitCode();
+        if (readsSprite) {
+            method.visitVarInsn(Opcodes.ALOAD, 0); method.visitFieldInsn(Opcodes.GETFIELD, DEBRIS, field, sprite);
+            method.visitInsn(Opcodes.POP);
+        }
+        method.visitVarInsn(Opcodes.FLOAD, 3); method.visitInsn(Opcodes.FCONST_0); method.visitInsn(Opcodes.FCMPL);
+        Label throwing = new Label(); method.visitJumpInsn(Opcodes.IFNE, throwing); method.visitInsn(Opcodes.RETURN);
+        method.visitLabel(throwing); method.visitTypeInsn(Opcodes.NEW, "java/lang/IllegalArgumentException"); method.visitInsn(Opcodes.DUP);
+        method.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/IllegalArgumentException", "<init>", "()V", false);
+        method.visitInsn(Opcodes.ATHROW); method.visitMaxs(0, 0); method.visitEnd(); writer.visitEnd(); return writer.toByteArray();
     }
     private static final class FixtureLoader extends ClassLoader {
         final Map<String, byte[]> definitions = new HashMap<String, byte[]>();
