@@ -220,6 +220,7 @@ final class PrototypeRenderer {
         RemixAPI.redactCommandLineOptions(runtime.getAbsolutePath(), Arrays.asList(
                 "--username", "--accessToken", "--uuid", "--xuid", "--clientId"));
         api = RemixAPI.load(runtime.getAbsolutePath());
+        com.nvidia.rtxremix.forge.overlay.FullscreenPresentation.prepare(mc);
         hwnd = LegacyGlInterop.currentWindowHandle();
         api.startup(StartupInfo.builder().hwnd(hwnd).forceNoVkSwapchain(false).interopImage(true)
                 .combineGuiInFinalColor(true).build());
@@ -584,8 +585,10 @@ final class PrototypeRenderer {
 
     /** Remix shutdown must run after the HWND has been destroyed. */
     void afterDisplayDestroy() {
-        if (api != null) {
-            try { api.shutdown(); } finally { api = null; }
-        }
+        try {
+            if (api != null) {
+                try { api.shutdown(); } finally { api = null; }
+            }
+        } finally { com.nvidia.rtxremix.forge.overlay.FullscreenPresentation.afterShutdown(); }
     }
 }

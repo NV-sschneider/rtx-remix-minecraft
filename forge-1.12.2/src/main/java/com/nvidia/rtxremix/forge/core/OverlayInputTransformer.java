@@ -43,6 +43,8 @@ public final class OverlayInputTransformer implements IClassTransformer {
                     changed |= head(method, "beginFrame"); changed |= beforePresent(method);
                 }
                 if (named(method.name, "updateDisplay", "func_175601_h")) changed |= display(method);
+                if (named(method.name, "toggleFullscreen", "func_71352_k")
+                        || named(method.name, "updateDisplayMode", "func_110441_Q")) changed |= fullscreen(method);
                 if (named(method.name, "runTickKeyboard", "func_184118_az")) changed |= events(method, "Keyboard", "nextKeyboardEvent");
                 if (named(method.name, "runTickMouse", "func_184124_aB")) changed |= events(method, "Mouse", "nextMouseEvent");
                 if (named(method.name, "processKeyBinds", "func_184117_aA") || named(method.name, "setIngameFocus", "func_71381_h")) changed |= guard(method, false);
@@ -96,6 +98,28 @@ public final class OverlayInputTransformer implements IClassTransformer {
             }
         }
         if (sites != 1) throw new IllegalStateException("Expected one Display.update call, found " + sites);
+        return true;
+    }
+
+    private static boolean fullscreen(MethodNode method) {
+        String owner = "com/nvidia/rtxremix/forge/overlay/FullscreenPresentation";
+        int modes = 0, toggles = 0, resize = 0;
+        for (AbstractInsnNode instruction : method.instructions.toArray()) if (instruction instanceof MethodInsnNode) {
+            MethodInsnNode call = (MethodInsnNode) instruction;
+            if (owner.equals(call.owner)) return false;
+            if (call.getOpcode() != Opcodes.INVOKESTATIC || !"org/lwjgl/opengl/Display".equals(call.owner)) continue;
+            if ("setDisplayMode".equals(call.name) && "(Lorg/lwjgl/opengl/DisplayMode;)V".equals(call.desc)) {
+                method.instructions.insertBefore(call, new VarInsnNode(Opcodes.ALOAD, 0));
+                method.instructions.set(call, new MethodInsnNode(Opcodes.INVOKESTATIC, owner, call.name,
+                        "(Lorg/lwjgl/opengl/DisplayMode;Lnet/minecraft/client/Minecraft;)V", false)); modes++;
+            } else if ("(Z)V".equals(call.desc) && ("setFullscreen".equals(call.name) || "setResizable".equals(call.name))) {
+                if ("setFullscreen".equals(call.name)) toggles++; else resize++;
+                method.instructions.set(call, new MethodInsnNode(Opcodes.INVOKESTATIC, owner, call.name, call.desc, false));
+            }
+        }
+        boolean toggle = named(method.name, "toggleFullscreen", "func_71352_k");
+        if (modes != 1 || toggles != (toggle ? 1 : 0) || resize != (toggle ? 2 : 0))
+            throw new IllegalStateException("Unexpected pinned fullscreen display calls in " + method.name);
         return true;
     }
 

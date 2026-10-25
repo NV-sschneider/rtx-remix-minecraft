@@ -31,6 +31,23 @@ public class OverlayInputTransformerTest {
     private static final String BUTTON = "net/minecraft/client/gui/GuiButton", HOOKS = "com/nvidia/rtxremix/forge/overlay/OverlayHooks";
     private final OverlayInputTransformer transformer = new OverlayInputTransformer();
 
+    @Test public void fullscreenRedirectsOnlyDisplayMutationsAndRetainsMinecraftResizeSettingsAndVsync() throws Exception {
+        String fullscreen = "com/nvidia/rtxremix/forge/overlay/FullscreenPresentation";
+        for (boolean srg : new boolean[] {false, true}) {
+            ClassNode source = read(bytes(MC));
+            String toggle = srg ? "func_71352_k" : "toggleFullscreen", mode = srg ? "func_110441_Q" : "updateDisplayMode";
+            method(source, "toggleFullscreen", "()V").name = toggle; method(source, "updateDisplayMode", "()V").name = mode;
+            byte[] patched = transform(MC, write(source)); ClassNode type = read(patched); verify(type);
+            MethodNode change = method(type, toggle, "()V"), choose = method(type, mode, "()V");
+            assertEquals(1, calls(change, fullscreen, "setDisplayMode")); assertEquals(1, calls(choose, fullscreen, "setDisplayMode"));
+            assertEquals(1, calls(change, fullscreen, "setFullscreen")); assertEquals(2, calls(change, fullscreen, "setResizable"));
+            assertEquals(0, calls(change, "org/lwjgl/opengl/Display", "setFullscreen"));
+            assertEquals(1, calls(change, MC, "resize")); assertEquals(1, calls(change, MC, "updateFramebufferSize"));
+            assertEquals(1, calls(change, MC, "updateDisplay")); assertEquals(1, calls(change, "org/lwjgl/opengl/Display", "setVSyncEnabled"));
+            assertArrayEquals(patched, transform(MC, patched));
+        }
+    }
+
     @Test public void pinnedConsumersAreGatedAndPresentRunsAfterTheLastVanillaUi() throws Exception {
         byte[] base = bytes(MC);
         byte[] lifecycle = new DisplayLifecycleTransformer().transform("bib", MC.replace('/', '.'), base);
